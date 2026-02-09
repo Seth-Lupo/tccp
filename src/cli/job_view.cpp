@@ -346,14 +346,20 @@ Result<int> JobView::attach(bool skip_remote_replay) {
             if (libssh2_channel_read(channel, buf, sizeof(buf)) <= 0) break;
         }
 
+        // Position exit prompt within the scroll region (above header)
+        struct winsize ews;
+        int erows = 24;
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ews) == 0 && ews.ws_row > 0)
+            erows = ews.ws_row;
+        int prompt_row = std::max(1, erows - HEADER_ROWS);
+
         std::string exit_msg;
         if (exit_status == 0)
-            exit_msg = "\r\n\033[2m[exit 0]\033[0m  \033[2mPress Enter to leave...\033[0m";
+            exit_msg = fmt::format("\033[{};1H\033[2m[exit 0]\033[0m  \033[2mPress Enter to leave...\033[0m", prompt_row);
         else
-            exit_msg = fmt::format(
-                "\r\n\033[91m[exit {}]\033[0m  \033[2mPress Enter to leave...\033[0m",
-                exit_status);
+            exit_msg = fmt::format("\033[{};1H\033[91m[exit {}]\033[0m  \033[2mPress Enter to leave...\033[0m", prompt_row, exit_status);
         write(STDOUT_FILENO, exit_msg.data(), exit_msg.size());
+        draw_header();
 
         for (;;) {
             char c;

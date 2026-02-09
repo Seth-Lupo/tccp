@@ -7,6 +7,9 @@
 #include <optional>
 #include <core/config.hpp>
 #include <ssh/cluster_connection.hpp>
+#include <managers/state_store.hpp>
+#include <managers/allocation_manager.hpp>
+#include <managers/sync_manager.hpp>
 #include <managers/job_manager.hpp>
 
 class BaseCLI {
@@ -32,6 +35,9 @@ public:
     // Public state
     std::optional<Config> config;
     std::unique_ptr<ClusterConnection> cluster;
+    std::unique_ptr<StateStore> state_store;
+    std::unique_ptr<AllocationManager> allocs;
+    std::unique_ptr<SyncManager> sync;
     std::unique_ptr<JobManager> jobs;
 
     // Returns the prompt string for readline

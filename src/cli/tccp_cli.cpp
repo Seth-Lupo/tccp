@@ -31,11 +31,41 @@ void TCCPCLI::register_all_commands() {
         exit(0);
     }, "Exit TCCP");
 
+    add_command("clear", [](BaseCLI& cli, const std::string& arg) {
+        std::cout << "\033[2J\033[H" << std::flush;
+    }, "Clear the screen");
+
     register_connection_commands(*this);
     register_jobs_commands(*this);
     register_shell_commands(*this);
     register_setup_commands(*this);
     register_credentials_commands(*this);
+
+#ifdef TCCP_DEV
+    add_command("debug", [](BaseCLI& cli, const std::string& arg) {
+        if (arg == "clean-state") {
+            if (!cli.state_store) {
+                std::cout << theme::fail("No project loaded.");
+                return;
+            }
+            ProjectState empty;
+            cli.state_store->save(empty);
+            // Reset in-memory managers
+            if (cli.allocs) {
+                cli.allocs->state() = empty;
+            }
+            if (cli.jobs) {
+                // Clear tracked jobs by reinitializing managers
+                cli.clear_managers();
+                cli.init_managers();
+            }
+            std::cout << theme::ok("State wiped. All allocations and jobs forgotten.");
+        } else {
+            std::cout << theme::fail("Unknown debug command: " + arg);
+            std::cout << theme::step("Available: debug clean-state");
+        }
+    }, "Dev debugging commands");
+#endif
 }
 
 void TCCPCLI::run_connected_repl() {

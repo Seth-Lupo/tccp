@@ -91,6 +91,8 @@ struct SlurmDefaults {
 struct JobConfig {
     std::string script;
     std::string args;
+    std::string time;                            // job time limit, default "1:00:00"
+    std::optional<SlurmDefaults> slurm;          // per-job SLURM overrides
 };
 
 struct ProjectConfig {
@@ -101,6 +103,7 @@ struct ProjectConfig {
     std::map<std::string, std::string> environment;
     std::map<std::string, JobConfig> jobs;
     std::map<std::string, std::string> rodata;
+    std::optional<SlurmDefaults> slurm;          // project-level SLURM defaults
 };
 
 // Status callback for operations

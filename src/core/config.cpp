@@ -64,7 +64,7 @@ static LoginConfig parse_login_config(const YAML::Node& node) {
 
 static SlurmDefaults parse_slurm_config(const YAML::Node& node) {
     SlurmDefaults slurm;
-    slurm.partition = node["partition"].as<std::string>("default");
+    slurm.partition = node["partition"].as<std::string>("batch");
     slurm.time = node["time"].as<std::string>("00:30:00");
     slurm.nodes = node["nodes"].as<int>(1);
     slurm.cpus_per_task = node["cpus_per_task"].as<int>(1);
@@ -89,6 +89,10 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
         }
     }
 
+    if (node["slurm"] && node["slurm"].IsMap()) {
+        project.slurm = parse_slurm_config(node["slurm"]);
+    }
+
     if (node["jobs"] && node["jobs"].IsMap()) {
         for (const auto& job_kv : node["jobs"]) {
             std::string job_name = job_kv.first.as<std::string>();
@@ -97,6 +101,10 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
             if (job_kv.second.IsMap()) {
                 jc.script = job_kv.second["script"].as<std::string>("");
                 jc.args = job_kv.second["args"].as<std::string>("");
+                jc.time = job_kv.second["time"].as<std::string>("");
+                if (job_kv.second["slurm"] && job_kv.second["slurm"].IsMap()) {
+                    jc.slurm = parse_slurm_config(job_kv.second["slurm"]);
+                }
             }
             project.jobs[job_name] = jc;
         }

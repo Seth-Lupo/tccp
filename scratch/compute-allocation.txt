@@ -1,1 +1,23 @@
-I want you please make actua
+I want you please make actually almost detach the initialization logic, to make STUFF FASTER, more efficient, and actually reuse instances AND NOT DESTROYING AFTER EVERY job run. 
+
+I WANT JOBS to outlive  tccp reboot and connection breakdown.
+
+I WANT INSTANVE RESERVATIONS to outlive job termination.
+
+I also want each project to specfically use a specific srun setting. individual jobs can have a specific srun setting, but we default to the project srun. This is declared in the project tccp.yaml.
+
+Upon the termination of a job, i want the reserved instance to outlive the job. I want tccp to hold a reference to all the systems they held. If a job is requested, and there is a system being held which is free, I want you to use this system.
+
+NOTE some basic logic, each system should have a default lifetime, a lifetime of the allocation (lets say default 4 hours). Also, Each job by default should have a default time (by default 1 hour). We only reuse system if there is enough time left, otherwise destroy and reinitiate.
+
+But we are almost becoming a managemnt layer here. 
+
+I also want the file syncing to become more efficient. ALWAYS ASSUME LOCAL IS SOURCE OF TRUTH. However, if something if the code has been synced somewhere on the remote system. (from recent job, for both the true code or any of the rodata subdirectories) then please copy it first to the directory its supposed to go, but then, TO MAKE SURE IT IS TRUELY UPDATED, you truely sync it to what is local.
+
+Note that as a rule of thumb, one system should correspond to one job at a time. If another job is being ran while one job is still going one, you will need a new system
+
+Goal is to be lazy with files, BUT ALWAYS MAKE SURE THERE IS A TRUE SYNC.
+
+treat systems as daemons which we are explicitly managing so the user doesnt have to. Such management should persist the program closing, people might run long jobs with this software.
+
+Also quick fix: /cluster/home/slupo01/tccp/<project>/<jobid> should actually be /cluster/home/slupo01/tccp/projects/<project>/output/<jobid> and the env to go at /cluster/home/slupo01/tccp/projects/env  also /cluster/home/<username>/tccp/container-cache to be the new place for the container cache. this is to aid oganization and add long term organization

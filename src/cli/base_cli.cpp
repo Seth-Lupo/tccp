@@ -37,12 +37,21 @@ bool BaseCLI::require_connection() {
 
 void BaseCLI::init_managers() {
     if (config && cluster && cluster->is_connected()) {
-        jobs = std::make_unique<JobManager>(config.value(), cluster->dtn(), cluster->login());
+        state_store = std::make_unique<StateStore>(config.value().project().name);
+        allocs = std::make_unique<AllocationManager>(
+            config.value(), cluster->dtn(), cluster->login(), *state_store);
+        allocs->reconcile();
+        sync = std::make_unique<SyncManager>(config.value(), cluster->dtn());
+        jobs = std::make_unique<JobManager>(
+            config.value(), cluster->dtn(), cluster->login(), *allocs, *sync);
     }
 }
 
 void BaseCLI::clear_managers() {
     jobs.reset();
+    sync.reset();
+    allocs.reset();
+    state_store.reset();
 }
 
 void BaseCLI::execute_command(const std::string& command, const std::string& args) {
@@ -63,11 +72,15 @@ void BaseCLI::execute_command(const std::string& command, const std::string& arg
 void BaseCLI::print_help() const {
     // Group commands by category
     std::vector<std::pair<std::string, std::vector<std::string>>> categories = {
-        {"Connection", {"status", "disconnect"}},
-        {"Jobs",       {"run", "view", "jobs", "cancel", "return"}},
-        {"Shell",      {"shell", "exec"}},
-        {"Setup",      {"init", "register", "credentials"}},
-        {"General",    {"help", "quit", "exit"}},
+        {"Connection",   {"status", "disconnect"}},
+        {"Jobs",         {"run", "view", "jobs", "cancel", "return"}},
+        {"Allocations",  {"allocs", "dealloc"}},
+        {"Shell",        {"shell", "exec"}},
+        {"Setup",        {"init", "register", "credentials"}},
+        {"General",      {"help", "clear", "quit", "exit"}},
+#ifdef TCCP_DEV
+        {"Dev",          {"debug"}},
+#endif
     };
 
     for (const auto& [cat_name, cmd_names] : categories) {
