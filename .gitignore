@@ -1,0 +1,17 @@
+build/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+cmake-build-debug/
+cmake-build-release/
+*.o
+*.a
+*.so
+*.dylib
+.env
+.venv
+vcpkg_installed/
+.cache/

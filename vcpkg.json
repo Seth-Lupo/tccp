@@ -1,0 +1,13 @@
+{
+  "name": "tccp",
+  "version-string": "0.3.0",
+  "description": "TCCP - Tufts Cluster Command Prompt",
+  "homepage": "https://github.com/sethlupo/tccp",
+  "license": "MIT",
+  "dependencies": [
+    "libssh2",
+    "yaml-cpp",
+    "cli11",
+    "fmt"
+  ]
+}

@@ -1,0 +1,71 @@
+name: Build Binaries
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            triplet: x64-linux
+            artifact: tccp-linux-x64
+          - os: windows-latest
+            triplet: x64-windows-static
+            artifact: tccp-windows-x64.exe
+          - os: macos-latest
+            triplet: arm64-osx
+            artifact: tccp-macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgDirectory: ${{ github.workspace }}/vcpkg
+        appendedCacheKey: ${{ matrix.triplet }}
+        additionalCachedPaths: ${{ github.workspace }}/build
+
+    - name: Configure CMake
+      run: |
+        cmake -B build -S . \
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake \
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+          -DTCCP_STATIC_BUILD=ON \
+          -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: Strip binary (Unix)
+      if: runner.os != 'Windows'
+      run: strip build/tccp || true
+
+    - name: Test binary
+      run: ./build/tccp --version
+      shell: bash
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.artifact }}
+        path: build/tccp${{ runner.os == 'Windows' && '.exe' || '' }}
+
+    - name: Release binary
+      if: github.event_name == 'release'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: build/tccp${{ runner.os == 'Windows' && '.exe' || '' }}
+        asset_name: ${{ matrix.artifact }}
+        asset_content_type: application/octet-stream
