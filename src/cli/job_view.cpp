@@ -209,9 +209,12 @@ static void redraw_viewport(const std::vector<std::string>& output_lines, int sc
     int start_line = std::max(0, end_line - height);
 
     // Show scroll indicator at top if we're scrolled back and at the beginning
-    if (scroll_offset > 0 && start_line == 0) {
+    bool showing_top_indicator = (scroll_offset > 0 && start_line == 0);
+    if (showing_top_indicator) {
         std::string indicator = "\033[2m[TOP]\033[0m\n";
         write(STDOUT_FILENO, indicator.c_str(), indicator.size());
+        // [TOP] takes up one line, reduce content range to fit viewport
+        if (end_line > start_line) end_line--;
     }
 
     // Draw visible lines (they already contain their newlines)
@@ -423,15 +426,13 @@ Result<int> JobView::attach(bool skip_remote_replay) {
 
                     if (seq == 'A') {  // Up arrow - scroll back to view older output
                         in_scroll_mode = true;
-                        // Max scroll: when start_line = 0
-                        // end_line = total - scroll_offset
-                        // start_line = end_line - height = total - scroll_offset - height
-                        // For start_line = 0: total - scroll_offset - height = 0
-                        // Therefore: scroll_offset = total - height
                         int height = get_scroll_height();
                         int total = output_lines.size();
-                        int max_scroll = std::max(0, total - height);
-                        if (scroll_offset < total - 1) {  // Can always scroll to see line 0
+                        // Max scroll: [TOP] indicator takes 1 line, so we can show (height-1) content lines
+                        // To see line 0: end_line = height, start = 0, showing [TOP] + lines 0..(height-2)
+                        // Therefore: total - scroll_offset = height → scroll_offset = total - height + 1
+                        int max_scroll = std::max(0, total - height + 1);
+                        if (scroll_offset < max_scroll) {
                             scroll_offset++;
                             redraw_viewport(output_lines, scroll_offset);
                         }
@@ -614,7 +615,7 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                 char seq[2];
                 if (read(STDIN_FILENO, &seq, 2) == 2 && seq[0] == '[') {
                     if (seq[1] == 'A') {  // Up arrow
-                        int max_scroll = std::max(0, (int)output_lines.size() - get_scroll_height());
+                        int max_scroll = std::max(0, (int)output_lines.size() - get_scroll_height() + 1);
                         if (post_scroll_offset < max_scroll) {
                             post_scroll_offset++;
                             redraw_viewport(output_lines, post_scroll_offset);
