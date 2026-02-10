@@ -42,6 +42,9 @@ public:
     const std::vector<AllocationState>& allocations() const { return state_.allocations; }
     ProjectState& state() { return state_; }
 
+    // Persist state to disk
+    void persist();
+
     // Resolve SLURM profile: job overrides > project > global
     SlurmDefaults resolve_profile(const std::string& job_name) const;
 
@@ -60,6 +63,4 @@ private:
     std::string generate_alloc_script(const SlurmDefaults& profile) const;
     std::string persistent_base() const;
     std::string container_cache() const;
-
-    void persist();
 };

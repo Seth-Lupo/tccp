@@ -14,6 +14,7 @@ bool SSHConnection::is_active() const {
 }
 
 SSHResult SSHConnection::run(const std::string& command) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!channel_) {
         return SSHResult{-1, "", "No channel available"};
     }

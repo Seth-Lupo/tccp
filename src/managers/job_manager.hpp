@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <core/config.hpp>
 #include <ssh/connection.hpp>
 #include "allocation_manager.hpp"
@@ -17,6 +19,10 @@ struct TrackedJob {
     int exit_code = -1;       // -1 = unknown/still running
     std::string output_file;  // local path to captured output
     std::string scratch_path; // /tmp/{user}/{project}/{job_id}
+
+    // Init tracking (for background initialization)
+    bool init_complete = false;      // true when job is launched on compute node
+    std::string init_error;           // error message if init failed
 };
 
 class JobManager {
@@ -43,6 +49,8 @@ private:
     SyncManager& sync_;
     std::string username_;
     std::vector<TrackedJob> tracked_;
+    std::mutex tracked_mutex_;
+    std::vector<std::thread> init_threads_;
 
     // Path helpers (new directory structure)
     std::string persistent_base() const;
@@ -62,6 +70,9 @@ private:
                                  const std::string& compute_node,
                                  const std::string& scratch,
                                  StatusCallback cb);
+
+    // Background init thread (does allocation, sync, launch)
+    void background_init_thread(std::string job_id, std::string job_name);
 
     // Polling helpers
     struct SlurmJobState {

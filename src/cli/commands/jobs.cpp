@@ -11,6 +11,7 @@
 #include <sys/ioctl.h>
 #include <fmt/format.h>
 #include <fstream>
+#include <sstream>
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -189,6 +190,8 @@ static bool attach_to_job(BaseCLI& cli, TrackedJob* tracked,
 
 // ── Commands ────────────────────────────────────────────────
 
+static void do_view(BaseCLI& cli, const std::string& arg);  // forward decl
+
 static void do_run(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
     if (!cli.jobs) return;
@@ -199,92 +202,27 @@ static void do_run(BaseCLI& cli, const std::string& arg) {
     }
 
     auto* existing = cli.jobs->find_by_name(arg);
-    if (existing && !existing->completed) {
-        std::cout << theme::fail(fmt::format("Job '{}' is already running (SLURM:{}). "
-            "Cancel it first or wait for it to finish.", arg, existing->slurm_id));
+    if (existing && !existing->completed && existing->init_error.empty()) {
+        if (!existing->init_complete) {
+            std::cout << theme::fail(fmt::format("Job '{}' is still initializing. "
+                "Use 'view {}' to check progress.", arg, arg));
+        } else {
+            std::cout << theme::fail(fmt::format("Job '{}' is already running. "
+                "Cancel it first or wait for it to finish.", arg));
+        }
         return;
     }
 
-    // Enter alt screen immediately — everything happens here
-    enter_alt_screen();
-    draw_header(arg, "Initializing...");
-    setup_content_area();
-
-    // Capture file for init logs + job output (keyed on job name temporarily)
-    std::string output_path = output_path_for(arg);
-    FILE* init_capture = fopen(output_path.c_str(), "w");
-
-    // Raw terminal so Ctrl+\ works during init
-    struct termios old_term, raw_term;
-    tcgetattr(STDIN_FILENO, &old_term);
-    raw_term = old_term;
-    raw_term.c_lflag &= ~(ICANON | ECHO | ISIG);
-    raw_term.c_cc[VMIN] = 0;
-    raw_term.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_term);
-
-    bool detached = false;
-    auto cb = [&init_capture, &detached](const std::string& msg) {
-        std::cout << theme::log(msg) << std::flush;
-        if (init_capture) {
-            std::string plain = msg + "\n";
-            fwrite(plain.data(), 1, plain.size(), init_capture);
-            fflush(init_capture);
-        }
-        // Check for Ctrl+backslash
-        struct pollfd pfd = {STDIN_FILENO, POLLIN, 0};
-        if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
-            char c;
-            if (read(STDIN_FILENO, &c, 1) == 1 && c == 0x1c)
-                detached = true;
-        }
-    };
-
-    auto result = cli.jobs->run(arg, cb);
-
-    // Restore terminal
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
-
-    if (init_capture) { fclose(init_capture); init_capture = nullptr; }
-
-    if (detached) {
-        leave_alt_screen();
-        auto* tracked = cli.jobs->find_by_name(arg);
-        if (tracked) {
-            std::string real_output = output_path_for(tracked->job_id);
-            std::rename(output_path.c_str(), real_output.c_str());
-            tracked->output_file = real_output;
-        }
-        std::cout << theme::dim(fmt::format("    Detached. Use 'view {}' to re-attach.", arg)) << "\n";
-        return;
-    }
+    // Start the job - this spawns background init and returns immediately
+    auto result = cli.jobs->run(arg, nullptr);
 
     if (result.is_err()) {
-        draw_header(arg, "Failed");
-        std::cout << theme::fail(result.error);
-        std::cout << "\n" << theme::dim("    Press Enter to return...") << std::flush;
-        std::string dummy;
-        std::getline(std::cin, dummy);
-        leave_alt_screen();
-        std::remove(output_path.c_str());
+        std::cout << theme::fail(result.error) << "\n";
         return;
     }
 
-    auto* tracked = cli.jobs->find_by_name(arg);
-    if (!tracked) { leave_alt_screen(); return; }
-
-    // Rename capture to real job_id path
-    std::string real_output = output_path_for(tracked->job_id);
-    if (output_path != real_output) {
-        std::rename(output_path.c_str(), real_output.c_str());
-    }
-    tracked->output_file = real_output;
-
-    // Update header, then attach — NO clearing, job output continues after init logs
-    draw_header(arg, "RUNNING on " + tracked->compute_node,
-                tracked->slurm_id, tracked->compute_node);
-
-    attach_to_job(cli, tracked, arg, false);
+    // Immediately attach to see init progress (user can Ctrl+\ to detach)
+    do_view(cli, arg);
 }
 
 static void do_view(BaseCLI& cli, const std::string& arg) {
@@ -302,38 +240,126 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
-    // Completed job: show captured output read-only
-    if (tracked->completed) {
-        enter_alt_screen();
-        std::string status = tracked->exit_code == 0 ? "COMPLETED" :
-            fmt::format("FAILED (exit {})", tracked->exit_code);
-        draw_header(arg, status, tracked->slurm_id, tracked->compute_node);
-        setup_content_area();
-
-        replay_captured_output(tracked->output_file);
-
-        // Position exit prompt on the last line of the scroll region
-        int rows = term_rows();
-        int prompt_row = std::max(1, rows - 2);
-        std::cout << fmt::format("\033[{};1H", prompt_row);
-        if (tracked->exit_code == 0) {
-            std::cout << theme::dim("[exit 0]") << "  ";
-        } else {
-            std::cout << theme::red(fmt::format("[exit {}]", tracked->exit_code)) << "  ";
-        }
-        std::cout << theme::dim("Press Enter to leave...") << std::flush;
-        std::string dummy;
-        std::getline(std::cin, dummy);
-        leave_alt_screen();
+    // Check if init failed
+    if (!tracked->init_error.empty()) {
+        std::cout << theme::fail(fmt::format("Job '{}' init failed: {}", arg, tracked->init_error)) << "\n";
         return;
     }
 
-    // Running job: attach live
-    enter_alt_screen();
-    setup_content_area();
+    // Initializing: show init progress with incremental log tailing
+    if (!tracked->init_complete) {
+        enter_alt_screen();
+        draw_header(arg, "INITIALIZING...");
+        setup_content_area();
 
-    draw_header(arg, "RUNNING on " + tracked->compute_node + " | SLURM:" + tracked->slurm_id,
-                tracked->slurm_id, tracked->compute_node);
+        std::string init_log = "/tmp/tccp_init_" + tracked->job_id + ".log";
+
+        // Raw terminal for Ctrl+\ detection
+        struct termios old_term, raw_term;
+        tcgetattr(STDIN_FILENO, &old_term);
+        raw_term = old_term;
+        raw_term.c_lflag &= ~(ICANON | ECHO | ISIG);
+        raw_term.c_cc[VMIN] = 0;
+        raw_term.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_term);
+
+        std::streampos log_pos = 0;  // Track read position for incremental tailing
+
+        while (true) {
+            // Incremental tail: only read new content since last check
+            std::ifstream f(init_log);
+            if (f) {
+                f.seekg(log_pos);
+                std::string line;
+                while (std::getline(f, line)) {
+                    std::cout << theme::log(line) << std::flush;
+                }
+                if (f.eof()) {
+                    f.clear();
+                }
+                log_pos = f.tellg();
+            }
+
+            // Poll for Ctrl+\ (500ms intervals)
+            bool user_detached = false;
+            struct pollfd pfd = {STDIN_FILENO, POLLIN, 0};
+            if (poll(&pfd, 1, 500) > 0 && (pfd.revents & POLLIN)) {
+                char c;
+                if (read(STDIN_FILENO, &c, 1) == 1 && c == 0x1c) {
+                    user_detached = true;
+                }
+            }
+
+            if (user_detached) {
+                tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
+                leave_alt_screen();
+                std::cout << theme::dim(fmt::format(
+                    "    Detached. Init continues in background. 'view {}' to check.", arg)) << "\n";
+                return;
+            }
+
+            // Refresh tracked job state
+            tracked = cli.jobs->find_by_name(arg);
+            if (!tracked) {
+                tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
+                leave_alt_screen();
+                return;
+            }
+
+            if (!tracked->init_error.empty()) {
+                // Read any remaining log output
+                std::ifstream f2(init_log);
+                if (f2) {
+                    f2.seekg(log_pos);
+                    std::string line;
+                    while (std::getline(f2, line)) {
+                        std::cout << theme::log(line) << std::flush;
+                    }
+                }
+                std::cout << "\n" << theme::fail(tracked->init_error) << std::flush;
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
+                leave_alt_screen();
+                return;
+            }
+
+            if (tracked->init_complete) {
+                // Flush remaining log
+                std::ifstream f2(init_log);
+                if (f2) {
+                    f2.seekg(log_pos);
+                    std::string line;
+                    while (std::getline(f2, line)) {
+                        std::cout << theme::log(line) << std::flush;
+                    }
+                }
+                break;
+            }
+        }
+
+        // Restore terminal before attaching (JobView sets its own raw mode)
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
+
+        // Transition to live job view
+        draw_header(arg, "RUNNING on " + tracked->compute_node,
+                    tracked->slurm_id, tracked->compute_node);
+
+        std::string output_path = output_path_for(tracked->job_id);
+        tracked->output_file = output_path;
+
+        attach_to_job(cli, tracked, arg, false);
+        return;
+    }
+
+    // Attach to job (live or completed) - always use JobView for consistent scrollback
+    enter_alt_screen();
+
+    std::string status = tracked->completed
+        ? (tracked->exit_code == 0 ? "COMPLETED" : fmt::format("FAILED (exit {})", tracked->exit_code))
+        : "RUNNING on " + tracked->compute_node;
+
+    draw_header(arg, status, tracked->slurm_id, tracked->compute_node);
+    setup_content_area();
 
     attach_to_job(cli, tracked, arg, true);
 }
@@ -355,7 +381,11 @@ static void do_jobs(BaseCLI& cli, const std::string& arg) {
 
     for (const auto& tj : tracked) {
         std::string status;
-        if (tj.completed)
+        if (!tj.init_error.empty())
+            status = "INIT FAILED";
+        else if (!tj.init_complete)
+            status = "INITIALIZING";
+        else if (tj.completed)
             status = tj.exit_code == 0 ? "COMPLETED" : fmt::format("FAILED({})", tj.exit_code);
         else if (!tj.compute_node.empty())
             status = "RUNNING";

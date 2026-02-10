@@ -24,6 +24,10 @@ struct JobState {
     int exit_code = -1;
     std::string output_file;        // local capture path
     std::string scratch_path;       // /tmp/{user}/{project}/{job_id}
+
+    // Init tracking
+    bool init_complete = false;
+    std::string init_error;
 };
 
 struct SyncManifestEntry {

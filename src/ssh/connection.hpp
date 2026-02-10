@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <mutex>
 #include <core/types.hpp>
 #include "result.hpp"
 
@@ -22,4 +23,5 @@ public:
 
 private:
     LIBSSH2_CHANNEL* channel_;
+    std::recursive_mutex mutex_;
 };

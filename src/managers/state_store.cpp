@@ -42,6 +42,8 @@ ProjectState StateStore::load() {
                 j.exit_code = n["exit_code"].as<int>(-1);
                 j.output_file = n["output_file"].as<std::string>("");
                 j.scratch_path = n["scratch_path"].as<std::string>("");
+                j.init_complete = n["init_complete"].as<bool>(false);
+                j.init_error = n["init_error"].as<std::string>("");
                 state.jobs.push_back(j);
             }
         }
@@ -99,6 +101,8 @@ void StateStore::save(const ProjectState& state) {
         out << YAML::Key << "exit_code" << YAML::Value << j.exit_code;
         out << YAML::Key << "output_file" << YAML::Value << j.output_file;
         out << YAML::Key << "scratch_path" << YAML::Value << j.scratch_path;
+        out << YAML::Key << "init_complete" << YAML::Value << j.init_complete;
+        out << YAML::Key << "init_error" << YAML::Value << j.init_error;
         out << YAML::EndMap;
     }
     out << YAML::EndSeq;

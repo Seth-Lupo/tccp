@@ -67,6 +67,8 @@ JobManager::JobManager(const Config& config, SSHConnection& dtn, SSHConnection& 
         tj.exit_code = js.exit_code;
         tj.output_file = js.output_file;
         tj.scratch_path = js.scratch_path;
+        tj.init_complete = js.init_complete;
+        tj.init_error = js.init_error;
         tracked_.push_back(tj);
     }
 }
@@ -226,6 +228,7 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
         "if [ -f requirements.txt ]; then\n"
         "    singularity exec --bind {}:{} --bind {}:{} {} {}/bin/pip install -q -r requirements.txt 2>/dev/null\n"
         "fi\n"
+        "printf '\\n__TCCP_JOB_START__\\n'\n"
         "CMD=\"singularity exec --bind {}:{} {} {}/bin/python {} {}\"\n"
         "script -fq -c \"$CMD\" {}\n"
         "EC=$?\n"
@@ -290,91 +293,166 @@ Result<TrackedJob> JobManager::run(const std::string& job_name, StatusCallback c
         return Result<TrackedJob>::Err("No job named '" + job_name + "' in tccp.yaml");
     }
 
-    // Generate job ID
+    // Generate job ID and create tracked job immediately
     std::string job_id = generate_job_id(job_name);
     tccp_log(fmt::format("job_id={}", job_id));
 
-    // Resolve SLURM profile and job time
-    auto profile = allocs_.resolve_profile(job_name);
-    auto it = proj.jobs.find(job_name);
-    std::string job_time = (it != proj.jobs.end() && !it->second.time.empty())
-                           ? it->second.time : "1:00:00";
-    int job_minutes = AllocationManager::parse_time_minutes(job_time);
-
-    // Find or create allocation
-    AllocationState* alloc = allocs_.find_free(job_minutes);
-    if (alloc) {
-        if (cb) cb(fmt::format("Reusing allocation {} on {}", alloc->slurm_id, alloc->node));
-        tccp_log(fmt::format("reusing alloc={} node={}", alloc->slurm_id, alloc->node));
-    } else {
-        // Check for a pending allocation (e.g. from a previous session that dropped)
-        AllocationState* pending = allocs_.find_pending();
-        if (pending) {
-            if (cb) cb(fmt::format("Found pending allocation {}, waiting for node...",
-                                   pending->slurm_id));
-            tccp_log(fmt::format("resuming pending alloc={}", pending->slurm_id));
-            auto wait_result = allocs_.wait_for_allocation(pending->slurm_id, cb);
-            if (wait_result.is_err()) {
-                // Pending allocation failed — fall through to create a new one
-                if (cb) cb(fmt::format("Pending allocation failed: {}", wait_result.error));
-            } else {
-                // Find the now-RUNNING allocation
-                alloc = allocs_.find_free(job_minutes);
-            }
-        }
-
-        if (!alloc) {
-            if (cb) cb("No free allocation, requesting new one...");
-            auto alloc_result = allocs_.allocate(profile, cb);
-            if (alloc_result.is_err()) {
-                return Result<TrackedJob>::Err(alloc_result.error);
-            }
-            // Find the newly added allocation (now has node set)
-            alloc = allocs_.find_free(job_minutes);
-            if (!alloc) {
-                return Result<TrackedJob>::Err("Allocation succeeded but could not find it");
-            }
-        }
-        tccp_log(fmt::format("alloc={} node={}", alloc->slurm_id, alloc->node));
-    }
-
-    // Ensure directories and environment
-    ensure_dirs(job_id, cb);
-    ensure_environment(cb);
-
-    // Sync code to compute node
-    std::string scratch = scratch_dir(job_id);
-    sync_.sync_to_scratch(alloc->node, scratch, allocs_.state(), cb);
-    allocs_.state(); // trigger persist via sync updating state
-
-    // Launch job on compute node
-    auto launch_result = launch_on_node(job_id, job_name, alloc->node, scratch, cb);
-    if (launch_result.is_err()) {
-        return Result<TrackedJob>::Err(launch_result.error);
-    }
-
-    // Track the job
     TrackedJob tj;
     tj.job_id = job_id;
-    tj.slurm_id = alloc->slurm_id;
     tj.job_name = job_name;
-    tj.compute_node = alloc->node;
-    tj.scratch_path = scratch;
-    tracked_.push_back(tj);
+    tj.init_complete = false;  // Init will run in background
 
-    // Persist job to state
+    // Add to tracked list and persist immediately
+    {
+        std::lock_guard<std::mutex> lock(tracked_mutex_);
+        tracked_.push_back(tj);
+    }
+
     JobState js;
     js.job_id = job_id;
     js.job_name = job_name;
-    js.alloc_slurm_id = alloc->slurm_id;
-    js.compute_node = alloc->node;
-    js.scratch_path = scratch;
+    js.init_complete = false;
     allocs_.state().jobs.push_back(js);
+    allocs_.persist();
 
-    // Mark allocation as busy (this calls persist(), saving the job too)
-    allocs_.assign_job(alloc->slurm_id, job_id);
+    if (cb) cb("Starting initialization in background...");
+
+    // Spawn background thread to do all init work
+    init_threads_.emplace_back(&JobManager::background_init_thread, this, job_id, job_name);
+    init_threads_.back().detach();  // Let it run independently
 
     return Result<TrackedJob>::Ok(tj);
+}
+
+// ── Background init thread ─────────────────────────────────
+
+void JobManager::background_init_thread(std::string job_id, std::string job_name) {
+    tccp_log(fmt::format("INIT THREAD START: job_id={}", job_id));
+
+    auto log_to_file = [&](const std::string& msg) {
+        // Log init messages to a file that UI can tail
+        std::string init_log = "/tmp/tccp_init_" + job_id + ".log";
+        std::ofstream f(init_log, std::ios::app);
+        if (f) {
+            f << msg << "\n";
+        }
+        tccp_log(fmt::format("INIT: {}", msg));
+    };
+
+    try {
+        // Resolve SLURM profile and job time
+        auto profile = allocs_.resolve_profile(job_name);
+        const auto& proj = config_.project();
+        auto it = proj.jobs.find(job_name);
+        std::string job_time = (it != proj.jobs.end() && !it->second.time.empty())
+                               ? it->second.time : "1:00:00";
+        int job_minutes = AllocationManager::parse_time_minutes(job_time);
+
+        // Find or create allocation
+        AllocationState* alloc = allocs_.find_free(job_minutes);
+        if (alloc) {
+            log_to_file(fmt::format("Reusing allocation {} on {}", alloc->slurm_id, alloc->node));
+        } else {
+            // Check for pending allocation
+            AllocationState* pending = allocs_.find_pending();
+            if (pending) {
+                log_to_file(fmt::format("Found pending allocation {}, waiting for node...", pending->slurm_id));
+                auto wait_result = allocs_.wait_for_allocation(pending->slurm_id, nullptr);
+                if (wait_result.is_ok()) {
+                    alloc = allocs_.find_free(job_minutes);
+                }
+            }
+
+            if (!alloc) {
+                log_to_file("No free allocation, requesting new one...");
+                auto alloc_result = allocs_.allocate(profile, nullptr);
+                if (alloc_result.is_err()) {
+                    throw std::runtime_error(alloc_result.error);
+                }
+                alloc = allocs_.find_free(job_minutes);
+                if (!alloc) {
+                    throw std::runtime_error("Allocation succeeded but could not find it");
+                }
+            }
+        }
+
+        log_to_file(fmt::format("Using allocation {} on node {}", alloc->slurm_id, alloc->node));
+
+        // Ensure directories and environment
+        log_to_file("Setting up directories...");
+        ensure_dirs(job_id, nullptr);
+
+        log_to_file("Checking environment...");
+        ensure_environment(nullptr);
+
+        // Sync code to compute node
+        std::string scratch = scratch_dir(job_id);
+        log_to_file(fmt::format("Syncing code to {}...", alloc->node));
+        sync_.sync_to_scratch(alloc->node, scratch, allocs_.state(), nullptr);
+
+        // Launch job on compute node
+        log_to_file("Launching job on compute node...");
+        auto launch_result = launch_on_node(job_id, job_name, alloc->node, scratch, nullptr);
+        if (launch_result.is_err()) {
+            throw std::runtime_error(launch_result.error);
+        }
+
+        log_to_file(fmt::format("Job launched successfully on {}", alloc->node));
+
+        // Update tracked job with final info
+        {
+            std::lock_guard<std::mutex> lock(tracked_mutex_);
+            for (auto& tj : tracked_) {
+                if (tj.job_id == job_id) {
+                    tj.slurm_id = alloc->slurm_id;
+                    tj.compute_node = alloc->node;
+                    tj.scratch_path = scratch;
+                    tj.init_complete = true;
+                    break;
+                }
+            }
+        }
+
+        // Update persisted state
+        for (auto& js : allocs_.state().jobs) {
+            if (js.job_id == job_id) {
+                js.alloc_slurm_id = alloc->slurm_id;
+                js.compute_node = alloc->node;
+                js.scratch_path = scratch;
+                js.init_complete = true;
+                break;
+            }
+        }
+        allocs_.assign_job(alloc->slurm_id, job_id);  // This persists
+
+        tccp_log(fmt::format("INIT THREAD COMPLETE: job_id={}", job_id));
+
+    } catch (const std::exception& e) {
+        std::string error = fmt::format("Init failed: {}", e.what());
+        log_to_file(error);
+        tccp_log(fmt::format("INIT THREAD ERROR: {}", error));
+
+        // Mark job as failed
+        {
+            std::lock_guard<std::mutex> lock(tracked_mutex_);
+            for (auto& tj : tracked_) {
+                if (tj.job_id == job_id) {
+                    tj.init_error = error;
+                    tj.init_complete = true;  // Done trying
+                    break;
+                }
+            }
+        }
+
+        for (auto& js : allocs_.state().jobs) {
+            if (js.job_id == job_id) {
+                js.init_error = error;
+                js.init_complete = true;
+                break;
+            }
+        }
+        allocs_.persist();
+    }
 }
 
 // ── list / cancel / return_output ──────────────────────────
@@ -457,8 +535,10 @@ JobManager::SlurmJobState JobManager::query_alloc_state(const std::string& slurm
 }
 
 void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
+    std::lock_guard<std::mutex> lock(tracked_mutex_);
     for (auto& tj : tracked_) {
         if (tj.completed) continue;
+        if (!tj.init_complete) continue;  // Still initializing, skip
 
         // Check if the dtach socket still exists (job still running)
         const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3";
@@ -508,6 +588,7 @@ const std::vector<TrackedJob>& JobManager::tracked_jobs() const {
 }
 
 TrackedJob* JobManager::find_by_name(const std::string& job_name) {
+    std::lock_guard<std::mutex> lock(tracked_mutex_);
     TrackedJob* best = nullptr;
     for (auto& tj : tracked_) {
         if (tj.job_name == job_name) {
