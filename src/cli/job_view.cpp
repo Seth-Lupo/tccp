@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <chrono>
+#include <functional>
 #include <cstdio>
 #include <cstring>
 
@@ -196,6 +197,11 @@ static int get_scroll_height() {
     return 24 - HEADER_ROWS;
 }
 
+// Compute max scroll offset: allow scrolling until just 1 line remains visible.
+static int compute_max_scroll(int total_lines) {
+    return std::max(0, total_lines - 1);
+}
+
 // Redraw the visible portion of output_lines based on scroll_offset
 static void redraw_viewport(const std::vector<std::string>& output_lines, int scroll_offset) {
     int height = get_scroll_height();
@@ -211,15 +217,74 @@ static void redraw_viewport(const std::vector<std::string>& output_lines, int sc
     // Show scroll indicator at top if we're scrolled back and at the beginning
     bool showing_top_indicator = (scroll_offset > 0 && start_line == 0);
     if (showing_top_indicator) {
-        std::string indicator = "\033[2m[TOP]\033[0m\n";
+        std::string indicator = "\033[2m[TOP]\033[0m\r\n";
         write(STDOUT_FILENO, indicator.c_str(), indicator.size());
-        // [TOP] takes up one line, reduce content range to fit viewport
-        if (end_line > start_line) end_line--;
+        // [TOP] takes up one line, reduce content range but always keep at least 1 line
+        if (end_line - start_line > 1) end_line--;
     }
 
     // Draw visible lines (they already contain their newlines)
     for (int i = start_line; i < end_line && i < total_lines; i++) {
         write(STDOUT_FILENO, output_lines[i].c_str(), output_lines[i].size());
+    }
+}
+
+// Show exit prompt and allow scrolling through output buffer. Returns on Enter.
+static void wait_for_exit_with_scroll(
+    std::vector<std::string>& output_lines,
+    int exit_status,
+    std::function<void()> draw_header_fn)
+{
+    int scroll_offset = 0;
+
+    // Draw initial view at bottom
+    redraw_viewport(output_lines, scroll_offset);
+
+    // Position exit prompt within the scroll region (above header)
+    struct winsize ews;
+    int erows = 24;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ews) == 0 && ews.ws_row > 0)
+        erows = ews.ws_row;
+    int prompt_row = std::max(1, erows - HEADER_ROWS);
+
+    auto draw_exit_prompt = [&]() {
+        std::string exit_msg;
+        if (exit_status == 0)
+            exit_msg = fmt::format("\033[{};1H\033[2m[exit 0]\033[0m  \033[2mPress Enter to leave, \xe2\x86\x91\xe2\x86\x93 to scroll...\033[0m", prompt_row);
+        else
+            exit_msg = fmt::format("\033[{};1H\033[91m[exit {}]\033[0m  \033[2mPress Enter to leave, \xe2\x86\x91\xe2\x86\x93 to scroll...\033[0m", prompt_row, exit_status);
+        write(STDOUT_FILENO, exit_msg.data(), exit_msg.size());
+        draw_header_fn();
+    };
+
+    draw_exit_prompt();
+
+    for (;;) {
+        char c;
+        if (read(STDIN_FILENO, &c, 1) <= 0) break;
+
+        if (c == 0x1b) {
+            char seq[2];
+            if (read(STDIN_FILENO, seq, 2) == 2 && seq[0] == '[') {
+                if (seq[1] == 'A') {  // Up arrow
+                    int max_scroll = compute_max_scroll(output_lines.size());
+                    if (scroll_offset < max_scroll) {
+                        scroll_offset++;
+                        redraw_viewport(output_lines, scroll_offset);
+                        draw_exit_prompt();
+                    }
+                } else if (seq[1] == 'B') {  // Down arrow
+                    if (scroll_offset > 0) {
+                        scroll_offset--;
+                        redraw_viewport(output_lines, scroll_offset);
+                        draw_exit_prompt();
+                    }
+                }
+            }
+            continue;
+        }
+
+        if (c == '\r' || c == '\n') break;
     }
 }
 
@@ -424,15 +489,9 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                     char seq = buf[i+2];
                     i += 2;
 
-                    if (seq == 'A') {  // Up arrow - scroll back to view older output
+                    if (seq == 'A') {  // Up arrow - scroll back
                         in_scroll_mode = true;
-                        int height = get_scroll_height();
-                        int total = output_lines.size();
-                        // Max scroll: [TOP] indicator takes 1 line, so we can show (height-1) content lines
-                        // To see line 0: end_line = height, start = 0, showing [TOP] + lines 0..(height-2)
-                        // Therefore: total - scroll_offset = height → scroll_offset = total - height + 1
-                        int max_scroll = std::max(0, total - height + 1);
-                        if (scroll_offset < max_scroll) {
+                        if (scroll_offset < compute_max_scroll(output_lines.size())) {
                             scroll_offset++;
                             redraw_viewport(output_lines, scroll_offset);
                         }
@@ -498,6 +557,10 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                 // Handle Enter - send buffered line
                 if (c == '\r' || c == '\n') {
                     write(STDOUT_FILENO, "\r\n", 2);
+
+                    // Add user input to scrollback buffer so it's visible when scrolling.
+                    // Must use \r\n (not bare \n) because terminal is in raw mode.
+                    output_lines.push_back(input_buffer + "\r\n");
 
                     // Mark this input for suppression (remote will echo it back)
                     pending_suppress = input_buffer + "\r\n";
@@ -580,62 +643,7 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                                    capture, false, nullptr);
         }
 
-        // Enable scrollback for completed job output
-        int post_scroll_offset = 0;
-        bool waiting_for_exit = true;
-
-        // Draw initial view at bottom
-        redraw_viewport(output_lines, post_scroll_offset);
-
-        // Position exit prompt within the scroll region (above header)
-        struct winsize ews;
-        int erows = 24;
-        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ews) == 0 && ews.ws_row > 0)
-            erows = ews.ws_row;
-        int prompt_row = std::max(1, erows - HEADER_ROWS);
-
-        auto draw_exit_prompt = [&]() {
-            std::string exit_msg;
-            if (exit_status == 0)
-                exit_msg = fmt::format("\033[{};1H\033[2m[exit 0]\033[0m  \033[2mPress Enter to leave, ↑↓ to scroll...\033[0m", prompt_row);
-            else
-                exit_msg = fmt::format("\033[{};1H\033[91m[exit {}]\033[0m  \033[2mPress Enter to leave, ↑↓ to scroll...\033[0m", prompt_row, exit_status);
-            write(STDOUT_FILENO, exit_msg.data(), exit_msg.size());
-            draw_header();
-        };
-
-        draw_exit_prompt();
-
-        while (waiting_for_exit) {
-            char c;
-            if (read(STDIN_FILENO, &c, 1) <= 0) break;
-
-            // Check for escape sequences (arrow keys)
-            if (c == 0x1b) {
-                char seq[2];
-                if (read(STDIN_FILENO, &seq, 2) == 2 && seq[0] == '[') {
-                    if (seq[1] == 'A') {  // Up arrow
-                        int max_scroll = std::max(0, (int)output_lines.size() - get_scroll_height() + 1);
-                        if (post_scroll_offset < max_scroll) {
-                            post_scroll_offset++;
-                            redraw_viewport(output_lines, post_scroll_offset);
-                            draw_exit_prompt();
-                        }
-                    } else if (seq[1] == 'B') {  // Down arrow
-                        if (post_scroll_offset > 0) {
-                            post_scroll_offset--;
-                            redraw_viewport(output_lines, post_scroll_offset);
-                            draw_exit_prompt();
-                        }
-                    }
-                }
-                continue;
-            }
-
-            if (c == '\r' || c == '\n') {
-                waiting_for_exit = false;
-            }
-        }
+        wait_for_exit_with_scroll(output_lines, exit_status, [this]() { draw_header(); });
     }
 
     // ── Cleanup ───────────────────────────────────────────

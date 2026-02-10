@@ -28,13 +28,6 @@ static std::string dtach_sock_for(const std::string& job_id) {
     return "/tmp/tccp_" + job_id + ".sock";
 }
 
-static void replay_captured_output(const std::string& path) {
-    std::ifstream f(path);
-    if (f.is_open()) {
-        std::cout << f.rdbuf() << std::flush;
-    }
-}
-
 // ── Alternate screen + bottom status bar ─────────────────────
 
 static void enter_alt_screen() {
@@ -156,10 +149,6 @@ static bool attach_to_job(BaseCLI& cli, TrackedJob* tracked,
                            bool in_alt_screen = true) {
     std::string output_path = output_path_for(tracked->job_id);
     tracked->output_file = output_path;
-
-    if (replay) {
-        replay_captured_output(output_path);
-    }
 
     JobView view(*cli.cluster->get_session(),
                  tracked->compute_node,
@@ -339,6 +328,10 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
 
         // Restore terminal before attaching (JobView sets its own raw mode)
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
+
+        // Clean up init log and clear init output from screen
+        std::remove(init_log.c_str());
+        std::cout << "\033[H\033[J" << std::flush;
 
         // Transition to live job view
         draw_header(arg, "RUNNING on " + tracked->compute_node,
