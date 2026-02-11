@@ -39,11 +39,15 @@ ProjectState StateStore::load() {
                 j.alloc_slurm_id = n["alloc_slurm_id"].as<std::string>("");
                 j.compute_node = n["compute_node"].as<std::string>("");
                 j.completed = n["completed"].as<bool>(false);
+                j.canceled = n["canceled"].as<bool>(false);
                 j.exit_code = n["exit_code"].as<int>(-1);
                 j.output_file = n["output_file"].as<std::string>("");
                 j.scratch_path = n["scratch_path"].as<std::string>("");
                 j.init_complete = n["init_complete"].as<bool>(false);
                 j.init_error = n["init_error"].as<std::string>("");
+                j.submit_time = n["submit_time"].as<std::string>("");
+                j.start_time = n["start_time"].as<std::string>("");
+                j.end_time = n["end_time"].as<std::string>("");
                 state.jobs.push_back(j);
             }
         }
@@ -98,11 +102,15 @@ void StateStore::save(const ProjectState& state) {
         out << YAML::Key << "alloc_slurm_id" << YAML::Value << j.alloc_slurm_id;
         out << YAML::Key << "compute_node" << YAML::Value << j.compute_node;
         out << YAML::Key << "completed" << YAML::Value << j.completed;
+        out << YAML::Key << "canceled" << YAML::Value << j.canceled;
         out << YAML::Key << "exit_code" << YAML::Value << j.exit_code;
         out << YAML::Key << "output_file" << YAML::Value << j.output_file;
         out << YAML::Key << "scratch_path" << YAML::Value << j.scratch_path;
         out << YAML::Key << "init_complete" << YAML::Value << j.init_complete;
         out << YAML::Key << "init_error" << YAML::Value << j.init_error;
+        out << YAML::Key << "submit_time" << YAML::Value << j.submit_time;
+        out << YAML::Key << "start_time" << YAML::Value << j.start_time;
+        out << YAML::Key << "end_time" << YAML::Value << j.end_time;
         out << YAML::EndMap;
     }
     out << YAML::EndSeq;

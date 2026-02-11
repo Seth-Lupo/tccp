@@ -20,8 +20,8 @@ int compute_max_scroll(int total_lines) {
 
 int compute_top_scroll(int total_lines) {
     int height = get_scroll_height();
-    // Scroll to show a full screen at the top
-    return std::max(0, total_lines - height);
+    // Scroll to show line 0 at the top of viewport
+    return total_lines - 1;
 }
 
 void redraw_viewport(const std::vector<std::string>& output_lines, int scroll_offset) {
@@ -34,15 +34,6 @@ void redraw_viewport(const std::vector<std::string>& output_lines, int scroll_of
     // Calculate which lines to show
     int end_line = total_lines - scroll_offset;
     int start_line = std::max(0, end_line - height);
-
-    // Show [TOP] indicator if scrolled to beginning
-    bool showing_top_indicator = (scroll_offset > 0 && start_line == 0);
-    if (showing_top_indicator) {
-        std::string indicator = "\033[2m[TOP]\033[0m\r\n";
-        write(STDOUT_FILENO, indicator.c_str(), indicator.size());
-        // [TOP] takes one line, adjust content range
-        if (end_line - start_line > 1) end_line--;
-    }
 
     // Draw visible lines
     for (int i = start_line; i < end_line && i < total_lines; i++) {

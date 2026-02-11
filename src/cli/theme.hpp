@@ -65,25 +65,34 @@ inline std::string divider() {
 
 // ── Status indicators ───────────────────────────────────
 
+// Success message (dim, unindented, no symbol)
 inline std::string ok(const std::string& msg) {
-    return color::GREEN + "    + " + color::RESET + msg + "\n";
+    return color::DIM + msg + color::RESET + "\n";
 }
 
+// Preflight/connection check (blue tilde, indented)
+inline std::string check(const std::string& msg) {
+    return color::BLUE + "    ~ " + color::RESET + msg + "\n";
+}
+
+// Error message (red, indented with x)
 inline std::string fail(const std::string& msg) {
     return color::RED + "    x " + color::RESET + msg + "\n";
 }
 
+// Info message (blue tilde, indented) - alias for check
 inline std::string info(const std::string& msg) {
     return color::BLUE + "    ~ " + color::RESET + msg + "\n";
 }
 
+// Progress/step message (dim, unindented, no symbol)
 inline std::string step(const std::string& msg) {
-    return color::BROWN + "    > " + color::RESET + msg + "\n";
+    return color::DIM + msg + color::RESET + "\n";
 }
 
-// Subtle log line for internal status (dimmer than program output)
+// Subtle log line for internal status (dim gray, unindented, no symbol)
 inline std::string log(const std::string& msg) {
-    return "\033[38;2;80;80;80m    \xc2\xb7 " + msg + "\033[0m\n";
+    return color::DIM + msg + color::RESET + "\n";
 }
 
 // Key-value row for dashboard/status panels

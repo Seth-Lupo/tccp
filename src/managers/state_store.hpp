@@ -21,6 +21,7 @@ struct JobState {
     std::string alloc_slurm_id;     // allocation it ran on
     std::string compute_node;
     bool completed = false;
+    bool canceled = false;          // true if manually killed via 'cancel'
     int exit_code = -1;
     std::string output_file;        // local capture path
     std::string scratch_path;       // /tmp/{user}/{project}/{job_id}
@@ -28,6 +29,11 @@ struct JobState {
     // Init tracking
     bool init_complete = false;
     std::string init_error;
+
+    // Timing
+    std::string submit_time;        // ISO timestamp when job was submitted
+    std::string start_time;         // ISO timestamp when job started running
+    std::string end_time;           // ISO timestamp when job completed
 };
 
 struct SyncManifestEntry {

@@ -8,8 +8,22 @@
 #include <fstream>
 #include <set>
 #include <filesystem>
+#include <ctime>
+#include <iomanip>
 
 namespace fs = std::filesystem;
+
+// ── Timestamp helpers ──────────────────────────────────────
+
+static std::string now_iso() {
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    struct tm tm_buf;
+    localtime_r(&t, &tm_buf);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm_buf);
+    return std::string(buf);
+}
 
 // ── Debug log ──────────────────────────────────────────────
 
@@ -64,11 +78,15 @@ JobManager::JobManager(const Config& config, SSHConnection& dtn, SSHConnection& 
         tj.slurm_id = js.alloc_slurm_id;
         tj.compute_node = js.compute_node;
         tj.completed = js.completed;
+        tj.canceled = js.canceled;
         tj.exit_code = js.exit_code;
         tj.output_file = js.output_file;
         tj.scratch_path = js.scratch_path;
         tj.init_complete = js.init_complete;
         tj.init_error = js.init_error;
+        tj.submit_time = js.submit_time;
+        tj.start_time = js.start_time;
+        tj.end_time = js.end_time;
         tracked_.push_back(tj);
     }
 }
@@ -300,6 +318,7 @@ Result<TrackedJob> JobManager::run(const std::string& job_name, StatusCallback c
     TrackedJob tj;
     tj.job_id = job_id;
     tj.job_name = job_name;
+    tj.submit_time = now_iso();  // Record submission time
     tj.init_complete = false;  // Init will run in background
 
     // Add to tracked list and persist immediately
@@ -311,6 +330,7 @@ Result<TrackedJob> JobManager::run(const std::string& job_name, StatusCallback c
     JobState js;
     js.job_id = job_id;
     js.job_name = job_name;
+    js.submit_time = tj.submit_time;
     js.init_complete = false;
     allocs_.state().jobs.push_back(js);
     allocs_.persist();
@@ -339,7 +359,18 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
         tccp_log(fmt::format("INIT: {}", msg));
     };
 
+    auto check_canceled = [&]() -> bool {
+        std::lock_guard<std::mutex> lock(cancel_mutex_);
+        return cancel_requested_.count(job_id) > 0;
+    };
+
     try {
+        // Check if canceled before starting
+        if (check_canceled()) {
+            log_to_file("Canceled before initialization started");
+            throw std::runtime_error("Canceled during initialization");
+        }
+
         // Resolve SLURM profile and job time
         auto profile = allocs_.resolve_profile(job_name);
         const auto& proj = config_.project();
@@ -357,7 +388,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
             AllocationState* pending = allocs_.find_pending();
             if (pending) {
                 log_to_file(fmt::format("Found pending allocation {}, waiting for node...", pending->slurm_id));
-                auto wait_result = allocs_.wait_for_allocation(pending->slurm_id, nullptr);
+                auto wait_result = allocs_.wait_for_allocation(pending->slurm_id, log_to_file);
                 if (wait_result.is_ok()) {
                     alloc = allocs_.find_free(job_minutes);
                 }
@@ -365,7 +396,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
 
             if (!alloc) {
                 log_to_file("No free allocation, requesting new one...");
-                auto alloc_result = allocs_.allocate(profile, nullptr);
+                auto alloc_result = allocs_.allocate(profile, log_to_file);
                 if (alloc_result.is_err()) {
                     throw std::runtime_error(alloc_result.error);
                 }
@@ -378,17 +409,38 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
 
         log_to_file(fmt::format("Using allocation {} on node {}", alloc->slurm_id, alloc->node));
 
+        // Check cancellation after allocation acquired
+        if (check_canceled()) {
+            log_to_file("Canceled after allocation acquired (keeping allocation)");
+            throw std::runtime_error("Canceled during initialization");
+        }
+
         // Ensure directories and environment
         log_to_file("Setting up directories...");
         ensure_dirs(job_id, nullptr);
 
+        if (check_canceled()) {
+            log_to_file("Canceled during setup");
+            throw std::runtime_error("Canceled during initialization");
+        }
+
         log_to_file("Checking environment...");
         ensure_environment(nullptr);
+
+        if (check_canceled()) {
+            log_to_file("Canceled during environment setup");
+            throw std::runtime_error("Canceled during initialization");
+        }
 
         // Sync code to compute node
         std::string scratch = scratch_dir(job_id);
         log_to_file(fmt::format("Syncing code to {}...", alloc->node));
         sync_.sync_to_scratch(alloc->node, scratch, allocs_.state(), nullptr);
+
+        if (check_canceled()) {
+            log_to_file("Canceled after sync");
+            throw std::runtime_error("Canceled during initialization");
+        }
 
         // Launch job on compute node
         log_to_file("Launching job on compute node...");
@@ -400,6 +452,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
         log_to_file(fmt::format("Job launched successfully on {}", alloc->node));
 
         // Update tracked job with final info
+        std::string start = now_iso();
         {
             std::lock_guard<std::mutex> lock(tracked_mutex_);
             for (auto& tj : tracked_) {
@@ -408,6 +461,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
                     tj.compute_node = alloc->node;
                     tj.scratch_path = scratch;
                     tj.init_complete = true;
+                    tj.start_time = start;
                     break;
                 }
             }
@@ -420,6 +474,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
                 js.compute_node = alloc->node;
                 js.scratch_path = scratch;
                 js.init_complete = true;
+                js.start_time = start;
                 break;
             }
         }
@@ -427,26 +482,43 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
 
         tccp_log(fmt::format("INIT THREAD COMPLETE: job_id={}", job_id));
 
+        // Clean up cancel request flag
+        {
+            std::lock_guard<std::mutex> lock(cancel_mutex_);
+            cancel_requested_.erase(job_id);
+        }
+
     } catch (const std::exception& e) {
         std::string error = fmt::format("Init failed: {}", e.what());
+        bool was_canceled = check_canceled();
+
         log_to_file(error);
         tccp_log(fmt::format("INIT THREAD ERROR: {}", error));
 
-        // Mark job as failed
+        // Mark job as failed/canceled
         {
             std::lock_guard<std::mutex> lock(tracked_mutex_);
             for (auto& tj : tracked_) {
                 if (tj.job_id == job_id) {
-                    tj.init_error = error;
+                    if (!was_canceled) {
+                        tj.init_error = error;
+                    }
                     tj.init_complete = true;  // Done trying
                     break;
                 }
             }
+
+            // Clean up cancel request flag
+            cancel_mutex_.lock();
+            cancel_requested_.erase(job_id);
+            cancel_mutex_.unlock();
         }
 
         for (auto& js : allocs_.state().jobs) {
             if (js.job_id == job_id) {
-                js.init_error = error;
+                if (!was_canceled) {
+                    js.init_error = error;
+                }
                 js.init_complete = true;
                 break;
             }
@@ -463,9 +535,164 @@ SSHResult JobManager::list(StatusCallback cb) {
                       " -o \"%.8i %.20j %.10T %.6M %.4D %R\" -h");
 }
 
-SSHResult JobManager::cancel(const std::string& slurm_id, StatusCallback cb) {
-    if (cb) cb(fmt::format("Canceling job {}...", slurm_id));
-    return login_.run("scancel " + slurm_id);
+// Shared cancel logic
+Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) {
+    // If job is still initializing, request cancellation
+    if (!tj->init_complete) {
+        // Mark for cancellation (init thread will check this)
+        {
+            std::lock_guard<std::mutex> lock(cancel_mutex_);
+            cancel_requested_.insert(tj->job_id);
+        }
+
+        // Mark as canceled immediately
+        tj->canceled = true;
+        tj->completed = true;
+        tj->exit_code = 130;  // 128 + SIGINT
+
+        // Update persistent state
+        auto& jobs = allocs_.state().jobs;
+        for (auto& js : jobs) {
+            if (js.job_id == tj->job_id) {
+                js.canceled = true;
+                js.completed = true;
+                js.exit_code = 130;
+                break;
+            }
+        }
+        allocs_.persist();
+
+        return Result<void>::Ok();
+    }
+
+    // Check REMOTE state (don't trust local completed flag)
+    const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3";
+    std::string dtach_socket = fmt::format("/tmp/tccp_{}.sock", tj->job_id);
+
+    // Use test -e on the socket file (same mechanism as view/attach)
+    std::string check_cmd = fmt::format(
+        "ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
+        ssh_opts, tj->compute_node, dtach_socket);
+
+    auto check_result = dtn_.run(check_cmd);
+    tccp_log_ssh("cancel:check-remote", check_cmd, check_result);
+
+    // If remote shows job is done, update local state and return error
+    if (check_result.stdout_data.find("DONE") != std::string::npos) {
+        tj->completed = true;
+
+        // Persist the updated state
+        auto& jobs = allocs_.state().jobs;
+        for (auto& js : jobs) {
+            if (js.job_id == tj->job_id) {
+                js.completed = true;
+                break;
+            }
+        }
+        allocs_.persist();
+
+        if (tj->canceled) {
+            return Result<void>::Err("Job '" + job_name + "' already canceled");
+        } else {
+            return Result<void>::Err(fmt::format("Job '{}' already completed (exit {})", job_name, tj->exit_code));
+        }
+    }
+
+    // Kill the dtach process using fuser (finds process owning the socket)
+    // Then remove the socket file to clean up
+    std::string kill_cmd = fmt::format(
+        "ssh {} {} 'fuser -k -9 {} 2>/dev/null; rm -f {}'",
+        ssh_opts, tj->compute_node, dtach_socket, dtach_socket);
+
+    auto kill_result = dtn_.run(kill_cmd);
+    tccp_log_ssh("cancel:kill", kill_cmd, kill_result);
+
+    // Mark as canceled
+    tj->canceled = true;
+    tj->completed = true;
+    tj->exit_code = 130;  // 128 + SIGINT
+
+    // Update persistent state
+    auto& jobs = allocs_.state().jobs;
+    for (auto& js : jobs) {
+        if (js.job_id == tj->job_id) {
+            js.canceled = true;
+            js.completed = true;
+            js.exit_code = 130;
+            break;
+        }
+    }
+
+    // Free the allocation's active job slot (but keep allocation running)
+    // Only if an allocation was actually assigned
+    if (!tj->slurm_id.empty()) {
+        allocs_.release_job(tj->slurm_id);  // This calls persist()
+    } else {
+        allocs_.persist();  // Just persist the canceled state
+    }
+
+    return Result<void>::Ok();
+}
+
+Result<void> JobManager::cancel_job(const std::string& job_name, StatusCallback cb) {
+    std::lock_guard<std::mutex> lock(tracked_mutex_);
+
+    // Find the most recent job by name (last match = newest)
+    TrackedJob* tj = nullptr;
+    for (auto& job : tracked_) {
+        if (job.job_name == job_name) {
+            tj = &job;
+        }
+    }
+
+    if (!tj) {
+        return Result<void>::Err("Job '" + job_name + "' not found");
+    }
+
+    if (cb) cb(fmt::format("Canceling job '{}'...", job_name));
+
+    auto result = do_cancel(tj, job_name);
+
+    if (result.is_ok() && cb) {
+        if (tj->slurm_id.empty()) {
+            cb(fmt::format("Job '{}' canceled during initialization", job_name));
+        } else {
+            cb(fmt::format("Job '{}' canceled (allocation {} kept alive)", job_name, tj->slurm_id));
+        }
+    }
+
+    return result;
+}
+
+Result<void> JobManager::cancel_job_by_id(const std::string& job_id, StatusCallback cb) {
+    std::lock_guard<std::mutex> lock(tracked_mutex_);
+
+    // Find job by ID
+    TrackedJob* tj = nullptr;
+    for (auto& job : tracked_) {
+        if (job.job_id == job_id) {
+            tj = &job;
+            break;
+        }
+    }
+
+    if (!tj) {
+        return Result<void>::Err("Job ID '" + job_id + "' not found");
+    }
+
+    if (cb) cb(fmt::format("Canceling job '{}'...", tj->job_name));
+
+    auto result = do_cancel(tj, tj->job_name);
+
+    if (result.is_ok() && cb) {
+        if (tj->slurm_id.empty()) {
+            cb(fmt::format("Job '{}' canceled during initialization", tj->job_name));
+        } else {
+            cb(fmt::format("Job '{}' canceled", tj->job_name));
+        }
+    }
+
+    return result;
 }
 
 Result<void> JobManager::return_output(const std::string& job_id, StatusCallback cb) {
@@ -571,6 +798,9 @@ void JobManager::on_job_complete(TrackedJob& tj) {
     // Release the allocation so it can be reused
     allocs_.release_job(tj.slurm_id);
 
+    // Set end time
+    tj.end_time = now_iso();
+
     // Update persistent state
     auto& jobs = allocs_.state().jobs;
     for (auto& js : jobs) {
@@ -578,6 +808,7 @@ void JobManager::on_job_complete(TrackedJob& tj) {
             js.completed = tj.completed;
             js.exit_code = tj.exit_code;
             js.output_file = tj.output_file;
+            js.end_time = tj.end_time;
             break;
         }
     }

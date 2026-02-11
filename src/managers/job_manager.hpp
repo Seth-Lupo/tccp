@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <set>
 #include <core/config.hpp>
 #include <ssh/connection.hpp>
 #include "allocation_manager.hpp"
@@ -16,6 +17,7 @@ struct TrackedJob {
     std::string job_name;     // e.g. "train"
     std::string compute_node; // filled once allocation is RUNNING
     bool completed = false;
+    bool canceled = false;    // true if manually killed via 'cancel' command
     int exit_code = -1;       // -1 = unknown/still running
     std::string output_file;  // local path to captured output
     std::string scratch_path; // /tmp/{user}/{project}/{job_id}
@@ -23,6 +25,11 @@ struct TrackedJob {
     // Init tracking (for background initialization)
     bool init_complete = false;      // true when job is launched on compute node
     std::string init_error;           // error message if init failed
+
+    // Timing
+    std::string submit_time;          // ISO timestamp when job was first submitted
+    std::string start_time;           // ISO timestamp when job started running (init_complete)
+    std::string end_time;             // ISO timestamp when job completed
 };
 
 class JobManager {
@@ -32,7 +39,8 @@ public:
 
     Result<TrackedJob> run(const std::string& job_name, StatusCallback cb = nullptr);
     SSHResult list(StatusCallback cb = nullptr);
-    SSHResult cancel(const std::string& slurm_id, StatusCallback cb = nullptr);
+    Result<void> cancel_job(const std::string& job_name, StatusCallback cb = nullptr);
+    Result<void> cancel_job_by_id(const std::string& job_id, StatusCallback cb = nullptr);
     Result<void> return_output(const std::string& job_id, StatusCallback cb = nullptr);
     void poll(std::function<void(const TrackedJob&)> on_complete);
     const std::vector<TrackedJob>& tracked_jobs() const;
@@ -51,6 +59,8 @@ private:
     std::vector<TrackedJob> tracked_;
     std::mutex tracked_mutex_;
     std::vector<std::thread> init_threads_;
+    std::set<std::string> cancel_requested_;  // job_ids marked for cancellation during init
+    std::mutex cancel_mutex_;
 
     // Path helpers (new directory structure)
     std::string persistent_base() const;
@@ -80,4 +90,7 @@ private:
         std::string node;
     };
     SlurmJobState query_alloc_state(const std::string& slurm_id);
+
+    // Shared cancel logic (used by both cancel_job and cancel_job_by_id)
+    Result<void> do_cancel(TrackedJob* tj, const std::string& job_name);
 };

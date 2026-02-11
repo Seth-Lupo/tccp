@@ -170,8 +170,8 @@ Result<AllocationState> AllocationManager::wait_for_allocation(
                 fmt::format("Lost connection while waiting for allocation {}", slurm_id));
         }
 
-        // Still PENDING — keep waiting
-        if (i % 6 == 0 && cb) {
+        // Still PENDING — keep waiting (report every 10 seconds)
+        if (i > 0 && i % 2 == 0 && cb) {
             cb(fmt::format("Still waiting for allocation {}... ({}s)", slurm_id, (i + 1) * 5));
         }
     }

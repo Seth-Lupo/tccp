@@ -32,13 +32,14 @@ static void handle_sigwinch(int) { g_need_resize = 1; }
 JobView::JobView(SessionManager& session, const std::string& compute_node,
                  const std::string& username, const std::string& dtach_socket,
                  const std::string& job_name, const std::string& slurm_id,
-                 const std::string& output_file)
+                 const std::string& output_file, const std::string& job_id,
+                 bool canceled)
     : session_(session), compute_node_(compute_node),
       username_(username), dtach_socket_(dtach_socket),
       job_name_(job_name), slurm_id_(slurm_id),
-      output_file_(output_file) {}
+      output_file_(output_file), job_id_(job_id), canceled_(canceled) {}
 
-void JobView::draw_header(bool terminated, int exit_code) {
+void JobView::draw_header(bool terminated, int exit_code, bool canceled) {
     struct winsize ws;
     int w = 80, h = 24;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
@@ -57,7 +58,12 @@ void JobView::draw_header(bool terminated, int exit_code) {
     // Bottom line: status + controls hint
     std::string l2_left, l2_right, l2_bg, l2_fg;
 
-    if (terminated) {
+    if (terminated && canceled) {
+        l2_left = " CANCELED";
+        l2_right = "↑↓ scroll  Ctrl+T top  Ctrl+\\ exit ";
+        l2_bg = "\033[48;2;60;60;60m";   // Grey
+        l2_fg = "\033[38;2;120;120;120m";
+    } else if (terminated) {
         l2_left = exit_code == 0 ? " TERMINATED" : fmt::format(" TERMINATED (exit {})", exit_code);
         l2_right = "↑↓ scroll  Ctrl+T top  Ctrl+\\ exit ";
         l2_bg = "\033[48;2;60;60;60m";   // Grey
@@ -69,7 +75,7 @@ void JobView::draw_header(bool terminated, int exit_code) {
         l2_fg = "\033[38;2;120;120;120m";
     } else {
         l2_left = " RUNNING";
-        l2_right = "↑↓ scroll  Ctrl+T top  Ctrl+\\ detach ";
+        l2_right = "↑↓ scroll  Ctrl+T top  Ctrl+C cancel  Ctrl+\\ detach ";
         l2_bg = "\033[48;2;85;72;62m";   // Brown
         l2_fg = "\033[38;2;150;150;150m";
     }
@@ -101,6 +107,11 @@ void JobView::draw_header(bool terminated, int exit_code) {
 }
 
 Result<int> JobView::attach(bool skip_remote_replay) {
+    // Check if job was canceled during init (no compute node assigned)
+    if (compute_node_.empty()) {
+        return Result<int>::Err("Job was canceled during initialization (no compute node assigned)");
+    }
+
     LIBSSH2_SESSION* ssh = session_.get_raw_session();
     int sock = session_.get_socket();
 
@@ -241,6 +252,17 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                 if (c == 0x1c) {
                     user_detached = true;
                     break;
+                }
+
+                // Ctrl+C → cancel job
+                if (c == 0x03) {
+                    libssh2_channel_close(channel);
+                    libssh2_channel_free(channel);
+                    if (capture) fclose(capture);
+                    write(STDOUT_FILENO, "\033[r", 3);
+                    tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
+                    sigaction(SIGWINCH, &old_sa, nullptr);
+                    return Result<int>::Ok(-2);  // Signal: cancel requested
                 }
 
                 // Ctrl+T → scroll to top (show full screen)
@@ -430,7 +452,7 @@ Result<int> JobView::attach(bool skip_remote_replay) {
         }
 
         TerminalUI::wait_for_exit_with_scroll(output_lines, exit_status, [this, exit_status]() {
-            draw_header(true, exit_status);
+            draw_header(true, exit_status, canceled_);
         });
     }
 
