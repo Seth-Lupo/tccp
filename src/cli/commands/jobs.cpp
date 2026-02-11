@@ -336,6 +336,7 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
         // Transition to live job view
         draw_header(arg, "RUNNING on " + tracked->compute_node,
                     tracked->slurm_id, tracked->compute_node);
+        std::cout.flush();
 
         std::string output_path = output_path_for(tracked->job_id);
         tracked->output_file = output_path;
@@ -353,6 +354,7 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
 
     draw_header(arg, status, tracked->slurm_id, tracked->compute_node);
     setup_content_area();
+    std::cout.flush();
 
     attach_to_job(cli, tracked, arg, true);
 }

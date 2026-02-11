@@ -330,7 +330,7 @@ void JobView::draw_header() {
     out += "\033[0m";
 
     out += fmt::format("\033[{};1H", h);
-    out += "\033[48;2;74;74;74m\033[38;2;150;150;150m";
+    out += "\033[48;2;85;72;62m\033[38;2;150;150;150m";
     out += l2_left;
     out.append(l2_pad, ' ');
     out += "\033[38;2;120;120;120m" + l2_right;
@@ -364,6 +364,7 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     std::string sr = fmt::format("\0337\033[1;{}r\0338", pty_rows);
     write(STDOUT_FILENO, sr.data(), sr.size());
     draw_header();
+    write(STDOUT_FILENO, "\033[H", 3);  // Move cursor to top-left of scroll region
 
     // ── Open channel ──────────────────────────────────────
 
@@ -446,7 +447,6 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     bool should_clear_on_start = !skip_remote_replay;
     bool job_started = false;      // True once we detect job actually running
 
-    auto last_header = std::chrono::steady_clock::now();
     bool remote_eof = false;
     bool user_detached = false;
     bool write_error = false;
@@ -494,14 +494,25 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                         if (scroll_offset < compute_max_scroll(output_lines.size())) {
                             scroll_offset++;
                             redraw_viewport(output_lines, scroll_offset);
+                            draw_header();
                         }
                         continue;
                     } else if (seq == 'B') {  // Down arrow - scroll forward to view newer output
                         if (scroll_offset > 0) {
                             scroll_offset--;
                             redraw_viewport(output_lines, scroll_offset);
+                            draw_header();
                             if (scroll_offset == 0) {
                                 in_scroll_mode = false;
+                                // Reprint input buffer at bottom
+                                if (!input_buffer.empty()) {
+                                    write(STDOUT_FILENO, input_buffer.c_str(), input_buffer.size());
+                                    // Move cursor back to correct position
+                                    int moves_back = input_buffer.size() - cursor_pos;
+                                    for (int j = 0; j < moves_back; j++) {
+                                        write(STDOUT_FILENO, "\033[D", 3);
+                                    }
+                                }
                             }
                         }
                         continue;
@@ -511,6 +522,16 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                             scroll_offset = 0;
                             in_scroll_mode = false;
                             redraw_viewport(output_lines, 0);
+                            draw_header();
+                            // Reprint input buffer at bottom
+                            if (!input_buffer.empty()) {
+                                write(STDOUT_FILENO, input_buffer.c_str(), input_buffer.size());
+                                // Move cursor back to correct position
+                                int moves_back = input_buffer.size() - cursor_pos;
+                                for (int j = 0; j < moves_back; j++) {
+                                    write(STDOUT_FILENO, "\033[D", 3);
+                                }
+                            }
                         }
                         if (cursor_pos > 0) {
                             cursor_pos--;
@@ -522,6 +543,16 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                             scroll_offset = 0;
                             in_scroll_mode = false;
                             redraw_viewport(output_lines, 0);
+                            draw_header();
+                            // Reprint input buffer at bottom
+                            if (!input_buffer.empty()) {
+                                write(STDOUT_FILENO, input_buffer.c_str(), input_buffer.size());
+                                // Move cursor back to correct position
+                                int moves_back = input_buffer.size() - cursor_pos;
+                                for (int j = 0; j < moves_back; j++) {
+                                    write(STDOUT_FILENO, "\033[D", 3);
+                                }
+                            }
                         }
                         if (cursor_pos < (int)input_buffer.size()) {
                             cursor_pos++;
@@ -536,6 +567,16 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                     scroll_offset = 0;
                     in_scroll_mode = false;
                     redraw_viewport(output_lines, 0);
+                    draw_header();
+                    // Reprint input buffer at bottom
+                    if (!input_buffer.empty()) {
+                        write(STDOUT_FILENO, input_buffer.c_str(), input_buffer.size());
+                        // Move cursor back to correct position
+                        int moves_back = input_buffer.size() - cursor_pos;
+                        for (int j = 0; j < moves_back; j++) {
+                            write(STDOUT_FILENO, "\033[D", 3);
+                        }
+                    }
                 }
 
                 // Handle backspace/delete
@@ -612,12 +653,11 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                 got_output = true;
             }
 
-            if (got_output) {
-                auto now = std::chrono::steady_clock::now();
-                if ((now - last_header) >= std::chrono::milliseconds(500)) {
-                    draw_header();
-                    last_header = now;
-                }
+            if (got_output && !in_scroll_mode) {
+                // Re-assert scroll region (remote output may reset it)
+                std::string sr = fmt::format("\0337\033[1;{}r\0338", pty_rows);
+                write(STDOUT_FILENO, sr.data(), sr.size());
+                draw_header();
             }
         }
 
