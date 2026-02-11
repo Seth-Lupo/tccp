@@ -2,6 +2,8 @@ add_library(tccp_cli
     base_cli.cpp
     tccp_cli.cpp
     preflight.cpp
+    terminal_output.cpp
+    terminal_ui.cpp
     job_view.cpp
     commands/setup.cpp
     commands/connection.cpp

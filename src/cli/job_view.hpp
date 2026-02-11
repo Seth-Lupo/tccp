@@ -17,7 +17,7 @@ public:
     // skip_remote_replay: caller already replayed local capture, skip remote tail.
     Result<int> attach(bool skip_remote_replay = false);
 
-    void draw_header();
+    void draw_header(bool terminated = false, int exit_code = 0);
 
 private:
     SessionManager& session_;
@@ -27,4 +27,5 @@ private:
     std::string job_name_;
     std::string slurm_id_;
     std::string output_file_;
+    bool got_first_output_ = false;
 };

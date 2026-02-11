@@ -76,7 +76,7 @@ static void draw_header(const std::string& job_name,
     int l1_pad = std::max(0, w - static_cast<int>(l1_text.size()));
 
     std::string l2_left = " " + status;
-    std::string l2_right = "Ctrl+\\\\ to detach ";
+    std::string l2_right = "Ctrl+\\ to detach ";
     int l2_pad = std::max(0, w - static_cast<int>(l2_left.size()) - static_cast<int>(l2_right.size()));
 
     std::cout << "\0337";
