@@ -102,7 +102,9 @@ struct ProjectConfig {
     std::string remote_dir;
     std::map<std::string, std::string> environment;
     std::map<std::string, JobConfig> jobs;
-    std::map<std::string, std::string> rodata;
+    std::vector<std::string> rodata;             // read-only data directories (string or list in YAML)
+    std::string output;                          // output directory
+    std::string cache;                           // cache directory (best-effort, shared across jobs on same allocation)
     std::optional<SlurmDefaults> slurm;          // project-level SLURM defaults
 };
 

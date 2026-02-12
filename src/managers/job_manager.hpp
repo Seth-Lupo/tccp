@@ -61,6 +61,7 @@ private:
     std::vector<std::thread> init_threads_;
     std::set<std::string> cancel_requested_;  // job_ids marked for cancellation during init
     std::mutex cancel_mutex_;
+    bool environment_checked_ = false;  // Cache: only check environment once per session
 
     // Path helpers (new directory structure)
     std::string persistent_base() const;

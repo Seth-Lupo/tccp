@@ -52,3 +52,6 @@ bool project_config_exists(const fs::path& dir = fs::current_path());
 fs::path get_global_config_dir();
 fs::path get_global_config_path();
 fs::path get_project_config_path(const fs::path& dir = fs::current_path());
+
+// Create default global config
+Result<void> create_default_global_config();

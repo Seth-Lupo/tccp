@@ -13,6 +13,14 @@ struct AllocationState {
     std::string start_time;         // ISO timestamp
     int duration_minutes = 240;     // total allocation time (default 4h)
     std::string active_job_id;      // "" if idle
+
+    // Resource specification (what was requested from SLURM)
+    std::string partition;
+    int nodes = 1;
+    int cpus = 1;
+    std::string memory = "4G";
+    std::string gpu_type;
+    int gpu_count = 0;
 };
 
 struct JobState {

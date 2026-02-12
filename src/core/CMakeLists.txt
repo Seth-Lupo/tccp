@@ -1,6 +1,8 @@
 add_library(tccp_core
     config.cpp
     credentials.cpp
+    directory_structure.cpp
+    resource_spec.cpp
 )
 
 target_include_directories(tccp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

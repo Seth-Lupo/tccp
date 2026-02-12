@@ -22,6 +22,10 @@ private:
     SSHConnection& dtn_;
     std::string username_;
 
+    // Manifest cache to avoid rescanning unchanged directories
+    std::vector<SyncManifestEntry> cached_manifest_;
+    int64_t cached_manifest_mtime_ = 0;
+
     std::vector<SyncManifestEntry> build_local_manifest();
     std::vector<std::string> diff_manifests(
         const std::vector<SyncManifestEntry>& local,

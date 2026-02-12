@@ -1,6 +1,7 @@
 #include "allocation_manager.hpp"
 #include <core/config.hpp>
 #include <core/credentials.hpp>
+#include <core/resource_spec.hpp>
 #include <fmt/format.h>
 #include <chrono>
 #include <thread>
@@ -103,11 +104,23 @@ void AllocationManager::reconcile(StatusCallback cb) {
     persist();
 }
 
-AllocationState* AllocationManager::find_free(int required_minutes) {
+AllocationState* AllocationManager::find_free(int required_minutes,
+                                               const SlurmDefaults& required_resources) {
     for (auto& alloc : state_.allocations) {
         if (alloc.active_job_id.empty() && !alloc.node.empty()) {
             int rem = remaining_minutes(alloc);
-            if (rem >= required_minutes) {
+            if (rem < required_minutes) continue;
+
+            // Check resource compatibility
+            SlurmDefaults alloc_res;
+            alloc_res.partition = alloc.partition;
+            alloc_res.nodes = alloc.nodes;
+            alloc_res.cpus_per_task = alloc.cpus;
+            alloc_res.memory = alloc.memory;
+            alloc_res.gpu_type = alloc.gpu_type;
+            alloc_res.gpu_count = alloc.gpu_count;
+
+            if (resources_compatible(alloc_res, required_resources)) {
                 return &alloc;
             }
         }
@@ -243,11 +256,8 @@ std::string AllocationManager::generate_alloc_script(const SlurmDefaults& profil
     std::string s;
     s += "#!/bin/bash\n";
     s += fmt::format("#SBATCH --job-name=tccp-{}\n", config_.project().name);
-    s += "#SBATCH --partition=batch\n";
     s += fmt::format("#SBATCH --time={}\n", profile.time);
-    s += "#SBATCH --nodes=1\n";
-    s += "#SBATCH --cpus-per-task=1\n";
-    s += "#SBATCH --mem=1G\n";
+    s += generate_sbatch_resources(profile);
     s += fmt::format("#SBATCH --output={}/alloc-%j.out\n", base);
     s += fmt::format("#SBATCH --error={}/alloc-%j.err\n", base);
     s += "\nsleep infinity\n";
@@ -291,6 +301,12 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
     AllocationState alloc;
     alloc.slurm_id = slurm_id;
     alloc.duration_minutes = parse_time_minutes(profile.time);
+    alloc.partition = profile.partition.empty() ? "batch" : profile.partition;
+    alloc.nodes = profile.nodes > 0 ? profile.nodes : 1;
+    alloc.cpus = profile.cpus_per_task > 0 ? profile.cpus_per_task : 1;
+    alloc.memory = profile.memory.empty() ? "4G" : profile.memory;
+    alloc.gpu_type = profile.gpu_type;
+    alloc.gpu_count = profile.gpu_count;
     state_.allocations.push_back(alloc);
     persist();
 

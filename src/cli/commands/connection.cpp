@@ -6,7 +6,7 @@
 
 static void do_disconnect(BaseCLI& cli, const std::string& arg) {
     if (!cli.cluster) {
-        std::cout << theme::fail("Not connected.");
+        std::cout << theme::error("Not connected.");
         return;
     }
 
@@ -24,7 +24,7 @@ static void do_status(BaseCLI& cli, const std::string& arg) {
     if (global_config_exists()) {
         std::cout << theme::kv("Config", get_global_config_path().string());
     } else {
-        std::cout << theme::fail("Config not found");
+        std::cout << theme::error("Config not found");
     }
 
     // Project
@@ -32,7 +32,7 @@ static void do_status(BaseCLI& cli, const std::string& arg) {
         std::cout << theme::kv("Project", cli.config.value().project().name);
         std::cout << theme::kv("Remote", cli.config.value().project().remote_dir);
     } else {
-        std::cout << theme::fail("Project not registered");
+        std::cout << theme::error("Project not registered");
     }
 
     // Connection

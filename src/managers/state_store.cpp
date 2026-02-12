@@ -27,6 +27,12 @@ ProjectState StateStore::load() {
                 a.start_time = n["start_time"].as<std::string>("");
                 a.duration_minutes = n["duration_minutes"].as<int>(240);
                 a.active_job_id = n["active_job_id"].as<std::string>("");
+                a.partition = n["partition"].as<std::string>("");
+                a.nodes = n["nodes"].as<int>(1);
+                a.cpus = n["cpus"].as<int>(1);
+                a.memory = n["memory"].as<std::string>("4G");
+                a.gpu_type = n["gpu_type"].as<std::string>("");
+                a.gpu_count = n["gpu_count"].as<int>(0);
                 state.allocations.push_back(a);
             }
         }
@@ -89,6 +95,12 @@ void StateStore::save(const ProjectState& state) {
         out << YAML::Key << "start_time" << YAML::Value << a.start_time;
         out << YAML::Key << "duration_minutes" << YAML::Value << a.duration_minutes;
         out << YAML::Key << "active_job_id" << YAML::Value << a.active_job_id;
+        out << YAML::Key << "partition" << YAML::Value << a.partition;
+        out << YAML::Key << "nodes" << YAML::Value << a.nodes;
+        out << YAML::Key << "cpus" << YAML::Value << a.cpus;
+        out << YAML::Key << "memory" << YAML::Value << a.memory;
+        out << YAML::Key << "gpu_type" << YAML::Value << a.gpu_type;
+        out << YAML::Key << "gpu_count" << YAML::Value << a.gpu_count;
         out << YAML::EndMap;
     }
     out << YAML::EndSeq;

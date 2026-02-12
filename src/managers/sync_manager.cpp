@@ -19,6 +19,18 @@ SyncManager::SyncManager(const Config& config, SSHConnection& dtn)
 }
 
 std::vector<SyncManifestEntry> SyncManager::build_local_manifest() {
+    // Check project directory mtime to see if anything changed
+    try {
+        auto proj_mtime = fs::last_write_time(config_.project_dir()).time_since_epoch().count();
+        if (!cached_manifest_.empty() && proj_mtime == cached_manifest_mtime_) {
+            // Nothing changed, return cached manifest
+            return cached_manifest_;
+        }
+        cached_manifest_mtime_ = proj_mtime;
+    } catch (...) {
+        // If mtime check fails, rebuild manifest
+    }
+
     std::vector<SyncManifestEntry> manifest;
 
     GitignoreParser parser(config_.project_dir());
@@ -27,11 +39,6 @@ std::vector<SyncManifestEntry> SyncManager::build_local_manifest() {
     for (const auto& f : files) {
         auto rel = parser.get_relative_path(f);
         std::string rel_str = rel.string();
-
-        // Skip rodata directory (handled separately)
-        if (rel_str.substr(0, 7) == "rodata/" || rel_str == "rodata") {
-            continue;
-        }
 
         SyncManifestEntry entry;
         entry.path = rel_str;
@@ -48,35 +55,39 @@ std::vector<SyncManifestEntry> SyncManager::build_local_manifest() {
         manifest.push_back(entry);
     }
 
-    // Also add rodata files
+    // Add rodata files (maintaining exact directory structure)
     const auto& rodata = config_.project().rodata;
-    for (const auto& [label, local_path] : rodata) {
-        fs::path src = local_path;
+    for (const auto& rodata_path : rodata) {
+        fs::path src = rodata_path;
         if (src.is_relative()) {
             src = config_.project_dir() / src;
         }
-        if (!fs::exists(src) || !fs::is_directory(src)) continue;
+        if (!fs::exists(src)) continue;
 
-        for (const auto& entry_fs : fs::recursive_directory_iterator(src)) {
-            if (!entry_fs.is_regular_file()) continue;
-            auto rel = fs::relative(entry_fs.path(), src);
+        if (fs::is_directory(src)) {
+            for (const auto& entry_fs : fs::recursive_directory_iterator(src)) {
+                if (!entry_fs.is_regular_file()) continue;
+                auto rel = fs::relative(entry_fs.path(), config_.project_dir());
 
-            SyncManifestEntry entry;
-            entry.path = "rodata/" + label + "/" + rel.string();
+                SyncManifestEntry entry;
+                entry.path = rel.string();
 
-            try {
-                auto ftime = fs::last_write_time(entry_fs.path());
-                entry.mtime = ftime.time_since_epoch().count();
-                entry.size = static_cast<int64_t>(fs::file_size(entry_fs.path()));
-            } catch (...) {
-                entry.mtime = 0;
-                entry.size = 0;
+                try {
+                    auto ftime = fs::last_write_time(entry_fs.path());
+                    entry.mtime = ftime.time_since_epoch().count();
+                    entry.size = static_cast<int64_t>(fs::file_size(entry_fs.path()));
+                } catch (...) {
+                    entry.mtime = 0;
+                    entry.size = 0;
+                }
+
+                manifest.push_back(entry);
             }
-
-            manifest.push_back(entry);
         }
     }
 
+    // Cache the manifest for next time
+    cached_manifest_ = manifest;
     return manifest;
 }
 
@@ -120,75 +131,62 @@ void SyncManager::full_sync(const std::string& compute_node,
     GitignoreParser parser(config_.project_dir());
     auto files = parser.collect_files();
 
-    std::vector<fs::path> code_files;
+    std::vector<fs::path> project_files;
     for (const auto& f : files) {
-        auto rel = parser.get_relative_path(f);
-        std::string rel_str = rel.string();
-        if (rel_str.substr(0, 7) != "rodata/" && rel_str != "rodata") {
-            code_files.push_back(f);
-        }
+        project_files.push_back(f);
     }
 
-    if (cb) cb(fmt::format("Staging {} code files...", code_files.size()));
+    if (cb) cb(fmt::format("Staging {} project files...", project_files.size()));
 
-    // Upload code to DTN temp, then tar to compute node
+    // Upload files to DTN temp, then tar to compute node
     std::string dtn_tmp = fmt::format("/tmp/tccp_sync_{}", std::time(nullptr));
-    std::string code_tmp = dtn_tmp + "/code";
 
-    // Create dirs on DTN
+    // Create all necessary directories on DTN
     std::set<std::string> dirs;
-    for (const auto& f : code_files) {
+    for (const auto& f : project_files) {
         auto rel = parser.get_relative_path(f);
         auto parent = rel.parent_path();
         if (!parent.empty() && parent != ".") {
-            dirs.insert(code_tmp + "/" + parent.string());
+            dirs.insert(dtn_tmp + "/" + parent.string());
         }
     }
-    std::string mkdir_cmd = "mkdir -p " + code_tmp;
+    std::string mkdir_cmd = "mkdir -p " + dtn_tmp;
     for (const auto& d : dirs) {
         mkdir_cmd += " " + d;
     }
     dtn_.run(mkdir_cmd);
 
-    // Upload files to DTN
-    for (const auto& f : code_files) {
+    // Upload all project files to DTN
+    for (const auto& f : project_files) {
         auto rel = parser.get_relative_path(f);
-        dtn_.upload(f, code_tmp + "/" + rel.string());
+        dtn_.upload(f, dtn_tmp + "/" + rel.string());
     }
 
-    // Tar from DTN to compute node
-    if (cb) cb("Transferring code to compute node...");
-    dtn_.run(fmt::format("cd {}/code && tar cf - . | ssh {} {} 'cd {} && tar xf -'",
-                         dtn_tmp, ssh_opts, compute_node, scratch_path));
-
-    // Rodata
+    // Add rodata files
     const auto& rodata = proj.rodata;
-    if (!rodata.empty()) {
-        if (cb) cb("Staging rodata...");
-        for (const auto& [label, local_path] : rodata) {
-            std::string dest = dtn_tmp + "/rodata/" + label;
-            dtn_.run("mkdir -p " + dest);
+    for (const auto& rodata_path : rodata) {
+        fs::path src = rodata_path;
+        if (src.is_relative()) src = config_.project_dir() / src;
+        if (!fs::exists(src)) continue;
 
-            fs::path src = local_path;
-            if (src.is_relative()) src = config_.project_dir() / src;
-            if (!fs::exists(src) || !fs::is_directory(src)) continue;
-
+        if (fs::is_directory(src)) {
             for (const auto& entry : fs::recursive_directory_iterator(src)) {
                 if (!entry.is_regular_file()) continue;
-                auto rel = fs::relative(entry.path(), src);
-                std::string remote = dest + "/" + rel.string();
+                auto rel = fs::relative(entry.path(), config_.project_dir());
+                std::string remote = dtn_tmp + "/" + rel.string();
                 auto parent = rel.parent_path();
                 if (!parent.empty() && parent != ".") {
-                    dtn_.run("mkdir -p " + dest + "/" + parent.string());
+                    dtn_.run("mkdir -p " + dtn_tmp + "/" + parent.string());
                 }
                 dtn_.upload(entry.path(), remote);
             }
         }
-
-        if (cb) cb("Transferring rodata to compute node...");
-        dtn_.run(fmt::format("cd {} && tar cf - rodata | ssh {} {} 'cd {} && tar xf -'",
-                             dtn_tmp, ssh_opts, compute_node, scratch_path));
     }
+
+    // Tar from DTN to compute node
+    if (cb) cb("Transferring files to compute node...");
+    dtn_.run(fmt::format("cd {} && tar cf - . | ssh {} {} 'cd {} && tar xf -'",
+                         dtn_tmp, ssh_opts, compute_node, scratch_path));
 
     // Clean up DTN temp
     dtn_.run("rm -rf " + dtn_tmp);
@@ -223,7 +221,7 @@ void SyncManager::incremental_sync(const std::string& compute_node,
     std::string dtn_tmp = fmt::format("/tmp/tccp_delta_{}", std::time(nullptr));
     GitignoreParser parser(config_.project_dir());
 
-    // Separate code files and rodata files
+    // Create necessary directories on DTN
     std::set<std::string> dirs_needed;
     for (const auto& rel_path : changed_files) {
         auto parent = fs::path(rel_path).parent_path();
@@ -237,25 +235,9 @@ void SyncManager::incremental_sync(const std::string& compute_node,
     }
     dtn_.run(mkdir_cmd);
 
+    // Upload changed files (paths are already relative to project dir)
     for (const auto& rel_path : changed_files) {
-        fs::path local_file;
-
-        if (rel_path.substr(0, 7) == "rodata/") {
-            // rodata/label/rest → find the local source
-            auto parts = rel_path.substr(7); // label/rest
-            auto slash = parts.find('/');
-            if (slash == std::string::npos) continue;
-            std::string label = parts.substr(0, slash);
-            std::string rest = parts.substr(slash + 1);
-
-            auto it = proj.rodata.find(label);
-            if (it == proj.rodata.end()) continue;
-            fs::path src = it->second;
-            if (src.is_relative()) src = config_.project_dir() / src;
-            local_file = src / rest;
-        } else {
-            local_file = config_.project_dir() / rel_path;
-        }
+        fs::path local_file = config_.project_dir() / rel_path;
 
         if (fs::exists(local_file)) {
             dtn_.upload(local_file, dtn_tmp + "/" + rel_path);

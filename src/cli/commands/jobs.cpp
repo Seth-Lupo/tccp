@@ -165,18 +165,18 @@ static bool attach_to_job(BaseCLI& cli, TrackedJob* tracked,
     if (in_alt_screen) leave_alt_screen();
 
     if (result.is_err()) {
-        std::cout << theme::fail("Attach failed: " + result.error);
+        std::cout << theme::error("Attach failed: " + result.error);
         return false;
     }
 
     if (result.value == -2) {
         // User pressed Ctrl+C to cancel job
-        std::cout << theme::step("Canceling job...");
+        std::cout << "Canceling job...\n";
         auto cancel_result = cli.jobs->cancel_job_by_id(tracked->job_id, nullptr);
         if (cancel_result.is_ok()) {
-            std::cout << theme::ok(fmt::format("Job '{}' canceled", job_name));
+            std::cout << theme::dim(fmt::format("Job '{}' canceled", job_name)) << "\n";
         } else {
-            std::cout << theme::fail(cancel_result.error);
+            std::cout << theme::error(cancel_result.error);
         }
         return false;
     }
@@ -185,11 +185,11 @@ static bool attach_to_job(BaseCLI& cli, TrackedJob* tracked,
         tracked->exit_code = result.value;
         tracked->completed = true;
         if (cli.jobs) cli.jobs->on_job_complete(*tracked);
-        std::cout << theme::step("Session ended.");
+        std::cout << "Session ended.\n";
         return true;
     }
 
-    std::cout << theme::step("Detached. Use 'view " + job_name + "' to re-attach.");
+    std::cout << "Detached. Use 'view " + job_name + "' to re-attach.\n";
     return false;
 }
 
@@ -202,17 +202,17 @@ static void do_run(BaseCLI& cli, const std::string& arg) {
     if (!cli.jobs) return;
 
     if (arg.empty()) {
-        std::cout << theme::fail("Usage: run <job-name>");
+        std::cout << theme::error("Usage: run <job-name>");
         return;
     }
 
     auto* existing = cli.jobs->find_by_name(arg);
     if (existing && !existing->completed && existing->init_error.empty()) {
         if (!existing->init_complete) {
-            std::cout << theme::fail(fmt::format("Job '{}' is still initializing. "
+            std::cout << theme::error(fmt::format("Job '{}' is still initializing. "
                 "Use 'view {}' to check progress.", arg, arg));
         } else {
-            std::cout << theme::fail(fmt::format("Job '{}' is already running. "
+            std::cout << theme::error(fmt::format("Job '{}' is already running. "
                 "Cancel it first or wait for it to finish.", arg));
         }
         return;
@@ -222,7 +222,7 @@ static void do_run(BaseCLI& cli, const std::string& arg) {
     auto result = cli.jobs->run(arg, nullptr);
 
     if (result.is_err()) {
-        std::cout << theme::fail(result.error) << "\n";
+        std::cout << theme::error(result.error);
         return;
     }
 
@@ -235,25 +235,25 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
     if (!cli.jobs) return;
 
     if (arg.empty()) {
-        std::cout << theme::fail("Usage: view <job-name>");
+        std::cout << theme::error("Usage: view <job-name>");
         return;
     }
 
     auto* tracked = cli.jobs->find_by_name(arg);
     if (!tracked) {
-        std::cout << theme::fail(fmt::format("No tracked job named '{}'", arg));
+        std::cout << theme::error(fmt::format("No tracked job named '{}'", arg));
         return;
     }
 
     // Check if canceled during initialization
     if (tracked->canceled && !tracked->init_complete) {
-        std::cout << theme::step(fmt::format("Job '{}' was canceled during initialization", arg));
+        std::cout << fmt::format("Job '{}' was canceled during initialization", arg) << "\n";
         return;
     }
 
     // Check if init failed
     if (!tracked->init_error.empty()) {
-        std::cout << theme::fail(fmt::format("Job '{}' init failed: {}", arg, tracked->init_error)) << "\n";
+        std::cout << theme::error(fmt::format("Job '{}' init failed: {}", arg, tracked->init_error)) << "\n";
         return;
     }
 
@@ -309,20 +309,20 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
             if (user_detached) {
                 tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                 leave_alt_screen();
-                std::cout << theme::step(fmt::format(
-                    "Detached. Init continues in background. 'view {}' to check.", arg));
+                std::cout << fmt::format(
+                    "Detached. Init continues in background. 'view {}' to check.", arg) << "\n";
                 return;
             }
 
             if (user_canceled) {
                 tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                 leave_alt_screen();
-                std::cout << theme::step("Canceling job during initialization...");
+                std::cout << "Canceling job during initialization...\n";
                 auto cancel_result = cli.jobs->cancel_job_by_id(tracked->job_id, nullptr);
                 if (cancel_result.is_ok()) {
-                    std::cout << theme::ok(fmt::format("Job '{}' canceled during initialization", arg));
+                    std::cout << theme::dim(fmt::format("Job '{}' canceled during initialization", arg)) << "\n";
                 } else {
-                    std::cout << theme::fail(cancel_result.error);
+                    std::cout << theme::error(cancel_result.error);
                 }
                 return;
             }
@@ -345,7 +345,7 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
                         std::cout << theme::log(line) << std::flush;
                     }
                 }
-                std::cout << "\n" << theme::fail(tracked->init_error) << std::flush;
+                std::cout << "\n" << theme::error(tracked->init_error) << std::flush;
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                 leave_alt_screen();
@@ -365,7 +365,7 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
 
                 // Check if it was canceled during init
                 if (tracked->canceled) {
-                    std::cout << "\n" << theme::step("Job canceled during initialization") << std::flush;
+                    std::cout << "\nJob canceled during initialization\n" << std::flush;
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                     tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                     leave_alt_screen();
@@ -398,7 +398,7 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
 
     // Check if canceled during init (compute_node will be empty)
     if (tracked->canceled && tracked->compute_node.empty()) {
-        std::cout << theme::step(fmt::format("Job '{}' was canceled during initialization", arg));
+        std::cout << fmt::format("Job '{}' was canceled during initialization", arg) << "\n";
         return;
     }
 
@@ -482,7 +482,7 @@ static void do_jobs(BaseCLI& cli, const std::string& arg) {
 
     const auto& tracked = cli.jobs->tracked_jobs();
     if (tracked.empty()) {
-        std::cout << theme::step("No tracked jobs.");
+        std::cout << "No tracked jobs.\n";
         return;
     }
 
@@ -539,19 +539,19 @@ static void do_cancel(BaseCLI& cli, const std::string& arg) {
     if (!cli.jobs) return;
 
     if (arg.empty()) {
-        std::cout << theme::fail("Usage: cancel <job-name>");
+        std::cout << theme::error("Usage: cancel <job-name>");
         return;
     }
 
     auto cb = [](const std::string& msg) {
-        std::cout << theme::step(msg);
+        std::cout << msg << "\n";
     };
 
     auto result = cli.jobs->cancel_job(arg, cb);
     if (result.is_ok()) {
-        std::cout << theme::ok(fmt::format("Canceled job '{}'", arg));
+        std::cout << theme::dim(fmt::format("Canceled job '{}'", arg));
     } else {
-        std::cout << theme::fail(result.error);
+        std::cout << theme::error(result.error);
     }
 }
 
@@ -560,17 +560,17 @@ static void do_return(BaseCLI& cli, const std::string& arg) {
     if (!cli.jobs) return;
 
     if (arg.empty()) {
-        std::cout << theme::fail("Usage: return <job-id>");
+        std::cout << theme::error("Usage: return <job-id>");
         return;
     }
 
     auto cb = [](const std::string& msg) {
-        std::cout << theme::ok(msg);
+        std::cout << theme::dim(msg);
     };
 
     auto result = cli.jobs->return_output(arg, cb);
     if (result.is_err()) {
-        std::cout << theme::fail(result.error);
+        std::cout << theme::error(result.error);
     }
 }
 
@@ -582,7 +582,7 @@ static void do_allocs(BaseCLI& cli, const std::string& arg) {
 
     const auto& allocs = cli.allocs->allocations();
     if (allocs.empty()) {
-        std::cout << theme::step("No active allocations.");
+        std::cout << "No active allocations.\n";
         return;
     }
 
@@ -615,7 +615,7 @@ static void do_dealloc(BaseCLI& cli, const std::string& arg) {
     if (!cli.allocs) return;
 
     auto cb = [](const std::string& msg) {
-        std::cout << theme::ok(msg);
+        std::cout << theme::dim(msg);
     };
 
     if (arg.empty() || arg == "all") {

@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <core/config.hpp>
+#include <core/resource_spec.hpp>
 #include <ssh/connection.hpp>
 #include "state_store.hpp"
 
@@ -14,8 +15,9 @@ public:
     // On startup: load state, query SLURM, prune dead allocations
     void reconcile(StatusCallback cb = nullptr);
 
-    // Find a free RUNNING allocation with enough time remaining (minutes)
-    AllocationState* find_free(int required_minutes);
+    // Find a free RUNNING allocation with enough time remaining and
+    // compatible resources. Pass resolved profile for resource matching.
+    AllocationState* find_free(int required_minutes, const SlurmDefaults& required_resources);
 
     // Find a PENDING allocation (submitted but no node yet)
     AllocationState* find_pending();

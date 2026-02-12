@@ -57,7 +57,7 @@ void BaseCLI::clear_managers() {
 void BaseCLI::execute_command(const std::string& command, const std::string& args) {
     auto it = commands_.find(command);
     if (it == commands_.end()) {
-        std::cout << theme::fail("Unknown command: " + command);
+        std::cout << theme::error("Unknown command: " + command);
         std::cout << theme::step("Type 'help' for available commands.");
         return;
     }
@@ -65,7 +65,7 @@ void BaseCLI::execute_command(const std::string& command, const std::string& arg
     try {
         it->second.first(*this, args);
     } catch (const std::exception& e) {
-        std::cout << theme::fail(std::string(e.what()));
+        std::cout << theme::error(std::string(e.what()));
     }
 }
 

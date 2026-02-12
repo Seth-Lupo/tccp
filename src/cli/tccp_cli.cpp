@@ -8,9 +8,17 @@
 #include <termios.h>
 #include <unistd.h>
 #include <cstdlib>
+#include <core/config.hpp>
 #include <core/credentials.hpp>
+#include <core/directory_structure.hpp>
 #include <readline/readline.h>
 #include <readline/history.h>
+
+// Check if SLURM is responding (exit code 0 = healthy)
+static bool check_slurm_health(ClusterConnection& cluster) {
+    auto result = cluster.login().run("sinfo -h 2>&1");
+    return result.exit_code == 0;
+}
 
 TCCPCLI::TCCPCLI() : BaseCLI() {
     register_all_commands();
@@ -99,7 +107,7 @@ void TCCPCLI::run_connected_repl() {
     cluster = std::make_unique<ClusterConnection>(config.value());
 
     auto callback = [](const std::string& msg) {
-        std::cout << theme::info(msg);
+        std::cout << theme::dim("    " + msg) << "\n";
     };
 
     auto result = cluster->connect(callback);
@@ -109,9 +117,26 @@ void TCCPCLI::run_connected_repl() {
         cluster.reset();
         return;
     }
+    std::cout << theme::check("Connection is HEALTHY");
 
     // Initialize managers
     init_managers();
+
+    // Check SLURM health before starting REPL
+    std::cout << theme::section("Checking SLURM");
+    if (!check_slurm_health(*cluster)) {
+        std::cout << theme::fail("SLURM is not responding.");
+        std::cout << theme::dim("    Run 'exec sinfo' to test cluster connectivity.") << "\n";
+        std::cout << theme::dim("    The cluster may be down or undergoing maintenance.") << "\n";
+        std::cout << theme::dim("    Check for maintenance announcements from Tufts HPC.") << "\n\n";
+        std::cout << theme::dim("    Try again later when the cluster is healthy.") << "\n\n";
+        cluster->disconnect();
+        cluster.reset();
+        clear_managers();
+        return;
+    }
+    std::cout << theme::check("SLURM controller is UP");
+    std::cout << "\n";
 
     std::cout << theme::section("Connected");
     std::cout << theme::kv("DTN", config.value().dtn().host);
@@ -135,17 +160,27 @@ void TCCPCLI::run_connected_repl() {
             break;
         }
 
+        // Check SLURM health before each command
+        if (!check_slurm_health(*cluster)) {
+            std::cout << "\n" << theme::divider();
+            std::cout << theme::fail("SLURM is not responding.");
+            std::cout << theme::dim("    The cluster has become unavailable.") << "\n";
+            std::cout << theme::dim("    Run 'exec sinfo' to test connectivity.") << "\n\n";
+            std::cout << theme::dim("    Exiting. Run 'tccp' when the cluster is healthy.") << "\n\n";
+            break;
+        }
+
         // Poll for completed jobs (throttled to every 30s)
         auto now = std::chrono::steady_clock::now();
         if (jobs && (now - last_poll_time_) >= std::chrono::seconds(30)) {
             last_poll_time_ = now;
             jobs->poll([this](const TrackedJob& tj) {
-                std::cout << "\n" << theme::ok(
-                    "Job '" + tj.job_name + "' (" + tj.slurm_id + ") completed.");
+                std::cout << "\n" << theme::dim(
+                    "Job '" + tj.job_name + "' (" + tj.slurm_id + ") completed.") << "\n";
 
                 // Auto-return output
                 auto cb = [](const std::string& msg) {
-                    std::cout << theme::ok(msg);
+                    std::cout << theme::dim(msg) << "\n";
                 };
                 jobs->return_output(tj.job_id, cb);
             });
@@ -187,6 +222,16 @@ void TCCPCLI::run_connected_repl() {
             std::cout << theme::dim("    or server-side timeouts.") << "\n\n";
             std::cout << theme::step("Run 'tccp' to reconnect.");
             std::cout << "\n";
+            break;
+        }
+
+        // Check SLURM health after each command
+        if (cluster && !check_slurm_health(*cluster)) {
+            std::cout << "\n" << theme::divider();
+            std::cout << theme::fail("SLURM stopped responding.");
+            std::cout << theme::dim("    The cluster has become unavailable.") << "\n";
+            std::cout << theme::dim("    Run 'exec sinfo' to test connectivity.") << "\n\n";
+            std::cout << theme::dim("    Exiting. Run 'tccp' when the cluster is healthy.") << "\n\n";
             break;
         }
     }
@@ -236,7 +281,9 @@ void TCCPCLI::run_new(const std::string& template_name) {
         "type: python\n"
         "\n"
         "rodata:\n"
-        "  dataset: ./data\n"
+        "  - ./data\n"
+        "\n"
+        "output: ./output\n"
         "\n"
         "jobs:\n"
         "  main:\n"
@@ -253,7 +300,7 @@ void TCCPCLI::run_new(const std::string& template_name) {
         "# ── Step 1: Load data ──\n"
         "print(\"[step 1] Loading data...\")\n"
         "time.sleep(1)\n"
-        "data = np.loadtxt(\"rodata/dataset/input.csv\", delimiter=\",\")\n"
+        "data = np.loadtxt(\"data/input.csv\", delimiter=\",\")\n"
         "print(f\"  Loaded {data.shape[0]} rows, {data.shape[1]} cols\")\n"
         "print(f\"  Column means: {data.mean(axis=0)}\")\n"
         "print(f\"  Column ranges: {data.min(axis=0)} -> {data.max(axis=0)}\")\n"
@@ -291,6 +338,9 @@ void TCCPCLI::run_new(const std::string& template_name) {
         "5.0,50.0,500.0\n";
     write_if_missing(cwd / "data" / "input.csv", input_csv);
 
+    // Create output directory
+    std::filesystem::create_directories(cwd / "output");
+
     // requirements.txt
     std::string requirements =
         "numpy\n";
@@ -303,6 +353,7 @@ void TCCPCLI::run_new(const std::string& template_name) {
         ".venv/\n"
         "*.egg-info/\n"
         ".env\n"
+        "output/\n"
         "tccp-output/\n";
     write_if_missing(cwd / ".gitignore", gitignore);
 
@@ -330,6 +381,16 @@ static std::string read_password(const std::string& prompt) {
 }
 
 void TCCPCLI::run_setup() {
+    // Ensure directory structure exists
+    ensure_tccp_directory_structure();
+
+    // Create default config file if it doesn't exist
+    auto config_result = create_default_global_config();
+    if (config_result.is_err()) {
+        std::cout << theme::fail("Failed to create config file: " + config_result.error);
+        return;
+    }
+
     std::cout << theme::banner();
     std::cout << theme::section("Cluster Setup");
     std::cout << theme::dim("    One username and password for the entire Tufts cluster network.") << "\n";
@@ -378,12 +439,14 @@ void TCCPCLI::run_setup() {
     }
 
     std::cout << theme::divider();
+    std::cout << theme::ok("    Config file ready at ~/.tccp/config.yaml.");
 #ifdef TCCP_DEV
-    std::cout << theme::dim("    Credentials saved to ~/.tccp/credentials.") << "\n";
+    std::cout << theme::ok("    Credentials saved to ~/.tccp/credentials.");
 #else
-    std::cout << theme::dim("    Credentials saved to system keychain.") << "\n";
+    std::cout << theme::ok("    Credentials saved to system keychain.");
 #endif
-    std::cout << theme::step("Run 'tccp' or 'tccp connect' to connect.") << "\n";
+    std::cout << theme::ok("    Run 'tccp' or 'tccp connect' to connect.");
+    std::cout << "\n";
 }
 
 void TCCPCLI::run_command(const std::string& command, const std::vector<std::string>& args) {

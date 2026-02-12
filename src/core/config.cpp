@@ -1,6 +1,7 @@
 #include "config.hpp"
 #include <yaml-cpp/yaml.h>
 #include <iostream>
+#include <fstream>
 #include <cstdlib>
 
 namespace fs = std::filesystem;
@@ -27,6 +28,60 @@ fs::path get_global_config_path() {
 
 fs::path get_project_config_path(const fs::path& dir) {
     return dir / "tccp.yaml";
+}
+
+Result<void> create_default_global_config() {
+    fs::path config_path = get_global_config_path();
+
+    // Don't overwrite existing config
+    if (fs::exists(config_path)) {
+        return Result<void>::Ok();
+    }
+
+    // Ensure directory exists
+    fs::create_directories(config_path.parent_path());
+
+    // Default config content
+    const char* default_config = R"(# Tufts Cluster Configuration
+# Edit this file to configure your cluster connection settings
+
+dtn:
+  host: "xfer.cluster.tufts.edu"
+  user: ""                         # Will use credentials from keychain
+  timeout: 30
+
+login:
+  host: "login.pax.tufts.edu"
+  user: ""                         # Will use credentials from keychain
+  email: ""                        # For job notifications
+  timeout: 30
+
+# Optional: Default SLURM settings (can be overridden per-project)
+slurm:
+  partition: "batch"
+  time: "4:00:00"
+  mem: "4G"
+  cpus: 1
+  gres: ""
+
+# Optional: Environment modules to load
+modules: []
+
+# Optional: Duo auto-push setting
+duo_auto: "push"
+)";
+
+    try {
+        std::ofstream out(config_path);
+        if (!out) {
+            return Result<void>::Err("Failed to create config file at " + config_path.string());
+        }
+        out << default_config;
+        out.close();
+        return Result<void>::Ok();
+    } catch (const std::exception& e) {
+        return Result<void>::Err("Failed to write config file: " + std::string(e.what()));
+    }
 }
 
 static DTNConfig parse_dtn_config(const YAML::Node& node) {
@@ -110,10 +165,20 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
         }
     }
 
-    if (node["rodata"] && node["rodata"].IsMap()) {
-        for (const auto& kv : node["rodata"]) {
-            project.rodata[kv.first.as<std::string>()] = kv.second.as<std::string>("");
+    if (node["rodata"]) {
+        if (node["rodata"].IsSequence()) {
+            project.rodata = node["rodata"].as<std::vector<std::string>>(std::vector<std::string>());
+        } else if (node["rodata"].IsScalar()) {
+            project.rodata.push_back(node["rodata"].as<std::string>());
         }
+    }
+
+    if (node["output"]) {
+        project.output = node["output"].as<std::string>("");
+    }
+
+    if (node["cache"]) {
+        project.cache = node["cache"].as<std::string>("");
     }
 
     return project;

@@ -80,14 +80,19 @@ inline std::string fail(const std::string& msg) {
     return color::RED + "    x " + color::RESET + msg + "\n";
 }
 
+// Error message (red, no indentation, no symbol) - for command errors
+inline std::string error(const std::string& msg) {
+    return color::RED + msg + color::RESET + "\n";
+}
+
 // Info message (blue tilde, indented) - alias for check
 inline std::string info(const std::string& msg) {
     return color::BLUE + "    ~ " + color::RESET + msg + "\n";
 }
 
-// Progress/step message (dim, unindented, no symbol)
+// Progress/step message (dim, indented 6 spaces, no symbol)
 inline std::string step(const std::string& msg) {
-    return color::DIM + msg + color::RESET + "\n";
+    return color::DIM + "      " + msg + color::RESET + "\n";
 }
 
 // Subtle log line for internal status (dim gray, unindented, no symbol)
