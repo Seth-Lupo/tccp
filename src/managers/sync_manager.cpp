@@ -86,6 +86,36 @@ std::vector<SyncManifestEntry> SyncManager::build_local_manifest() {
         }
     }
 
+    // Add env file if configured (bypasses gitignore)
+    const auto& env_file = config_.project().env_file;
+    if (!env_file.empty()) {
+        fs::path env_path = env_file;
+        if (env_path.is_relative()) {
+            env_path = config_.project_dir() / env_path;
+        }
+        if (fs::exists(env_path) && fs::is_regular_file(env_path)) {
+            auto rel = fs::relative(env_path, config_.project_dir());
+            SyncManifestEntry entry;
+            entry.path = rel.string();
+            try {
+                auto ftime = fs::last_write_time(env_path);
+                entry.mtime = ftime.time_since_epoch().count();
+                entry.size = static_cast<int64_t>(fs::file_size(env_path));
+            } catch (...) {
+                entry.mtime = 0;
+                entry.size = 0;
+            }
+            // Avoid duplicates (in case it wasn't gitignored)
+            bool already_in = false;
+            for (const auto& m : manifest) {
+                if (m.path == entry.path) { already_in = true; break; }
+            }
+            if (!already_in) {
+                manifest.push_back(entry);
+            }
+        }
+    }
+
     // Cache the manifest for next time
     cached_manifest_ = manifest;
     return manifest;
@@ -180,6 +210,21 @@ void SyncManager::full_sync(const std::string& compute_node,
                 }
                 dtn_.upload(entry.path(), remote);
             }
+        }
+    }
+
+    // Add env file (bypasses gitignore, may not be in collect_files)
+    const auto& env_file = proj.env_file;
+    if (!env_file.empty()) {
+        fs::path env_path = env_file;
+        if (env_path.is_relative()) env_path = config_.project_dir() / env_path;
+        if (fs::exists(env_path) && fs::is_regular_file(env_path)) {
+            auto rel = fs::relative(env_path, config_.project_dir());
+            auto parent = rel.parent_path();
+            if (!parent.empty() && parent != ".") {
+                dtn_.run("mkdir -p " + dtn_tmp + "/" + parent.string());
+            }
+            dtn_.upload(env_path, dtn_tmp + "/" + rel.string());
         }
     }
 
@@ -283,6 +328,10 @@ void SyncManager::sync_to_scratch(const std::string& compute_node,
         dtn_.run(fmt::format("ssh {} {} 'mkdir -p {} && cp -a {}/. {}/'",
                              ssh_opts, compute_node, scratch_path,
                              state.last_sync_scratch, scratch_path));
+
+        // Delete old scratch now that it's been copied
+        dtn_.run(fmt::format("ssh {} {} 'rm -rf {}'",
+                             ssh_opts, compute_node, state.last_sync_scratch));
 
         // Diff manifests
         auto changed = diff_manifests(local_manifest, state.last_sync_manifest);

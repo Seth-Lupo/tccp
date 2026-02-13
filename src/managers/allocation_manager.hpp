@@ -17,7 +17,12 @@ public:
 
     // Find a free RUNNING allocation with enough time remaining and
     // compatible resources. Pass resolved profile for resource matching.
-    AllocationState* find_free(int required_minutes, const SlurmDefaults& required_resources);
+    // Optional callback for logging why each allocation is accepted/rejected.
+    AllocationState* find_free(int required_minutes, const SlurmDefaults& required_resources,
+                               StatusCallback cb = nullptr);
+
+    // Find allocation by SLURM job ID (direct lookup, no resource matching)
+    AllocationState* find_by_id(const std::string& slurm_id);
 
     // Find a PENDING allocation (submitted but no node yet)
     AllocationState* find_pending();

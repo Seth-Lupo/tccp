@@ -1,4 +1,5 @@
 #include "allocation_manager.hpp"
+#include "gpu_discovery.hpp"
 #include <core/config.hpp>
 #include <core/credentials.hpp>
 #include <core/resource_spec.hpp>
@@ -6,6 +7,7 @@
 #include <chrono>
 #include <thread>
 #include <sstream>
+#include <set>
 #include <ctime>
 
 static std::string get_cluster_username() {
@@ -78,6 +80,14 @@ void AllocationManager::reconcile(StatusCallback cb) {
     if (cb) cb(fmt::format("Reconciling {} allocation(s) with SLURM...",
                            state_.allocations.size()));
 
+    // Build set of job IDs that are still active (not completed/canceled)
+    std::set<std::string> active_jobs;
+    for (const auto& js : state_.jobs) {
+        if (!js.completed && !js.canceled && js.init_error.empty()) {
+            active_jobs.insert(js.job_id);
+        }
+    }
+
     std::vector<AllocationState> live;
     for (auto& alloc : state_.allocations) {
         std::string cmd = fmt::format("squeue -j {} -h -o \"%T %N\"", alloc.slurm_id);
@@ -89,8 +99,14 @@ void AllocationManager::reconcile(StatusCallback cb) {
 
         if (state_str == "RUNNING") {
             if (!node.empty()) alloc.node = node;
+            // Clear stale active_job_id if that job is no longer active
+            if (!alloc.active_job_id.empty() &&
+                active_jobs.find(alloc.active_job_id) == active_jobs.end()) {
+                alloc.active_job_id.clear();
+            }
             live.push_back(alloc);
-            if (cb) cb(fmt::format("  Allocation {} RUNNING on {}", alloc.slurm_id, alloc.node));
+            if (cb) cb(fmt::format("  Allocation {} RUNNING on {}{}", alloc.slurm_id, alloc.node,
+                                   alloc.active_job_id.empty() ? " (idle)" : " (busy)"));
         } else if (state_str == "PENDING") {
             live.push_back(alloc);
             if (cb) cb(fmt::format("  Allocation {} PENDING", alloc.slurm_id));
@@ -105,11 +121,48 @@ void AllocationManager::reconcile(StatusCallback cb) {
 }
 
 AllocationState* AllocationManager::find_free(int required_minutes,
-                                               const SlurmDefaults& required_resources) {
+                                               const SlurmDefaults& required_resources,
+                                               StatusCallback cb) {
+    if (state_.allocations.empty()) {
+        if (cb) cb("No existing allocations to reuse");
+        return nullptr;
+    }
+
+    if (cb) cb(fmt::format("Checking {} allocation(s) (need {}min, partition={}, gpu={}:{})",
+                           state_.allocations.size(), required_minutes,
+                           required_resources.partition.empty() ? "batch" : required_resources.partition,
+                           required_resources.gpu_type, required_resources.gpu_count));
+
+    // First pass: clear stale active_job_ids (job completed but release_job wasn't
+    // called properly, e.g. due to crash or previous bugs)
     for (auto& alloc : state_.allocations) {
-        if (alloc.active_job_id.empty() && !alloc.node.empty()) {
+        if (alloc.active_job_id.empty()) continue;
+        bool job_still_active = false;
+        for (const auto& js : state_.jobs) {
+            if (js.job_id == alloc.active_job_id) {
+                job_still_active = !js.completed && !js.canceled && js.init_error.empty();
+                break;
+            }
+        }
+        if (!job_still_active) {
+            if (cb) cb(fmt::format("  Clearing stale job ref on alloc {} (job {} done)",
+                                   alloc.slurm_id, alloc.active_job_id));
+            alloc.active_job_id.clear();
+            persist();
+        }
+    }
+
+    // Second pass: find a compatible idle allocation
+    for (auto& alloc : state_.allocations) {
+        std::string id = alloc.slurm_id;
+
+        if (!alloc.node.empty() && alloc.active_job_id.empty()) {
             int rem = remaining_minutes(alloc);
-            if (rem < required_minutes) continue;
+            if (rem < required_minutes) {
+                if (cb) cb(fmt::format("  {} — skip: {}min remaining < {}min needed",
+                                       id, rem, required_minutes));
+                continue;
+            }
 
             // Check resource compatibility
             SlurmDefaults alloc_res;
@@ -121,8 +174,35 @@ AllocationState* AllocationManager::find_free(int required_minutes,
             alloc_res.gpu_count = alloc.gpu_count;
 
             if (resources_compatible(alloc_res, required_resources)) {
+                if (cb) cb(fmt::format("  {} — match! ({}min left, partition={}, gpu={}:{})",
+                                       id, rem, alloc.partition, alloc.gpu_type, alloc.gpu_count));
                 return &alloc;
+            } else {
+                if (cb) cb(fmt::format("  {} — skip: resources mismatch (alloc: partition={} gpu={}:{} "
+                                       "cpus={} mem={} | need: partition={} gpu={}:{} cpus={} mem={})",
+                                       id,
+                                       alloc.partition, alloc.gpu_type, alloc.gpu_count,
+                                       alloc.cpus, alloc.memory,
+                                       required_resources.partition.empty() ? "batch" : required_resources.partition,
+                                       required_resources.gpu_type, required_resources.gpu_count,
+                                       required_resources.cpus_per_task,
+                                       required_resources.memory.empty() ? "4G" : required_resources.memory));
             }
+        } else if (alloc.node.empty()) {
+            if (cb) cb(fmt::format("  {} — skip: no node yet (PENDING)", id));
+        } else {
+            if (cb) cb(fmt::format("  {} — skip: busy (job={})", id, alloc.active_job_id));
+        }
+    }
+
+    if (cb) cb("No compatible free allocation found");
+    return nullptr;
+}
+
+AllocationState* AllocationManager::find_by_id(const std::string& slurm_id) {
+    for (auto& alloc : state_.allocations) {
+        if (alloc.slurm_id == slurm_id) {
+            return &alloc;
         }
     }
     return nullptr;
@@ -269,6 +349,26 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
                                                      StatusCallback cb) {
     if (cb) cb("Requesting compute allocation...");
 
+    // Auto-resolve GPU partition if GPUs are requested
+    SlurmDefaults resolved = profile;
+    if (resolved.gpu_count > 0 || !resolved.gpu_type.empty()) {
+        if (cb) cb("Discovering GPU resources...");
+        auto match = resolve_gpu_partition(login_, username_,
+                                            resolved.partition,
+                                            resolved.gpu_type,
+                                            resolved.gpu_count);
+        if (!match.found) {
+            return Result<AllocationState>::Err(
+                fmt::format("No suitable GPU partition: {}", match.error));
+        }
+        resolved.partition = match.partition;
+        if (resolved.gpu_type.empty()) {
+            resolved.gpu_type = match.gpu_type;
+        }
+        if (cb) cb(fmt::format("Using partition '{}' (gpu:{}:{})",
+                               match.partition, match.gpu_type, match.gpu_per_node));
+    }
+
     // Ensure base directories exist
     std::string base = persistent_base();
     std::string cc = container_cache();
@@ -276,7 +376,7 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
                          base, base, cc, cc, cc));
 
     // Submit allocation via login node using heredoc pipe to sbatch
-    std::string script_content = generate_alloc_script(profile);
+    std::string script_content = generate_alloc_script(resolved);
     std::string submit_cmd = "sbatch << 'TCCP_ALLOC_EOF'\n"
                              + script_content + "\nTCCP_ALLOC_EOF";
     auto result = login_.run(submit_cmd);
@@ -300,13 +400,13 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
     // connection drops. We'll update node/start_time once RUNNING.
     AllocationState alloc;
     alloc.slurm_id = slurm_id;
-    alloc.duration_minutes = parse_time_minutes(profile.time);
-    alloc.partition = profile.partition.empty() ? "batch" : profile.partition;
-    alloc.nodes = profile.nodes > 0 ? profile.nodes : 1;
-    alloc.cpus = profile.cpus_per_task > 0 ? profile.cpus_per_task : 1;
-    alloc.memory = profile.memory.empty() ? "4G" : profile.memory;
-    alloc.gpu_type = profile.gpu_type;
-    alloc.gpu_count = profile.gpu_count;
+    alloc.duration_minutes = parse_time_minutes(resolved.time);
+    alloc.partition = resolved.partition.empty() ? "batch" : resolved.partition;
+    alloc.nodes = resolved.nodes > 0 ? resolved.nodes : 1;
+    alloc.cpus = resolved.cpus_per_task > 0 ? resolved.cpus_per_task : 1;
+    alloc.memory = resolved.memory.empty() ? "4G" : resolved.memory;
+    alloc.gpu_type = resolved.gpu_type;
+    alloc.gpu_count = resolved.gpu_count;
     state_.allocations.push_back(alloc);
     persist();
 

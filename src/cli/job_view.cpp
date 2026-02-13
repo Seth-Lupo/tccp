@@ -169,10 +169,10 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     if (dot != std::string::npos)
         log_path = log_path.substr(0, dot) + ".log";
 
-    // Tail log file, then conditionally attach to dtach if socket exists
+    // Wait for log file (with timeout), tail it, then attach to dtach if alive
     std::string cmd = fmt::format(
         "ssh -t -o StrictHostKeyChecking=no -o LogLevel=ERROR {} "
-        "\"while [ ! -e {} ]; do sleep 0.1; done 2>/dev/null || true; "
+        "\"TRIES=0; while [ ! -e {} ] && [ \\$TRIES -lt 100 ]; do sleep 0.1; TRIES=\\$((TRIES+1)); done; "
         "tail -c 65536 {} 2>/dev/null | perl -pe 's/\\e\\[[\\d;]*[HJK]//g'; "
         "if [ -e {} ]; then \\$HOME/tccp/bin/dtach -a {} -r none; fi\"",
         compute_node_, log_path, log_path, dtach_socket_, dtach_socket_);

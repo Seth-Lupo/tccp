@@ -173,6 +173,10 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
         }
     }
 
+    if (node["env_file"]) {
+        project.env_file = node["env_file"].as<std::string>("");
+    }
+
     if (node["output"]) {
         project.output = node["output"].as<std::string>("");
     }

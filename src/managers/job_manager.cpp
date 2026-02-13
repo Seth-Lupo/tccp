@@ -1,5 +1,6 @@
 #include "job_manager.hpp"
 #include "gitignore.hpp"
+#include "gpu_discovery.hpp"
 #include <core/credentials.hpp>
 #include <fmt/format.h>
 #include <chrono>
@@ -7,6 +8,7 @@
 #include <sstream>
 #include <fstream>
 #include <set>
+#include <map>
 #include <filesystem>
 #include <ctime>
 #include <iomanip>
@@ -84,11 +86,31 @@ JobManager::JobManager(const Config& config, SSHConnection& dtn, SSHConnection& 
         tj.scratch_path = js.scratch_path;
         tj.init_complete = js.init_complete;
         tj.init_error = js.init_error;
+        tj.output_returned = js.output_returned;
         tj.submit_time = js.submit_time;
         tj.start_time = js.start_time;
         tj.end_time = js.end_time;
         tracked_.push_back(tj);
     }
+}
+
+JobManager::~JobManager() {
+    // Signal all background init threads to stop
+    shutdown_.store(true);
+
+    // Join all joinable threads (with a short timeout via detach fallback)
+    for (auto& t : init_threads_) {
+        if (t.joinable()) {
+            t.detach();  // Can't block indefinitely; threads check shutdown_ flag
+        }
+    }
+    init_threads_.clear();
+}
+
+void JobManager::clear_tracked() {
+    std::lock_guard<std::mutex> lock(tracked_mutex_);
+    tracked_.clear();
+    environment_checked_ = false;
 }
 
 // ── Path helpers (new directory structure) ──────────────────
@@ -112,6 +134,30 @@ std::string JobManager::container_cache() const {
 
 std::string JobManager::scratch_dir(const std::string& job_id) const {
     return fmt::format("/tmp/{}/{}/{}", username_, config_.project().name, job_id);
+}
+
+// ── Container/environment helpers (type-aware) ──────────────
+
+std::string JobManager::container_docker_uri() const {
+    const auto& type = config_.project().type;
+    if (type == "python-pytorch") {
+        return "docker://pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime";
+    }
+    return "docker://python:3.11-slim";
+}
+
+std::string JobManager::container_image_path() const {
+    std::string cc = container_cache();
+    const auto& type = config_.project().type;
+    if (type == "python-pytorch") {
+        return cc + "/images/pytorch_2.6.0-cuda12.4-runtime.sif";
+    }
+    return cc + "/images/python_3.11-slim.sif";
+}
+
+bool JobManager::is_gpu_type() const {
+    const auto& type = config_.project().type;
+    return type == "python-pytorch";
 }
 
 std::string JobManager::generate_job_id(const std::string& job_name) const {
@@ -151,10 +197,12 @@ void JobManager::ensure_environment(StatusCallback cb) {
     if (cb) cb("Checking environment...");
 
     std::string cc = container_cache();
-    std::string image = cc + "/images/python_3.11-slim.sif";
+    std::string image = container_image_path();
+    std::string docker_uri = container_docker_uri();
     std::string venv = env_dir() + "/default/venv";
     std::string tccp_home = fmt::format("/cluster/home/{}/tccp", username_);
     std::string dtach_bin = tccp_home + "/bin/dtach";
+    bool gpu = is_gpu_type();
 
     // Single check for all three components
     std::string check_all = fmt::format(
@@ -181,13 +229,18 @@ void JobManager::ensure_environment(StatusCallback cb) {
 
     // Pull container image if missing
     if (need_image) {
-        if (cb) cb("Pulling Python container image (first time only)...");
+        if (cb) cb(fmt::format("Pulling container image {} (first time only)...", docker_uri));
+        dtn_.run(fmt::format("mkdir -p {}/images {}/cache {}/tmp", cc, cc, cc));
         std::string pull_cmd = fmt::format(
             "SINGULARITY_CACHEDIR={0}/cache "
             "SINGULARITY_TMPDIR={0}/tmp "
-            "singularity pull --dir {0}/images "
-            "docker://python:3.11-slim", cc);
-        dtn_.run(pull_cmd);
+            "singularity pull {1} {2}", cc, image, docker_uri);
+        auto pull_result = dtn_.run(pull_cmd);
+        // Verify the image was actually pulled
+        auto img_check = dtn_.run("test -f " + image + " && echo IMG_OK || echo IMG_FAIL");
+        if (img_check.stdout_data.find("IMG_FAIL") != std::string::npos) {
+            throw std::runtime_error(fmt::format("Container pull failed: {}", pull_result.get_output()));
+        }
         if (cb) cb("Container image: OK");
     }
 
@@ -195,9 +248,13 @@ void JobManager::ensure_environment(StatusCallback cb) {
     if (need_venv) {
         if (cb) cb("Creating Python virtual environment...");
         std::string base = persistent_base();
+        // For GPU types (pytorch, etc.), use --system-site-packages so the
+        // container's pre-installed packages (PyTorch, CUDA, etc.) are visible
+        std::string venv_flags = gpu ? "--system-site-packages " : "";
+        std::string nv_flag = gpu ? "--nv " : "";
         std::string venv_cmd = fmt::format(
-            "singularity exec --bind {0}:{0} {1} python -m venv {2}",
-            base, image, venv);
+            "singularity exec {}--bind {}:{} {} python -m venv {}{}",
+            nv_flag, base, base, image, venv_flags, venv);
         dtn_.run(venv_cmd);
         if (cb) cb("Python venv: OK");
     }
@@ -223,16 +280,49 @@ void JobManager::ensure_dtach(StatusCallback cb) {
         return;
     }
 
+    // Check if dtach is already available system-wide
+    auto sys_check = dtn_.run("which dtach 2>/dev/null");
+    if (sys_check.exit_code == 0 && !sys_check.stdout_data.empty()) {
+        std::string sys_dtach = sys_check.stdout_data;
+        // trim newline
+        while (!sys_dtach.empty() && (sys_dtach.back() == '\n' || sys_dtach.back() == '\r'))
+            sys_dtach.pop_back();
+        dtn_.run("mkdir -p " + tccp_home + "/bin");
+        dtn_.run("cp " + sys_dtach + " " + bin + " && chmod +x " + bin);
+        auto v = dtn_.run("test -x " + bin + " && echo OK");
+        if (v.stdout_data.find("OK") != std::string::npos) {
+            if (cb) cb("dtach: copied from system");
+            return;
+        }
+    }
+
     if (cb) cb("Building dtach (first time only)...");
 
     std::string build_dir = tccp_home + "/dtach-build";
     dtn_.run("mkdir -p " + tccp_home + "/bin");
     dtn_.run("rm -rf " + build_dir);
-    dtn_.run("git clone https://github.com/crigler/dtach.git " + build_dir);
+
+    auto clone = dtn_.run("git clone https://github.com/crigler/dtach.git " + build_dir + " 2>&1");
+    if (clone.exit_code != 0) {
+        // git might not be available — try curl
+        if (cb) cb("git not available, trying curl...");
+        dtn_.run("mkdir -p " + build_dir);
+        auto dl = dtn_.run("curl -sL https://github.com/crigler/dtach/archive/refs/heads/master.tar.gz "
+                           "| tar xz -C " + build_dir + " --strip-components=1 2>&1");
+        if (dl.exit_code != 0) {
+            throw std::runtime_error(fmt::format(
+                "Cannot download dtach source (no git or curl?): {}", dl.get_output()));
+        }
+    }
 
     auto build = dtn_.run("cd " + build_dir + " && cc -o dtach dtach.c master.c attach.c -lutil 2>&1");
     if (build.exit_code != 0) {
-        dtn_.run("cd " + build_dir + " && ./configure && make 2>&1");
+        if (cb) cb("Direct compile failed, trying configure/make...");
+        auto build2 = dtn_.run("cd " + build_dir + " && ./configure && make 2>&1");
+        if (build2.exit_code != 0) {
+            throw std::runtime_error(fmt::format(
+                "Failed to compile dtach: {}", build2.get_output()));
+        }
     }
 
     dtn_.run("cp " + build_dir + "/dtach " + bin + " && chmod +x " + bin);
@@ -242,7 +332,7 @@ void JobManager::ensure_dtach(StatusCallback cb) {
     if (verify.stdout_data.find("DTACH_OK") != std::string::npos) {
         if (cb) cb("dtach built successfully");
     } else {
-        if (cb) cb("Warning: dtach build may have failed");
+        throw std::runtime_error("Failed to install dtach binary");
     }
 }
 
@@ -259,18 +349,21 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
     std::string args = (it != proj.jobs.end()) ? it->second.args : "";
 
     std::string cc = container_cache();
-    std::string image = cc + "/images/python_3.11-slim.sif";
+    std::string image = container_image_path();
     std::string venv = env_dir() + "/default/venv";
     std::string out_dir = job_output_dir(job_id);
     std::string sock = "/tmp/tccp_" + job_id + ".sock";
     std::string log = "/tmp/tccp_" + job_id + ".log";
+    bool gpu = is_gpu_type();
+    std::string nv_flag = gpu ? "--nv " : "";
 
     const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes";
 
     if (cb) cb("Launching job on compute node...");
 
-    // Build bind mount flags
-    std::string binds = fmt::format("--bind {}:{} --bind {}:{}", scratch, scratch, venv, venv);
+    // Build bind mount flags (--nv for GPU types enables NVIDIA driver access)
+    std::string binds = fmt::format("{}--bind {}:{} --bind {}:{}",
+                                    nv_flag, scratch, scratch, venv, venv);
     if (!proj.cache.empty()) {
         std::string shared_cache = fmt::format("/tmp/{}/{}/.tccp-cache",
                                                username_, proj.name);
@@ -278,6 +371,8 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
     }
 
     // Create the run script on the compute node
+    // For GPU types (python-pytorch), --nv is in binds and the venv was created
+    // with --system-site-packages so {venv}/bin/python sees container packages
     std::string run_script = fmt::format(
         "#!/bin/bash\n"
         "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true\n"
@@ -285,7 +380,12 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
         "export SINGULARITY_TMPDIR={}/tmp\n"
         "cd {}\n"
         "if [ -f requirements.txt ]; then\n"
-        "    singularity exec {} {} {}/bin/pip install -q -r requirements.txt 2>/dev/null\n"
+        "    REQ_HASH=$(md5sum requirements.txt 2>/dev/null | cut -d' ' -f1)\n"
+        "    STAMP={}/env/.req_installed\n"
+        "    if [ ! -f \"$STAMP\" ] || [ \"$(cat $STAMP 2>/dev/null)\" != \"$REQ_HASH\" ]; then\n"
+        "        singularity exec {} {} {}/bin/pip install -q -r requirements.txt\n"
+        "        echo \"$REQ_HASH\" > \"$STAMP\"\n"
+        "    fi\n"
         "fi\n"
         "printf '\\n__TCCP_JOB_START__\\n'\n"
         "CMD=\"singularity exec {} {} {}/bin/python {} {}\"\n"
@@ -295,7 +395,7 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
         "exit $EC\n",
         cc, cc,
         scratch,
-        binds, image, venv,
+        scratch, binds, image, venv,
         binds, image, venv, script, args,
         log);
 
@@ -389,7 +489,6 @@ Result<TrackedJob> JobManager::run(const std::string& job_name, StatusCallback c
 
     // Spawn background thread to do all init work
     init_threads_.emplace_back(&JobManager::background_init_thread, this, job_id, job_name);
-    init_threads_.back().detach();  // Let it run independently
 
     return Result<TrackedJob>::Ok(tj);
 }
@@ -410,6 +509,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
     };
 
     auto check_canceled = [&]() -> bool {
+        if (shutdown_.load()) return true;
         std::lock_guard<std::mutex> lock(cancel_mutex_);
         return cancel_requested_.count(job_id) > 0;
     };
@@ -429,8 +529,28 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
                                ? it->second.time : "1:00:00";
         int job_minutes = AllocationManager::parse_time_minutes(job_time);
 
+        // Resolve GPU partition early so find_free() and allocate() both
+        // use the same partition (not the default "batch")
+        if (profile.gpu_count > 0 || !profile.gpu_type.empty()) {
+            log_to_file("Resolving GPU partition...");
+            auto match = resolve_gpu_partition(login_, username_,
+                                               profile.partition,
+                                               profile.gpu_type,
+                                               profile.gpu_count);
+            if (match.found) {
+                profile.partition = match.partition;
+                if (profile.gpu_type.empty()) {
+                    profile.gpu_type = match.gpu_type;
+                }
+                log_to_file(fmt::format("GPU partition: {} ({})", match.partition, match.gpu_type));
+            }
+        }
+
+        // Poll for recently completed jobs so their allocations become free
+        poll(nullptr);
+
         // Find or create allocation
-        AllocationState* alloc = allocs_.find_free(job_minutes, profile);
+        AllocationState* alloc = allocs_.find_free(job_minutes, profile, log_to_file);
         if (alloc) {
             log_to_file(fmt::format("Reusing allocation {} on {}", alloc->slurm_id, alloc->node));
         } else {
@@ -440,7 +560,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
                 log_to_file(fmt::format("Found pending allocation {}, waiting for node...", pending->slurm_id));
                 auto wait_result = allocs_.wait_for_allocation(pending->slurm_id, log_to_file);
                 if (wait_result.is_ok()) {
-                    alloc = allocs_.find_free(job_minutes, profile);
+                    alloc = allocs_.find_by_id(wait_result.value.slurm_id);
                 }
             }
 
@@ -450,7 +570,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
                 if (alloc_result.is_err()) {
                     throw std::runtime_error(alloc_result.error);
                 }
-                alloc = allocs_.find_free(job_minutes, profile);
+                alloc = allocs_.find_by_id(alloc_result.value.slurm_id);
                 if (!alloc) {
                     throw std::runtime_error("Allocation succeeded but could not find it");
                 }
@@ -597,18 +717,9 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
         // Mark as canceled immediately
         tj->canceled = true;
         tj->completed = true;
-        tj->exit_code = 130;  // 128 + SIGINT
-
-        // Update persistent state
-        auto& jobs = allocs_.state().jobs;
-        for (auto& js : jobs) {
-            if (js.job_id == tj->job_id) {
-                js.canceled = true;
-                js.completed = true;
-                js.exit_code = 130;
-                break;
-            }
-        }
+        tj->exit_code = 130;
+        tj->end_time = now_iso();
+        persist_job_state(*tj);
         allocs_.persist();
 
         return Result<void>::Ok();
@@ -629,15 +740,7 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
     // If remote shows job is done, update local state and return error
     if (check_result.stdout_data.find("DONE") != std::string::npos) {
         tj->completed = true;
-
-        // Persist the updated state
-        auto& jobs = allocs_.state().jobs;
-        for (auto& js : jobs) {
-            if (js.job_id == tj->job_id) {
-                js.completed = true;
-                break;
-            }
-        }
+        persist_job_state(*tj);
         allocs_.persist();
 
         if (tj->canceled) {
@@ -647,37 +750,26 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
         }
     }
 
-    // Kill the dtach process using fuser (finds process owning the socket)
-    // Then remove the socket file to clean up
+    // Kill the dtach process
     std::string kill_cmd = fmt::format(
-        "ssh {} {} 'fuser -k -9 {} 2>/dev/null; rm -f {}'",
-        ssh_opts, tj->compute_node, dtach_socket, dtach_socket);
-
+        "ssh {} {} 'fuser -k -9 {} 2>/dev/null'",
+        ssh_opts, tj->compute_node, dtach_socket);
     auto kill_result = dtn_.run(kill_cmd);
     tccp_log_ssh("cancel:kill", kill_cmd, kill_result);
 
-    // Mark as canceled
+    // Mark as canceled and finalize
     tj->canceled = true;
     tj->completed = true;
     tj->exit_code = 130;  // 128 + SIGINT
+    tj->end_time = now_iso();
 
-    // Update persistent state
-    auto& jobs = allocs_.state().jobs;
-    for (auto& js : jobs) {
-        if (js.job_id == tj->job_id) {
-            js.canceled = true;
-            js.completed = true;
-            js.exit_code = 130;
-            break;
-        }
-    }
+    cleanup_compute_node(*tj);
+    persist_job_state(*tj);
 
-    // Free the allocation's active job slot (but keep allocation running)
-    // Only if an allocation was actually assigned
     if (!tj->slurm_id.empty()) {
-        allocs_.release_job(tj->slurm_id);  // This calls persist()
+        allocs_.release_job(tj->slurm_id);
     } else {
-        allocs_.persist();  // Just persist the canceled state
+        allocs_.persist();
     }
 
     return Result<void>::Ok();
@@ -793,6 +885,28 @@ Result<void> JobManager::return_output(const std::string& job_id, StatusCallback
     }
 
     if (cb) cb(fmt::format("Downloaded {} files to tccp-output/{}/", count, job_id));
+
+    // Delete remote output after successful download
+    dtn_.run("rm -rf " + job_output_dir(job_id));
+
+    // Mark output as returned in tracked job and persistent state
+    {
+        std::lock_guard<std::mutex> lock(tracked_mutex_);
+        for (auto& tj : tracked_) {
+            if (tj.job_id == job_id) {
+                tj.output_returned = true;
+                break;
+            }
+        }
+    }
+    for (auto& js : allocs_.state().jobs) {
+        if (js.job_id == job_id) {
+            js.output_returned = true;
+            break;
+        }
+    }
+    allocs_.persist();
+
     return Result<void>::Ok();
 }
 
@@ -811,55 +925,244 @@ JobManager::SlurmJobState JobManager::query_alloc_state(const std::string& slurm
 }
 
 void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
-    std::lock_guard<std::mutex> lock(tracked_mutex_);
-    for (auto& tj : tracked_) {
-        if (tj.completed) continue;
-        if (!tj.init_complete) continue;  // Still initializing, skip
+    // Phase 1: Detect completed jobs while holding the lock.
+    // Only update fields on tracked_ entries; do NOT call on_job_complete here
+    // (it calls prune_completed_jobs which modifies tracked_, causing iterator invalidation).
+    std::vector<TrackedJob> newly_completed;
 
-        // Check if the dtach socket still exists (job still running)
-        const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3";
-        std::string sock = "/tmp/tccp_" + tj.job_id + ".sock";
-        auto check = dtn_.run(fmt::format("ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
-                                          ssh_opts, tj.compute_node, sock));
+    {
+        std::lock_guard<std::mutex> lock(tracked_mutex_);
+        for (auto& tj : tracked_) {
+            if (tj.completed) continue;
+            if (!tj.init_complete) continue;  // Still initializing, skip
 
-        if (check.stdout_data.find("DONE") != std::string::npos) {
-            tj.completed = true;
-            tj.exit_code = 0; // will be refined by the attach loop
-            on_job_complete(tj);
-            if (on_complete) on_complete(tj);
-        }
+            if (!tj.compute_node.empty()) {
+                // Job has a compute node — check if dtach socket still exists
+                const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3";
+                std::string sock = "/tmp/tccp_" + tj.job_id + ".sock";
+                auto check = dtn_.run(fmt::format("ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
+                                                  ssh_opts, tj.compute_node, sock));
 
-        // Also check allocation is still alive
-        if (tj.compute_node.empty()) {
-            auto state = query_alloc_state(tj.slurm_id);
-            if (state.state == "RUNNING" && !state.node.empty()) {
-                tj.compute_node = state.node;
-            } else if (state.state.empty() || state.state == "COMPLETED" ||
-                       state.state == "FAILED" || state.state == "CANCELLED") {
-                tj.completed = true;
-                if (on_complete) on_complete(tj);
+                if (check.stdout_data.find("DONE") != std::string::npos) {
+                    tj.completed = true;
+                    tj.exit_code = 0;
+                    tj.end_time = now_iso();
+                    newly_completed.push_back(tj);
+                } else if (check.stdout_data.find("RUNNING") == std::string::npos) {
+                    // SSH failed entirely — check if allocation was killed
+                    auto alloc_state = query_alloc_state(tj.slurm_id);
+                    if (alloc_state.state.empty() || alloc_state.state == "COMPLETED" ||
+                        alloc_state.state == "FAILED" || alloc_state.state == "CANCELLED") {
+                        tj.completed = true;
+                        tj.exit_code = -1;
+                        tj.end_time = now_iso();
+                        newly_completed.push_back(tj);
+                        tccp_log(fmt::format("poll: allocation {} gone ({}), marking job {} complete",
+                                             tj.slurm_id, alloc_state.state, tj.job_id));
+                    }
+                }
+            } else {
+                // No compute node yet — check if allocation is still alive
+                auto alloc_state = query_alloc_state(tj.slurm_id);
+                if (alloc_state.state == "RUNNING" && !alloc_state.node.empty()) {
+                    tj.compute_node = alloc_state.node;
+                } else if (alloc_state.state.empty() || alloc_state.state == "COMPLETED" ||
+                           alloc_state.state == "FAILED" || alloc_state.state == "CANCELLED") {
+                    tj.completed = true;
+                    tj.exit_code = -1;
+                    tj.end_time = now_iso();
+                    newly_completed.push_back(tj);
+                }
             }
         }
     }
+
+    // Phase 2: Process completions without the lock held.
+    // release_job, cleanup, persist, and try_return all work on allocs state
+    // (try_return_output self-locks tracked_mutex_ for its own updates)
+    for (auto& tj : newly_completed) {
+        allocs_.release_job(tj.slurm_id);
+        cleanup_compute_node(tj);
+        persist_job_state(tj);
+        try_return_output(tj);
+    }
+
+    // Prune once after all completions (self-locks tracked_mutex_)
+    if (!newly_completed.empty()) {
+        prune_completed_jobs();
+    }
+
+    // Phase 3: User callbacks
+    for (const auto& tj : newly_completed) {
+        if (on_complete) on_complete(tj);
+    }
 }
 
-void JobManager::on_job_complete(TrackedJob& tj) {
-    // Release the allocation so it can be reused
-    allocs_.release_job(tj.slurm_id);
+void JobManager::cleanup_compute_node(const TrackedJob& tj) {
+    if (tj.compute_node.empty()) return;
+    const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes";
+    // Remove scratch dir and dtach socket; preserve .log for viewing
+    std::string cmd = fmt::format("ssh {} {} 'rm -rf {} /tmp/tccp_{}.sock'",
+                                  ssh_opts, tj.compute_node, tj.scratch_path, tj.job_id);
+    dtn_.run(cmd);
+}
 
-    // Set end time
-    tj.end_time = now_iso();
-
-    // Update persistent state
+void JobManager::persist_job_state(const TrackedJob& tj) {
     auto& jobs = allocs_.state().jobs;
     for (auto& js : jobs) {
         if (js.job_id == tj.job_id) {
             js.completed = tj.completed;
+            js.canceled = tj.canceled;
             js.exit_code = tj.exit_code;
             js.output_file = tj.output_file;
             js.end_time = tj.end_time;
             break;
         }
+    }
+}
+
+void JobManager::on_job_complete(TrackedJob& tj) {
+    // NOTE: This must be called WITHOUT tracked_mutex_ held.
+    // It is safe to call from outside poll() (e.g. view/attach session end).
+    allocs_.release_job(tj.slurm_id);
+    if (tj.end_time.empty()) tj.end_time = now_iso();
+    cleanup_compute_node(tj);
+    persist_job_state(tj);
+    try_return_output(tj);
+    prune_completed_jobs();
+}
+
+void JobManager::try_return_output(TrackedJob& tj) {
+    if (tj.output_returned) return;
+
+    std::string remote_output = job_output_dir(tj.job_id);
+
+    // Check if there are any output files
+    auto ls_result = dtn_.run("find " + remote_output + " -type f 2>/dev/null");
+    if (ls_result.stdout_data.empty()) {
+        // No output files — mark as returned (nothing to do)
+        tj.output_returned = true;
+        for (auto& js : allocs_.state().jobs) {
+            if (js.job_id == tj.job_id) {
+                js.output_returned = true;
+                break;
+            }
+        }
+        allocs_.persist();
+        return;
+    }
+
+    // Parse remote files
+    std::vector<std::string> remote_files;
+    std::istringstream iss(ls_result.stdout_data);
+    std::string line;
+    while (std::getline(iss, line)) {
+        line.erase(0, line.find_first_not_of(" \t\r\n"));
+        line.erase(line.find_last_not_of(" \t\r\n") + 1);
+        if (!line.empty()) remote_files.push_back(line);
+    }
+
+    if (remote_files.empty()) {
+        tj.output_returned = true;
+        for (auto& js : allocs_.state().jobs) {
+            if (js.job_id == tj.job_id) {
+                js.output_returned = true;
+                break;
+            }
+        }
+        allocs_.persist();
+        return;
+    }
+
+    // Download all files
+    fs::path local_base = config_.project_dir() / "tccp-output" / tj.job_id;
+    fs::create_directories(local_base);
+
+    bool all_ok = true;
+    for (const auto& remote_file : remote_files) {
+        std::string rel = remote_file;
+        if (rel.find(remote_output) == 0) {
+            rel = rel.substr(remote_output.length());
+            if (!rel.empty() && rel[0] == '/') rel = rel.substr(1);
+        }
+        if (rel.empty()) continue;
+
+        fs::path local_file = local_base / rel;
+        auto dl = dtn_.download(remote_file, local_file);
+        if (dl.exit_code != 0) {
+            all_ok = false;
+            break;
+        }
+    }
+
+    // Only delete remote output if download fully succeeded
+    if (all_ok) {
+        dtn_.run("rm -rf " + remote_output);
+        tj.output_returned = true;
+        for (auto& js : allocs_.state().jobs) {
+            if (js.job_id == tj.job_id) {
+                js.output_returned = true;
+                break;
+            }
+        }
+        allocs_.persist();
+        tccp_log(fmt::format("Auto-returned output for job {}", tj.job_id));
+    } else {
+        tccp_log(fmt::format("Auto-return failed for job {}, remote output preserved", tj.job_id));
+    }
+}
+
+void JobManager::prune_completed_jobs() {
+    auto& state_jobs = allocs_.state().jobs;
+
+    // Group completed/canceled/failed jobs by name, keep only latest
+    std::map<std::string, size_t> latest_by_name;
+    std::vector<bool> keep(state_jobs.size(), false);
+
+    for (size_t i = 0; i < state_jobs.size(); i++) {
+        auto& js = state_jobs[i];
+        bool is_terminal = js.completed || js.canceled || !js.init_error.empty();
+        if (!is_terminal) {
+            keep[i] = true;  // Always keep active jobs
+            continue;
+        }
+        auto it = latest_by_name.find(js.job_name);
+        if (it == latest_by_name.end()) {
+            latest_by_name[js.job_name] = i;
+        } else {
+            if (js.submit_time > state_jobs[it->second].submit_time) {
+                latest_by_name[js.job_name] = i;
+            }
+        }
+    }
+    for (auto& [name, idx] : latest_by_name) keep[idx] = true;
+
+    // Compact state jobs
+    std::vector<JobState> kept_jobs;
+    std::set<std::string> kept_ids;
+    for (size_t i = 0; i < state_jobs.size(); i++) {
+        if (keep[i]) {
+            kept_jobs.push_back(state_jobs[i]);
+            kept_ids.insert(state_jobs[i].job_id);
+        }
+    }
+
+    if (kept_jobs.size() < state_jobs.size()) {
+        state_jobs = kept_jobs;
+
+        // Prune tracked_ to match (lock since other threads read tracked_)
+        {
+            std::lock_guard<std::mutex> lock(tracked_mutex_);
+            std::vector<TrackedJob> kept_tracked;
+            for (auto& tj : tracked_) {
+                if (kept_ids.count(tj.job_id)) {
+                    kept_tracked.push_back(tj);
+                }
+            }
+            tracked_ = kept_tracked;
+        }
+
+        allocs_.persist();
     }
 }
 

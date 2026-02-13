@@ -51,6 +51,7 @@ ProjectState StateStore::load() {
                 j.scratch_path = n["scratch_path"].as<std::string>("");
                 j.init_complete = n["init_complete"].as<bool>(false);
                 j.init_error = n["init_error"].as<std::string>("");
+                j.output_returned = n["output_returned"].as<bool>(false);
                 j.submit_time = n["submit_time"].as<std::string>("");
                 j.start_time = n["start_time"].as<std::string>("");
                 j.end_time = n["end_time"].as<std::string>("");
@@ -120,6 +121,7 @@ void StateStore::save(const ProjectState& state) {
         out << YAML::Key << "scratch_path" << YAML::Value << j.scratch_path;
         out << YAML::Key << "init_complete" << YAML::Value << j.init_complete;
         out << YAML::Key << "init_error" << YAML::Value << j.init_error;
+        out << YAML::Key << "output_returned" << YAML::Value << j.output_returned;
         out << YAML::Key << "submit_time" << YAML::Value << j.submit_time;
         out << YAML::Key << "start_time" << YAML::Value << j.start_time;
         out << YAML::Key << "end_time" << YAML::Value << j.end_time;

@@ -58,14 +58,13 @@ void TCCPCLI::register_all_commands() {
             }
             ProjectState empty;
             cli.state_store->save(empty);
-            // Reset in-memory managers
+            // Reset in-memory state without destroying managers
+            // (background init threads hold references to the managers)
             if (cli.allocs) {
                 cli.allocs->state() = empty;
             }
             if (cli.jobs) {
-                // Clear tracked jobs by reinitializing managers
-                cli.clear_managers();
-                cli.init_managers();
+                cli.jobs->clear_tracked();
             }
             std::cout << theme::ok("State wiped. All allocations and jobs forgotten.");
         } else {
@@ -250,30 +249,186 @@ void TCCPCLI::run_register() {
 
 static bool write_if_missing(const std::filesystem::path& path, const std::string& content) {
     if (std::filesystem::exists(path)) {
-        std::cout << theme::dim("    ~ " + path.filename().string() + " (already exists)") << "\n";
+        std::cout << theme::dim("    ~ ") << theme::dim(path.filename().string())
+                  << theme::dim(" (exists)") << "\n";
         return false;
     }
     std::ofstream f(path);
     f << content;
     f.close();
-    std::cout << theme::ok("Created " + path.filename().string());
+    std::cout << theme::green("    + ") << path.filename().string() << "\n";
     return true;
 }
 
 void TCCPCLI::run_new(const std::string& template_name) {
-    if (template_name != "python") {
+    if (template_name != "python" && template_name != "qwen") {
         std::cout << theme::fail("Unknown template: " + template_name);
-        std::cout << theme::step("Available templates: python");
+        std::cout << theme::step("Available templates: python, qwen");
         return;
     }
 
     auto cwd = std::filesystem::current_path();
     std::string dirname = cwd.filename().string();
 
+    if (template_name == "qwen") {
+        // ── Qwen 3 4B chat project ──────────────────────────────
+        std::cout << theme::banner();
+        std::cout << theme::section("New Qwen Chat Project");
+        std::cout << theme::kv("Directory", cwd.string());
+        std::cout << theme::kv("Model", "Qwen/Qwen3-4B");
+        std::cout << theme::kv("Type", "python-pytorch (GPU)");
+        std::cout << "\n  " << theme::dim("Files") << "\n";
+
+        // tccp.yaml — python-pytorch type with GPU
+        std::string yaml =
+            "name: " + dirname + "\n"
+            "type: python-pytorch\n"
+            "\n"
+            "env_file: .env\n"
+            "\n"
+            "output: ./output\n"
+            "\n"
+            "cache: ./cache\n"
+            "\n"
+            "jobs:\n"
+            "  chat:\n"
+            "    script: chat.py\n"
+            "    args: \"\"\n"
+            "    time: \"2:00:00\"\n"
+            "    slurm:\n"
+            "      gpu_type: a100\n"
+            "      gpu_count: 1\n"
+            "      memory: \"32G\"\n"
+            "      cpus_per_task: 4\n";
+        write_if_missing(cwd / "tccp.yaml", yaml);
+
+        // chat.py — interactive chat with Qwen3-4B-Instruct
+        std::string chat_py = R"PY(import os
+import torch
+from dotenv import load_dotenv
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+load_dotenv()
+
+MODEL_ID = "Qwen/Qwen3-4B"
+HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
+
+if not HF_TOKEN:
+    print("ERROR: HF_TOKEN not set. Add your Hugging Face token to .env:")
+    print('  HF_TOKEN=hf_...')
+    raise SystemExit(1)
+
+print(f"Loading {MODEL_ID}...")
+print(f"  Device: cuda ({torch.cuda.get_device_name(0)})")
+print(f"  PyTorch: {torch.__version__}")
+print()
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=HF_TOKEN)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    torch_dtype=torch.bfloat16,
+    device_map="auto",
+    token=HF_TOKEN,
+)
+
+print("Model loaded. Type 'quit' to exit, 'clear' to reset conversation.")
+print()
+
+messages = []
+
+while True:
+    try:
+        user_input = input("You: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nBye!")
+        break
+
+    if not user_input.strip():
+        continue
+    if user_input.strip().lower() == "quit":
+        print("Bye!")
+        break
+    if user_input.strip().lower() == "clear":
+        messages = []
+        print("-- conversation cleared --")
+        print()
+        continue
+
+    messages.append({"role": "user", "content": user_input})
+
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=2048,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
+            top_k=20,
+        )
+
+    # Decode only the new tokens (skip the prompt)
+    new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
+    response = tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+    print(f"\nQwen: {response}\n")
+    messages.append({"role": "assistant", "content": response})
+)PY";
+        write_if_missing(cwd / "chat.py", chat_py);
+
+        // Create output directory
+        std::filesystem::create_directories(cwd / "output");
+
+        // requirements.txt — transformers + friends (torch comes from container)
+        std::string requirements =
+            "transformers\n"
+            "accelerate\n"
+            "safetensors\n"
+            "sentencepiece\n"
+            "python-dotenv\n";
+        write_if_missing(cwd / "requirements.txt", requirements);
+
+        // .env — Hugging Face token (gitignored, synced via env_file)
+        std::string env =
+            "# Hugging Face access token (https://huggingface.co/settings/tokens)\n"
+            "HF_TOKEN=\n";
+        write_if_missing(cwd / ".env", env);
+
+        // .gitignore
+        std::string gitignore =
+            "__pycache__/\n"
+            "*.pyc\n"
+            ".venv/\n"
+            "*.egg-info/\n"
+            ".env\n"
+            "output/\n"
+            "tccp-output/\n"
+            "cache/\n";
+        write_if_missing(cwd / ".gitignore", gitignore);
+
+        std::cout << theme::divider();
+        std::cout << theme::section("Next Steps");
+        std::cout << "    " << theme::white("1.") << " Add your Hugging Face token to "
+                  << theme::bold(".env") << "\n";
+        std::cout << "    " << theme::white("2.") << " Run " << theme::bold("tccp")
+                  << " to connect\n";
+        std::cout << "    " << theme::white("3.") << " Run " << theme::bold("run chat")
+                  << " to start chatting\n\n";
+        return;
+    }
+
+    // ── Python template (original) ──────────────────────────────
     std::cout << theme::banner();
     std::cout << theme::section("New Python Project");
     std::cout << theme::kv("Directory", cwd.string());
-    std::cout << "\n";
+    std::cout << "\n  " << theme::dim("Files") << "\n";
 
     // tccp.yaml
     std::string yaml =
@@ -358,8 +513,11 @@ void TCCPCLI::run_new(const std::string& template_name) {
     write_if_missing(cwd / ".gitignore", gitignore);
 
     std::cout << theme::divider();
-    std::cout << theme::dim("    Project ready.") << "\n";
-    std::cout << theme::step("Run 'tccp' to connect and 'run <job>' to submit.") << "\n";
+    std::cout << theme::section("Next Steps");
+    std::cout << "    " << theme::white("1.") << " Run " << theme::bold("tccp")
+              << " to connect\n";
+    std::cout << "    " << theme::white("2.") << " Run " << theme::bold("run main")
+              << " to submit your job\n\n";
 }
 
 static std::string read_password(const std::string& prompt) {

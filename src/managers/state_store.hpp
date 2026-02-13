@@ -38,6 +38,9 @@ struct JobState {
     bool init_complete = false;
     std::string init_error;
 
+    // Output tracking
+    bool output_returned = false;   // true if output was downloaded and remote cleaned
+
     // Timing
     std::string submit_time;        // ISO timestamp when job was submitted
     std::string start_time;         // ISO timestamp when job started running

@@ -74,7 +74,7 @@ void BaseCLI::print_help() const {
     std::vector<std::pair<std::string, std::vector<std::string>>> categories = {
         {"Connection",   {"status", "disconnect"}},
         {"Jobs",         {"run", "view", "jobs", "cancel", "return"}},
-        {"Allocations",  {"allocs", "dealloc"}},
+        {"Allocations",  {"allocs", "dealloc", "gpus"}},
         {"Shell",        {"shell", "exec"}},
         {"Setup",        {"init", "register", "credentials"}},
         {"General",      {"help", "clear", "quit", "exit"}},

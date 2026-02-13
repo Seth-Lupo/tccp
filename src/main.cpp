@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
                 if (argc < 3) {
                     std::cout << theme::fail("Missing template name.");
                     std::cout << theme::step("Usage: tccp new <template>");
-                    std::cout << theme::step("Available templates: python");
+                    std::cout << theme::step("Available templates: python, qwen");
                     return 1;
                 }
                 cli.run_new(argv[2]);

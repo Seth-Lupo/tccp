@@ -103,6 +103,7 @@ struct ProjectConfig {
     std::map<std::string, std::string> environment;
     std::map<std::string, JobConfig> jobs;
     std::vector<std::string> rodata;             // read-only data directories (string or list in YAML)
+    std::string env_file;                         // env file to sync (bypasses gitignore)
     std::string output;                          // output directory
     std::string cache;                           // cache directory (best-effort, shared across jobs on same allocation)
     std::optional<SlurmDefaults> slurm;          // project-level SLURM defaults

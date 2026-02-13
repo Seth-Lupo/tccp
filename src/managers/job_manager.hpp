@@ -6,6 +6,7 @@
 #include <mutex>
 #include <thread>
 #include <set>
+#include <atomic>
 #include <core/config.hpp>
 #include <ssh/connection.hpp>
 #include "allocation_manager.hpp"
@@ -26,6 +27,9 @@ struct TrackedJob {
     bool init_complete = false;      // true when job is launched on compute node
     std::string init_error;           // error message if init failed
 
+    // Output tracking
+    bool output_returned = false;    // true if output was downloaded and remote cleaned
+
     // Timing
     std::string submit_time;          // ISO timestamp when job was first submitted
     std::string start_time;           // ISO timestamp when job started running (init_complete)
@@ -36,6 +40,10 @@ class JobManager {
 public:
     JobManager(const Config& config, SSHConnection& dtn, SSHConnection& login,
                AllocationManager& allocs, SyncManager& sync);
+    ~JobManager();
+
+    // Clear in-memory tracked jobs (for state reset without destroying the manager)
+    void clear_tracked();
 
     Result<TrackedJob> run(const std::string& job_name, StatusCallback cb = nullptr);
     SSHResult list(StatusCallback cb = nullptr);
@@ -61,6 +69,7 @@ private:
     std::vector<std::thread> init_threads_;
     std::set<std::string> cancel_requested_;  // job_ids marked for cancellation during init
     std::mutex cancel_mutex_;
+    std::atomic<bool> shutdown_{false};        // signals init threads to exit
     bool environment_checked_ = false;  // Cache: only check environment once per session
 
     // Path helpers (new directory structure)
@@ -69,6 +78,11 @@ private:
     std::string env_dir() const;
     std::string container_cache() const;
     std::string scratch_dir(const std::string& job_id) const;
+
+    // Container/environment helpers (type-aware)
+    std::string container_docker_uri() const;   // e.g. "docker://python:3.11-slim"
+    std::string container_image_path() const;   // full path to .sif file
+    bool is_gpu_type() const;                   // true for pytorch, etc.
 
     std::string generate_job_id(const std::string& job_name) const;
     void ensure_environment(StatusCallback cb);
@@ -94,4 +108,16 @@ private:
 
     // Shared cancel logic (used by both cancel_job and cancel_job_by_id)
     Result<void> do_cancel(TrackedJob* tj, const std::string& job_name);
+
+    // Shared cleanup: remove scratch + socket from compute node (preserves log)
+    void cleanup_compute_node(const TrackedJob& tj);
+
+    // Shared: persist tracked job fields to state store
+    void persist_job_state(const TrackedJob& tj);
+
+    // Cleanup: keep only latest completed/canceled/failed job per name
+    void prune_completed_jobs();
+
+    // Auto-return output and clean remote
+    void try_return_output(TrackedJob& tj);
 };
