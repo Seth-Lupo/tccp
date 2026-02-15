@@ -6,6 +6,22 @@
 
 namespace fs = std::filesystem;
 
+// Local output path: output/{job_name}/{timestamp}/
+static fs::path local_output_dir(const fs::path& project_dir, const std::string& job_id) {
+    return project_dir / "output" / JobManager::job_name_from_id(job_id)
+                                  / JobManager::timestamp_from_id(job_id);
+}
+
+// Update output/{job_name}/latest → {timestamp} (relative symlink)
+static void update_latest_symlink(const fs::path& project_dir, const std::string& job_id) {
+    fs::path job_dir = project_dir / "output" / JobManager::job_name_from_id(job_id);
+    fs::create_directories(job_dir);
+    fs::path latest_link = job_dir / "latest";
+    std::error_code ec;
+    fs::remove(latest_link, ec);
+    fs::create_directory_symlink(fs::path(JobManager::timestamp_from_id(job_id)), latest_link, ec);
+}
+
 Result<void> JobManager::return_output(const std::string& job_id, StatusCallback cb) {
     std::string remote_output = job_output_dir(job_id) + "/output";
 
@@ -37,7 +53,7 @@ Result<void> JobManager::return_output(const std::string& job_id, StatusCallback
         return Result<void>::Ok();
     }
 
-    fs::path local_base = config_.project_dir() / "tccp-output" / job_id;
+    fs::path local_base = local_output_dir(config_.project_dir(), job_id);
     fs::create_directories(local_base);
 
     int count = 0;
@@ -54,7 +70,13 @@ Result<void> JobManager::return_output(const std::string& job_id, StatusCallback
         count++;
     }
 
-    if (cb) cb(fmt::format("Downloaded {} files to tccp-output/{}/", count, job_id));
+    if (count > 0) {
+        update_latest_symlink(config_.project_dir(), job_id);
+    }
+
+    std::string jname = JobManager::job_name_from_id(job_id);
+    std::string tstamp = JobManager::timestamp_from_id(job_id);
+    if (cb) cb(fmt::format("Downloaded {} files to output/{}/{}/", count, jname, tstamp));
 
     // Delete remote output after successful download
     dtn_.run("rm -rf " + job_output_dir(job_id));
@@ -123,7 +145,7 @@ void JobManager::try_return_output(TrackedJob& tj) {
     }
 
     // Download all files
-    fs::path local_base = config_.project_dir() / "tccp-output" / tj.job_id;
+    fs::path local_base = local_output_dir(config_.project_dir(), tj.job_id);
     fs::create_directories(local_base);
 
     bool all_ok = true;
@@ -145,6 +167,8 @@ void JobManager::try_return_output(TrackedJob& tj) {
 
     // Only delete remote output if download fully succeeded
     if (all_ok) {
+        update_latest_symlink(config_.project_dir(), tj.job_id);
+
         dtn_.run("rm -rf " + remote_output);
         tj.output_returned = true;
         for (auto& js : allocs_.state().jobs) {

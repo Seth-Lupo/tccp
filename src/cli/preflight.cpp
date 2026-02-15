@@ -68,10 +68,6 @@ std::vector<PreflightIssue> check_project_config() {
 
     const auto& proj = result.value.project();
 
-    if (proj.name.empty()) {
-        issues.push_back({"Project name not set in tccp.yaml", "Add 'name: myproject' to tccp.yaml"});
-    }
-
     return issues;
 }
 

@@ -13,10 +13,16 @@ void JobManager::ensure_dirs(const std::string& job_id, StatusCallback cb) {
     std::string env = env_dir();
     std::string cc = container_cache();
 
+    // Remote directories on cluster
     std::string cmd = fmt::format(
         "mkdir -p {} {}/default/venv {}/images {}/cache {}/tmp {}",
         base, env, cc, cc, cc, out);
     dtn_.run(cmd);
+
+    // Local output directory: output/{job_name}/
+    std::filesystem::path local_output = config_.project_dir() / "output" / job_name_from_id(job_id);
+    std::error_code ec;
+    std::filesystem::create_directories(local_output, ec);
 }
 
 void JobManager::ensure_environment(const std::string& compute_node, StatusCallback cb) {
@@ -52,9 +58,9 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
     // Single check for all three components
     std::string check_all = fmt::format(
         "test -f {} && echo IMAGE_OK || echo IMAGE_MISSING; "
-        "test -f {}/bin/python && echo VENV_OK || echo VENV_MISSING; "
+        "( test -f {}/bin/python || test -L {}/bin/python ) && echo VENV_OK || echo VENV_MISSING; "
         "test -x {} && echo DTACH_OK || echo DTACH_MISSING",
-        image, venv, dtach_bin);
+        image, venv, venv, dtach_bin);
 
     auto result = dtn_.run(check_all);
     bool need_image = result.stdout_data.find("IMAGE_MISSING") != std::string::npos;
@@ -124,15 +130,19 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
                                elapsed(), gpu ? "with system " : ""));
         std::string base = persistent_base();
         std::string venv_flags = gpu ? "--system-site-packages " : "";
-        std::string nv_flag = gpu ? "--nv " : "";
-        // Set TMPDIR so pip writes temp files to a namespaced location
-        // instead of polluting the DTN's /tmp with orphan wheel dirs.
+        // Do NOT use --nv for venv creation: it runs on the DTN which has no
+        // GPU driver, so singularity exec --nv would fail silently.
+        // CUDA is not needed just to create a venv.
         std::string pip_tmp = fmt::format("/tmp/{}/tccp-pip-tmp", username_);
         dtn_.run(fmt::format("mkdir -p {}", pip_tmp));
         std::string venv_cmd = fmt::format(
-            "TMPDIR={} singularity exec {}--bind {}:{} {} python -m venv {}{}",
-            pip_tmp, nv_flag, base, base, image, venv_flags, venv);
-        dtn_.run(venv_cmd);
+            "TMPDIR={} singularity exec --bind {}:{} {} python -m venv {}{}",
+            pip_tmp, base, base, image, venv_flags, venv);
+        auto venv_result = dtn_.run(venv_cmd);
+        if (venv_result.exit_code != 0) {
+            throw std::runtime_error(fmt::format(
+                "Failed to create venv: {}", venv_result.get_output()));
+        }
         dtn_.run(fmt::format("rm -rf {} 2>/dev/null; true", pip_tmp));
         if (cb) cb(fmt::format("[{}] Python venv created", elapsed()));
     }
@@ -253,6 +263,28 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
         binds += fmt::format(" --bind {}:{}/cache", shared_cache, scratch);
     }
 
+    // For GPU environments, filter out container-provided packages from
+    // requirements.txt so pip doesn't re-download torch (~2GB) and break
+    // the CUDA-linked version already in the container.
+    std::string req_filter;
+    if (gpu) {
+        req_filter =
+            "        TCCP_REQ_FILE=$(mktemp /tmp/tccp_req_XXXXXX.txt)\n"
+            "        grep -ivE '^(torch|torchvision|torchaudio|pytorch|nvidia-|triton)(\\s|[=><!~\\[]|$)' "
+            "requirements.txt > $TCCP_REQ_FILE\n";
+    } else {
+        req_filter =
+            "        TCCP_REQ_FILE=requirements.txt\n";
+    }
+
+    // Build cache/temp dir path — use shared cache if configured, else per-job temp
+    std::string runtime_cache;
+    if (!proj.cache.empty()) {
+        runtime_cache = fmt::format("/tmp/{}/{}/.tccp-cache", username_, proj.name);
+    } else {
+        runtime_cache = scratch + "/.tccp-tmp";
+    }
+
     // Create the run script on the compute node
     std::string run_script = fmt::format(
         "#!/bin/bash\n"
@@ -260,11 +292,24 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
         "export SINGULARITY_CACHEDIR={}/cache\n"
         "export SINGULARITY_TMPDIR={}/tmp\n"
         "cd {}\n"
+        "# Redirect all writes to /tmp (avoid NFS home quota)\n"
+        "# HOME is set after module load so the module system can find its config\n"
+        "mkdir -p {}\n"
+        "export HOME={}\n"
+        "export XDG_CACHE_HOME={}/xdg-cache\n"
+        "export TMPDIR={}/tmp\n"
+        "export PIP_CACHE_DIR={}/pip-cache\n"
+        "export HF_HOME={}/huggingface\n"
+        "export TORCH_HOME={}/torch\n"
+        "mkdir -p $XDG_CACHE_HOME $TMPDIR $PIP_CACHE_DIR $HF_HOME $TORCH_HOME\n"
         "if [ -f requirements.txt ]; then\n"
         "    REQ_HASH=$(md5sum requirements.txt 2>/dev/null | cut -d' ' -f1)\n"
+        "    mkdir -p {}/env\n"
         "    STAMP={}/env/.req_installed\n"
         "    if [ ! -f \"$STAMP\" ] || [ \"$(cat $STAMP 2>/dev/null)\" != \"$REQ_HASH\" ]; then\n"
-        "        singularity exec {} {} {}/bin/pip install -q -r requirements.txt\n"
+        "{}"
+        "        singularity exec {} {} {}/bin/pip install -q -r $TCCP_REQ_FILE\n"
+        "        if [ \"$TCCP_REQ_FILE\" != \"requirements.txt\" ]; then rm -f $TCCP_REQ_FILE; fi\n"
         "        echo \"$REQ_HASH\" > \"$STAMP\"\n"
         "    fi\n"
         "fi\n"
@@ -276,7 +321,8 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
         "exit $EC\n",
         cc, cc,
         scratch,
-        scratch, binds, image, venv,
+        runtime_cache, runtime_cache, runtime_cache, runtime_cache, runtime_cache, runtime_cache, runtime_cache,
+        scratch, scratch, req_filter, binds, image, venv,
         binds, image, venv, script, args,
         log);
 

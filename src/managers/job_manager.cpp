@@ -86,6 +86,22 @@ std::string JobManager::scratch_dir(const std::string& job_id) const {
     return fmt::format(REMOTE_SCRATCH_DIR, username_, config_.project().name, job_id);
 }
 
+std::string JobManager::job_name_from_id(const std::string& job_id) {
+    auto pos = job_id.find("__");
+    if (pos != std::string::npos && pos + 2 < job_id.size()) {
+        return job_id.substr(pos + 2);
+    }
+    return job_id;
+}
+
+std::string JobManager::timestamp_from_id(const std::string& job_id) {
+    auto pos = job_id.find("__");
+    if (pos != std::string::npos) {
+        return job_id.substr(0, pos);
+    }
+    return job_id;
+}
+
 std::string JobManager::generate_job_id(const std::string& job_name) const {
     auto now = std::chrono::system_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(

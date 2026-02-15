@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <filesystem>
 #include <core/config.hpp>
 #include <ssh/connection.hpp>
 #include "state_store.hpp"
@@ -27,9 +28,20 @@ private:
     int64_t cached_manifest_mtime_ = 0;
 
     std::vector<SyncManifestEntry> build_local_manifest();
+    std::vector<SyncManifestEntry> get_remote_manifest(
+        const std::string& compute_node,
+        const std::string& scratch_path);
     std::vector<std::string> diff_manifests(
         const std::vector<SyncManifestEntry>& local,
         const std::vector<SyncManifestEntry>& remote);
+
+    // Collect all files to sync (project + rodata + env file)
+    std::vector<std::pair<std::filesystem::path, std::string>> collect_sync_files();
+
+    // Pipe a local tar archive through DTN to compute node (no DTN disk usage)
+    void pipe_tar_to_node(const std::filesystem::path& tar_path,
+                          const std::string& compute_node,
+                          const std::string& scratch_path);
 
     void full_sync(const std::string& compute_node,
                    const std::string& scratch_path,

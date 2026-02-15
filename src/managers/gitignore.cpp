@@ -13,6 +13,7 @@ void GitignoreParser::add_default_patterns() {
     std::vector<std::string> defaults = {
         ".git/",
         ".gitignore",
+        ".tccpignore",
         "__pycache__/",
         "*.pyc",
         "*.pyo",
@@ -20,6 +21,7 @@ void GitignoreParser::add_default_patterns() {
         "venv/",
         ".idea/",
         ".vscode/",
+        ".claude/",
         ".DS_Store",
         "*.swp",
         "*.swo",
@@ -32,6 +34,9 @@ void GitignoreParser::add_default_patterns() {
         ".mypy_cache/",
         "node_modules/",
         ".env",
+        // tccp internal artifacts — never upload these
+        "output/",
+        "tccp_run.sh",
     };
 
     for (const auto& pattern : defaults) {
@@ -40,7 +45,11 @@ void GitignoreParser::add_default_patterns() {
 }
 
 void GitignoreParser::load_gitignore() {
-    fs::path gitignore_path = project_dir_ / ".gitignore";
+    // .tccpignore takes priority over .gitignore
+    fs::path gitignore_path = project_dir_ / ".tccpignore";
+    if (!fs::exists(gitignore_path)) {
+        gitignore_path = project_dir_ / ".gitignore";
+    }
 
     if (!fs::exists(gitignore_path)) {
         return;

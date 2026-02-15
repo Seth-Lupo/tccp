@@ -1,10 +1,84 @@
 #include "config.hpp"
+#include <managers/gpu_discovery.hpp>
 #include <yaml-cpp/yaml.h>
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
 
 namespace fs = std::filesystem;
+
+// ── GPU shorthand parsing ─────────────────────────────────────
+// Accepts: "a100", "a100:2", "a100-80gb", "2" (count only)
+// Bare base types like "a100" are resolved to the cheapest variant (lowest tier).
+static void parse_gpu_shorthand(const std::string& value,
+                                std::string& out_type, int& out_count) {
+    auto colon = value.find(':');
+    if (colon != std::string::npos) {
+        out_type = value.substr(0, colon);
+        try { out_count = std::stoi(value.substr(colon + 1)); } catch (...) { out_count = 1; }
+    } else {
+        // Pure number → count only; otherwise it's a type name
+        try {
+            out_count = std::stoi(value);
+        } catch (...) {
+            out_type = value;
+            if (out_count <= 0) out_count = 1;
+        }
+    }
+
+    // If the type is a bare base (e.g. "a100") with known variants, resolve to
+    // the cheapest one (lowest tier) so downstream defaults and matching work.
+    if (!out_type.empty() && !find_variant_by_id(out_type)) {
+        auto variants = find_variants_by_base(out_type);
+        if (!variants.empty()) {
+            const GpuVariant* cheapest = variants[0];
+            for (const auto* v : variants) {
+                if (v->tier < cheapest->tier) cheapest = v;
+            }
+            out_type = cheapest->id;
+        }
+    }
+}
+
+// Apply intelligent defaults when a GPU is requested but memory/cpus weren't
+// explicitly set.  This prevents the common mistake of requesting an A100 with 4G RAM.
+static void apply_gpu_smart_defaults(SlurmDefaults& s, bool memory_set, bool cpus_set) {
+    if (s.gpu_type.empty() && s.gpu_count <= 0) return;
+
+    if (!cpus_set || s.cpus_per_task <= 1) {
+        s.cpus_per_task = 4;
+    }
+
+    if (!memory_set || s.memory.empty() || s.memory == "4G") {
+        // Scale memory based on GPU variant
+        const auto* variant = find_variant_by_id(s.gpu_type);
+        if (variant && variant->mem_gb >= 80) {
+            s.memory = "64G";   // A100-80GB class
+        } else {
+            s.memory = "32G";   // A100-40GB, V100, etc.
+        }
+    }
+}
+
+// Read inline resource keys (gpu, memory, cpus, partition) from a YAML node
+// into a SlurmDefaults, tracking which fields were explicitly set.
+static void overlay_inline_resources(const YAML::Node& node, SlurmDefaults& s,
+                                     bool& memory_set, bool& cpus_set) {
+    if (node["gpu"] && node["gpu"].IsScalar()) {
+        parse_gpu_shorthand(node["gpu"].as<std::string>(), s.gpu_type, s.gpu_count);
+    }
+    if (node["memory"] && node["memory"].IsScalar()) {
+        s.memory = node["memory"].as<std::string>();
+        memory_set = true;
+    }
+    if (node["cpus"] && node["cpus"].IsScalar()) {
+        s.cpus_per_task = node["cpus"].as<int>(1);
+        cpus_set = true;
+    }
+    if (node["partition"] && node["partition"].IsScalar()) {
+        s.partition = node["partition"].as<std::string>();
+    }
+}
 
 bool global_config_exists() {
     return fs::exists(get_global_config_path());
@@ -147,21 +221,90 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
         project.slurm = parse_slurm_config(node["slurm"]);
     }
 
+    // Overlay top-level resource keys (gpu, memory, cpus, partition) on top of
+    // any existing slurm block.  Creates one if needed.
+    bool proj_has_inline = (node["gpu"] && node["gpu"].IsScalar()) ||
+                           (node["memory"] && node["memory"].IsScalar()) ||
+                           (node["cpus"] && node["cpus"].IsScalar()) ||
+                           (node["partition"] && node["partition"].IsScalar());
+    if (proj_has_inline) {
+        if (!project.slurm.has_value()) {
+            SlurmDefaults slurm;
+            slurm.partition = "batch";
+            slurm.time = "00:30:00";
+            slurm.nodes = 1;
+            slurm.cpus_per_task = 1;
+            slurm.memory = "4G";
+            slurm.gpu_count = 0;
+            slurm.mail_type = "NONE";
+            project.slurm = slurm;
+        }
+        bool mem_set = false, cpus_set = false;
+        // If slurm: block already set memory/cpus, mark as explicit
+        if (node["slurm"] && node["slurm"].IsMap()) {
+            if (node["slurm"]["memory"]) mem_set = true;
+            if (node["slurm"]["cpus_per_task"]) cpus_set = true;
+        }
+        overlay_inline_resources(node, project.slurm.value(), mem_set, cpus_set);
+        apply_gpu_smart_defaults(project.slurm.value(), mem_set, cpus_set);
+    } else if (project.slurm.has_value()) {
+        // Even with just a slurm: block, apply smart GPU defaults
+        bool mem_set = node["slurm"] && node["slurm"]["memory"];
+        bool cpus_set = node["slurm"] && node["slurm"]["cpus_per_task"];
+        apply_gpu_smart_defaults(project.slurm.value(), mem_set, cpus_set);
+    }
+
     if (node["jobs"] && node["jobs"].IsMap()) {
         for (const auto& job_kv : node["jobs"]) {
             std::string job_name = job_kv.first.as<std::string>();
             JobConfig jc;
 
-            if (job_kv.second.IsMap()) {
-                jc.script = job_kv.second["script"].as<std::string>("");
-                jc.args = job_kv.second["args"].as<std::string>("");
-                jc.time = job_kv.second["time"].as<std::string>("");
-                if (job_kv.second["slurm"] && job_kv.second["slurm"].IsMap()) {
-                    jc.slurm = parse_slurm_config(job_kv.second["slurm"]);
+            if (job_kv.second.IsScalar()) {
+                // Bare string shorthand: `train: train.py`
+                jc.script = job_kv.second.as<std::string>("");
+            } else if (job_kv.second.IsMap()) {
+                const auto& jnode = job_kv.second;
+                jc.script = jnode["script"].as<std::string>("");
+                jc.args = jnode["args"].as<std::string>("");
+                jc.time = jnode["time"].as<std::string>("");
+
+                // Full slurm: block (backwards compat)
+                if (jnode["slurm"] && jnode["slurm"].IsMap()) {
+                    jc.slurm = parse_slurm_config(jnode["slurm"]);
+                }
+
+                // Inline resource keys: gpu, memory, cpus, partition
+                bool job_has_inline = (jnode["gpu"] && jnode["gpu"].IsScalar()) ||
+                                      (jnode["memory"] && jnode["memory"].IsScalar()) ||
+                                      (jnode["cpus"] && jnode["cpus"].IsScalar()) ||
+                                      (jnode["partition"] && jnode["partition"].IsScalar());
+                if (job_has_inline) {
+                    if (!jc.slurm.has_value()) {
+                        jc.slurm = SlurmDefaults{};
+                    }
+                    bool mem_set = false, cpus_set = false;
+                    if (jnode["slurm"] && jnode["slurm"].IsMap()) {
+                        if (jnode["slurm"]["memory"]) mem_set = true;
+                        if (jnode["slurm"]["cpus_per_task"]) cpus_set = true;
+                    }
+                    overlay_inline_resources(jnode, jc.slurm.value(), mem_set, cpus_set);
+                    apply_gpu_smart_defaults(jc.slurm.value(), mem_set, cpus_set);
+                } else if (jc.slurm.has_value()) {
+                    bool mem_set = jnode["slurm"] && jnode["slurm"]["memory"];
+                    bool cpus_set = jnode["slurm"] && jnode["slurm"]["cpus_per_task"];
+                    apply_gpu_smart_defaults(jc.slurm.value(), mem_set, cpus_set);
                 }
             }
             project.jobs[job_name] = jc;
         }
+    }
+
+    // Top-level `script` shorthand: if no jobs defined, create a "main" job
+    if (project.jobs.empty()) {
+        JobConfig jc;
+        jc.script = node["script"].as<std::string>("main.py");
+        jc.args = node["args"].as<std::string>("");
+        project.jobs["main"] = jc;
     }
 
     if (node["rodata"]) {
@@ -242,6 +385,11 @@ Result<Config> Config::load_project(const fs::path& dir) {
         config.project_ = parse_project_config(root);
         config.project_dir_ = dir;
 
+        // Auto-infer project name from directory name if not set
+        if (config.project_.name.empty()) {
+            config.project_.name = dir.filename().string();
+        }
+
         return Result<Config>::Ok(config);
     } catch (const std::exception& e) {
         return Result<Config>::Err(std::string("Failed to parse project config: ") + e.what());
@@ -264,6 +412,11 @@ Result<Config> Config::load(const fs::path& project_dir) {
         if (project_result.is_ok()) {
             config.project_ = project_result.value.project_;
         }
+    }
+
+    // Auto-infer project name from directory name if not set
+    if (config.project_.name.empty()) {
+        config.project_.name = project_dir.filename().string();
     }
 
     return Result<Config>::Ok(config);

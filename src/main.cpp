@@ -20,9 +20,14 @@ void print_usage() {
               << theme::color::RESET << theme::color::BROWN << "<template>"
               << theme::color::RESET << theme::color::DIM
               << "   Create new project" << theme::color::RESET << "\n";
-    std::cout << theme::color::BLUE << "    tccp register"
+    std::cout << theme::color::BLUE << "    tccp register "
+              << theme::color::RESET << theme::color::BROWN << "[path]"
               << theme::color::RESET << theme::color::DIM
-              << "         Register current directory" << theme::color::RESET << "\n";
+              << "    Register a project directory" << theme::color::RESET << "\n";
+    std::cout << theme::color::BLUE << "    tccp manual "
+              << theme::color::RESET << theme::color::BROWN << "[topic]"
+              << theme::color::RESET << theme::color::DIM
+              << "     Show manual (python, python-pytorch)" << theme::color::RESET << "\n";
     std::cout << "\n";
     std::cout << theme::color::DIM
               << "    tccp --version        Show version\n"
@@ -50,7 +55,9 @@ int main(int argc, char** argv) {
             } else if (cmd == "connect") {
                 cli.run_connected_repl();
             } else if (cmd == "register") {
-                cli.run_register();
+                cli.run_register(argc >= 3 ? argv[2] : "");
+            } else if (cmd == "manual") {
+                cli.run_manual(argc >= 3 ? argv[2] : "");
             } else if (cmd == "setup") {
                 cli.run_setup();
             } else if (cmd == "new") {

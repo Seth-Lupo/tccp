@@ -56,7 +56,6 @@ struct SyncManifestEntry {
 struct ProjectState {
     std::vector<AllocationState> allocations;
     std::vector<JobState> jobs;
-    std::vector<SyncManifestEntry> last_sync_manifest;
     std::string last_sync_node;
     std::string last_sync_scratch;
 };

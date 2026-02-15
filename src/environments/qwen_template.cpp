@@ -135,7 +135,6 @@ while True:
             "*.egg-info/\n"
             ".env\n"
             "output/\n"
-            "tccp-output/\n"
             "cache/\n"
         },
     };

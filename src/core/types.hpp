@@ -86,6 +86,7 @@ struct SlurmDefaults {
     std::string gpu_type;
     int gpu_count;
     std::string mail_type;
+    std::string node_constraint;  // node prefix for --nodelist (e.g. "cc1gpu")
 };
 
 struct JobConfig {

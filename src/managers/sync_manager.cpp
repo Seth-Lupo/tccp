@@ -5,7 +5,9 @@
 #include <core/utils.hpp>
 #include <fmt/format.h>
 #include <filesystem>
+#include <fstream>
 #include <set>
+#include <sstream>
 #include <algorithm>
 
 namespace fs = std::filesystem;
@@ -117,25 +119,60 @@ std::vector<SyncManifestEntry> SyncManager::build_local_manifest() {
     return manifest;
 }
 
+std::vector<SyncManifestEntry> SyncManager::get_remote_manifest(
+    const std::string& compute_node,
+    const std::string& scratch_path) {
+
+    std::vector<SyncManifestEntry> manifest;
+
+    // One SSH command: get all file paths + sizes from scratch
+    auto result = dtn_.run(fmt::format(
+        "ssh {} {} 'cd {} && find . -type f -printf \"%s %P\\n\" 2>/dev/null'",
+        SSH_OPTS, compute_node, scratch_path));
+
+    if (result.exit_code != 0 || result.stdout_data.empty()) {
+        return manifest;  // empty → caller falls back to full sync
+    }
+
+    // Parse "size path" lines
+    std::istringstream stream(result.stdout_data);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line.empty()) continue;
+        auto space_pos = line.find(' ');
+        if (space_pos == std::string::npos) continue;
+
+        SyncManifestEntry entry;
+        try {
+            entry.size = std::stoll(line.substr(0, space_pos));
+        } catch (...) {
+            continue;
+        }
+        entry.path = line.substr(space_pos + 1);
+        entry.mtime = 0;  // remote mtime not comparable to local
+        manifest.push_back(entry);
+    }
+
+    return manifest;
+}
+
 std::vector<std::string> SyncManager::diff_manifests(
     const std::vector<SyncManifestEntry>& local,
     const std::vector<SyncManifestEntry>& remote) {
 
-    // Build remote lookup: path → (mtime, size)
-    std::map<std::string, std::pair<int64_t, int64_t>> remote_map;
+    // Build remote lookup: path → size
+    std::map<std::string, int64_t> remote_map;
     for (const auto& e : remote) {
-        remote_map[e.path] = {e.mtime, e.size};
+        remote_map[e.path] = e.size;
     }
 
-    // Find files that are new or changed
+    // Find files that are new or changed (size differs)
     std::vector<std::string> changed;
     for (const auto& e : local) {
         auto it = remote_map.find(e.path);
         if (it == remote_map.end()) {
-            // New file
             changed.push_back(e.path);
-        } else if (it->second.first != e.mtime || it->second.second != e.size) {
-            // Changed file
+        } else if (it->second != e.size) {
             changed.push_back(e.path);
         }
     }
@@ -143,53 +180,26 @@ std::vector<std::string> SyncManager::diff_manifests(
     return changed;
 }
 
-void SyncManager::full_sync(const std::string& compute_node,
-                             const std::string& scratch_path,
-                             StatusCallback cb) {
+// Collect all files that should be synced (project files + rodata + env file).
+// Returns a list of (absolute_path, relative_path) pairs.
+std::vector<std::pair<fs::path, std::string>> SyncManager::collect_sync_files() {
+    std::vector<std::pair<fs::path, std::string>> result;
+    std::set<std::string> seen;
+
     const auto& proj = config_.project();
 
-    // Create scratch on compute node
-    if (cb) cb("Creating scratch directory...");
-    dtn_.run(fmt::format("ssh {} {} 'mkdir -p {}'", SSH_OPTS, compute_node, scratch_path));
-
-    // Collect code files
+    // Project files (respecting .gitignore)
     GitignoreParser parser(config_.project_dir());
     auto files = parser.collect_files();
-
-    std::vector<fs::path> project_files;
     for (const auto& f : files) {
-        project_files.push_back(f);
-    }
-
-    if (cb) cb(fmt::format("Staging {} project files...", project_files.size()));
-
-    // Upload files to DTN temp, then tar to compute node
-    std::string dtn_tmp = fmt::format("/tmp/tccp_sync_{}", std::time(nullptr));
-
-    // Create all necessary directories on DTN
-    std::set<std::string> dirs;
-    for (const auto& f : project_files) {
-        auto rel = parser.get_relative_path(f);
-        auto parent = rel.parent_path();
-        if (!parent.empty() && parent != ".") {
-            dirs.insert(dtn_tmp + "/" + parent.string());
+        auto rel = parser.get_relative_path(f).string();
+        if (seen.insert(rel).second) {
+            result.emplace_back(f, rel);
         }
     }
-    std::string mkdir_cmd = "mkdir -p " + dtn_tmp;
-    for (const auto& d : dirs) {
-        mkdir_cmd += " " + d;
-    }
-    dtn_.run(mkdir_cmd);
 
-    // Upload all project files to DTN
-    for (const auto& f : project_files) {
-        auto rel = parser.get_relative_path(f);
-        dtn_.upload(f, dtn_tmp + "/" + rel.string());
-    }
-
-    // Add rodata files
-    const auto& rodata = proj.rodata;
-    for (const auto& rodata_path : rodata) {
+    // Rodata files
+    for (const auto& rodata_path : proj.rodata) {
         fs::path src = rodata_path;
         if (src.is_relative()) src = config_.project_dir() / src;
         if (!fs::exists(src)) continue;
@@ -197,39 +207,119 @@ void SyncManager::full_sync(const std::string& compute_node,
         if (fs::is_directory(src)) {
             for (const auto& entry : fs::recursive_directory_iterator(src)) {
                 if (!entry.is_regular_file()) continue;
-                auto rel = fs::relative(entry.path(), config_.project_dir());
-                std::string remote = dtn_tmp + "/" + rel.string();
-                auto parent = rel.parent_path();
-                if (!parent.empty() && parent != ".") {
-                    dtn_.run("mkdir -p " + dtn_tmp + "/" + parent.string());
+                auto rel = fs::relative(entry.path(), config_.project_dir()).string();
+                if (seen.insert(rel).second) {
+                    result.emplace_back(entry.path(), rel);
                 }
-                dtn_.upload(entry.path(), remote);
             }
         }
     }
 
-    // Add env file (bypasses gitignore, may not be in collect_files)
-    const auto& env_file = proj.env_file;
-    if (!env_file.empty()) {
-        fs::path env_path = env_file;
+    // Env file (bypasses gitignore)
+    if (!proj.env_file.empty()) {
+        fs::path env_path = proj.env_file;
         if (env_path.is_relative()) env_path = config_.project_dir() / env_path;
         if (fs::exists(env_path) && fs::is_regular_file(env_path)) {
-            auto rel = fs::relative(env_path, config_.project_dir());
-            auto parent = rel.parent_path();
-            if (!parent.empty() && parent != ".") {
-                dtn_.run("mkdir -p " + dtn_tmp + "/" + parent.string());
+            auto rel = fs::relative(env_path, config_.project_dir()).string();
+            if (seen.insert(rel).second) {
+                result.emplace_back(env_path, rel);
             }
-            dtn_.upload(env_path, dtn_tmp + "/" + rel.string());
         }
     }
 
-    // Tar from DTN to compute node
-    if (cb) cb("Transferring files to compute node...");
-    dtn_.run(fmt::format("cd {} && tar cf - . | ssh {} {} 'cd {} && tar xf -'",
-                         dtn_tmp, SSH_OPTS, compute_node, scratch_path));
+    return result;
+}
 
-    // Clean up DTN temp
-    dtn_.run("rm -rf " + dtn_tmp);
+// Create a tar archive from a list of (absolute_path, relative_path) pairs.
+// Returns the path to the temp tar file.
+static fs::path create_local_tar(const fs::path& project_dir,
+                                  const std::vector<std::pair<fs::path, std::string>>& files) {
+    // Write file list to a temp manifest (tar -T reads from it)
+    fs::path tar_path = fs::temp_directory_path() / fmt::format("tccp_sync_{}.tar", std::time(nullptr));
+    fs::path list_path = fs::temp_directory_path() / fmt::format("tccp_sync_{}.list", std::time(nullptr));
+
+    {
+        std::ofstream list(list_path);
+        for (const auto& [abs, rel] : files) {
+            list << rel << "\n";
+        }
+    }
+
+    // Create tar from project directory using the file list
+    std::string cmd = fmt::format("tar cf {} -C {} -T {}",
+                                  tar_path.string(), project_dir.string(), list_path.string());
+    std::system(cmd.c_str());
+
+    fs::remove(list_path);
+    return tar_path;
+}
+
+// Pipe a local tar archive through DTN directly to compute node (no DTN disk usage).
+// The tar data is base64-encoded and sent as a heredoc that decodes and pipes to ssh.
+void SyncManager::pipe_tar_to_node(const fs::path& tar_path,
+                                    const std::string& compute_node,
+                                    const std::string& scratch_path) {
+    // Read the tar file
+    std::ifstream file(tar_path, std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(file)),
+                        std::istreambuf_iterator<char>());
+    file.close();
+
+    // Base64-encode for binary safety over PTY
+    // (reuse the connection's upload-style heredoc approach)
+    static const char B64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    auto b64_encode = [](const std::string& input) -> std::string {
+        std::string out;
+        out.reserve(((input.size() + 2) / 3) * 4);
+        const auto* data = reinterpret_cast<const unsigned char*>(input.data());
+        size_t len = input.size();
+        for (size_t i = 0; i < len; i += 3) {
+            unsigned val = data[i] << 16;
+            if (i + 1 < len) val |= data[i + 1] << 8;
+            if (i + 2 < len) val |= data[i + 2];
+            out += B64[(val >> 18) & 0x3F];
+            out += B64[(val >> 12) & 0x3F];
+            out += (i + 1 < len) ? B64[(val >> 6) & 0x3F] : '=';
+            out += (i + 2 < len) ? B64[val & 0x3F] : '=';
+        }
+        return out;
+    };
+
+    std::string encoded = b64_encode(content);
+
+    // Split into 76-char lines (standard base64 line length)
+    std::string lines;
+    lines.reserve(encoded.size() + encoded.size() / 76 + 1);
+    for (size_t i = 0; i < encoded.size(); i += 76) {
+        lines.append(encoded, i, std::min<size_t>(76, encoded.size() - i));
+        lines += '\n';
+    }
+
+    // Pipe through DTN: base64 decode → ssh to compute node → untar
+    // No files touch DTN disk — the data flows directly through the pipe.
+    std::string cmd = fmt::format(
+        "base64 -d << 'TCCP_B64_EOF' | ssh {} {} 'mkdir -p {} && cd {} && tar xf -'\n{}TCCP_B64_EOF",
+        SSH_OPTS, compute_node, scratch_path, scratch_path, lines);
+
+    dtn_.run(cmd, 600);  // 10 min timeout for large syncs
+}
+
+void SyncManager::full_sync(const std::string& compute_node,
+                             const std::string& scratch_path,
+                             StatusCallback cb) {
+    auto all_files = collect_sync_files();
+
+    if (cb) cb(fmt::format("Syncing {} files to compute node...", all_files.size()));
+
+    // Create tar locally
+    fs::path tar_path = create_local_tar(config_.project_dir(), all_files);
+
+    // Pipe through DTN directly to compute node (no DTN disk usage)
+    pipe_tar_to_node(tar_path, compute_node, scratch_path);
+
+    // Clean up local temp
+    fs::remove(tar_path);
 
     if (cb) cb("Full sync complete");
 }
@@ -239,14 +329,14 @@ void SyncManager::incremental_sync(const std::string& compute_node,
                                     const std::vector<std::string>& changed_files,
                                     const std::vector<std::string>& deleted_files,
                                     StatusCallback cb) {
-    const auto& proj = config_.project();
-
     // Delete removed files on remote
     if (!deleted_files.empty()) {
+        // Batch deletes into a single SSH command
+        std::string rm_cmd = "rm -f";
         for (const auto& f : deleted_files) {
-            dtn_.run(fmt::format("ssh {} {} 'rm -f {}/{}'",
-                                 SSH_OPTS, compute_node, scratch_path, f));
+            rm_cmd += " " + scratch_path + "/" + f;
         }
+        dtn_.run(fmt::format("ssh {} {} '{}'", SSH_OPTS, compute_node, rm_cmd));
     }
 
     if (changed_files.empty()) {
@@ -254,40 +344,23 @@ void SyncManager::incremental_sync(const std::string& compute_node,
         return;
     }
 
-    if (cb) cb(fmt::format("Uploading {} changed files...", changed_files.size()));
+    if (cb) cb(fmt::format("Syncing {} changed files...", changed_files.size()));
 
-    // Upload changed files to DTN temp
-    std::string dtn_tmp = fmt::format("/tmp/tccp_delta_{}", std::time(nullptr));
-    GitignoreParser parser(config_.project_dir());
-
-    // Create necessary directories on DTN
-    std::set<std::string> dirs_needed;
-    for (const auto& rel_path : changed_files) {
-        auto parent = fs::path(rel_path).parent_path();
-        if (!parent.empty() && parent != ".") {
-            dirs_needed.insert(dtn_tmp + "/" + parent.string());
-        }
-    }
-    std::string mkdir_cmd = "mkdir -p " + dtn_tmp;
-    for (const auto& d : dirs_needed) {
-        mkdir_cmd += " " + d;
-    }
-    dtn_.run(mkdir_cmd);
-
-    // Upload changed files (paths are already relative to project dir)
+    // Build file list for tar (only files that exist locally)
+    std::vector<std::pair<fs::path, std::string>> files_to_sync;
     for (const auto& rel_path : changed_files) {
         fs::path local_file = config_.project_dir() / rel_path;
-
         if (fs::exists(local_file)) {
-            dtn_.upload(local_file, dtn_tmp + "/" + rel_path);
+            files_to_sync.emplace_back(local_file, rel_path);
         }
     }
 
-    // Tar delta to compute node
-    dtn_.run(fmt::format("cd {} && tar cf - . | ssh {} {} 'cd {} && tar xf -'",
-                         dtn_tmp, SSH_OPTS, compute_node, scratch_path));
+    if (files_to_sync.empty()) return;
 
-    dtn_.run("rm -rf " + dtn_tmp);
+    // Create local tar of changed files and pipe through DTN to compute node
+    fs::path tar_path = create_local_tar(config_.project_dir(), files_to_sync);
+    pipe_tar_to_node(tar_path, compute_node, scratch_path);
+    fs::remove(tar_path);
 
     if (cb) cb(fmt::format("Incremental sync: {} files updated", changed_files.size()));
 }
@@ -297,51 +370,76 @@ void SyncManager::sync_to_scratch(const std::string& compute_node,
                                    ProjectState& state,
                                    StatusCallback cb) {
 
-    // Build current local manifest
+    // Build current local manifest (local is always source of truth)
     auto local_manifest = build_local_manifest();
 
-    // Check if we can reuse a previous sync on this node
-    bool can_reuse = !state.last_sync_node.empty() &&
-                     state.last_sync_node == compute_node &&
-                     !state.last_sync_scratch.empty() &&
-                     !state.last_sync_manifest.empty();
+    // Runtime artifact prefixes/suffixes to skip when computing deletes.
+    // These are created by the job at runtime, not synced from local.
+    static const std::vector<std::string> skip_prefixes = {"cache/", "output/", "env/"};
+    static const std::vector<std::string> skip_suffixes = {".sock", ".log"};
+    static const std::vector<std::string> skip_exact = {"tccp_run.sh"};
 
-    if (can_reuse) {
-        // Verify old scratch still exists
-        auto check = dtn_.run(fmt::format("ssh {} {} 'test -d {} && echo YES || echo NO'",
-                                          SSH_OPTS, compute_node, state.last_sync_scratch));
-        if (check.stdout_data.find("YES") == std::string::npos) {
-            can_reuse = false;
-        }
+    auto is_runtime_artifact = [&](const std::string& path) {
+        for (const auto& p : skip_prefixes)
+            if (path.substr(0, p.size()) == p) return true;
+        for (const auto& s : skip_suffixes)
+            if (path.size() >= s.size() && path.substr(path.size() - s.size()) == s) return true;
+        for (const auto& e : skip_exact)
+            if (path == e) return true;
+        return false;
+    };
+
+    // Check if we can reuse files from a previous scratch on the same node
+    bool tried_cp = false;
+    bool cp_ok = false;
+
+    if (!state.last_sync_node.empty() &&
+        state.last_sync_node == compute_node &&
+        !state.last_sync_scratch.empty() &&
+        state.last_sync_scratch != scratch_path) {
+
+        // Old scratch on same node — copy only project files (skip runtime
+        // artifacts like cache/, output/, env/ which can be many GBs).
+        // Uses tar with excludes piped locally on the compute node (no network).
+        if (cb) cb("Copying files from previous scratch...");
+        auto cp_result = dtn_.run(fmt::format(
+            "ssh {} {} '"
+            "if [ -d {} ]; then "
+            "mkdir -p {} && "
+            "cd {} && "
+            "tar cf - "
+            "--exclude=cache --exclude=output --exclude=env "
+            "--exclude=.tccp-tmp --exclude=\"*.sock\" --exclude=\"*.log\" "
+            "--exclude=tccp_run.sh . 2>/dev/null | "
+            "(cd {} && tar xf -) && "
+            "echo CP_OK; "
+            "else echo CP_NONE; fi'",
+            SSH_OPTS, compute_node,
+            state.last_sync_scratch,
+            scratch_path,
+            state.last_sync_scratch,
+            scratch_path));
+        tried_cp = true;
+        cp_ok = cp_result.stdout_data.find("CP_OK") != std::string::npos;
     }
 
-    if (can_reuse && scratch_path != state.last_sync_scratch) {
-        // Copy previous scratch to new scratch as starting point.
-        // Race guard: the old scratch may be deleted by poll/cleanup between
-        // the exists-check above and this cp. If cp fails, fall back to full sync.
-        if (cb) cb("Reusing files from previous sync...");
-        auto cp_result = dtn_.run(fmt::format(
-            "ssh {} {} 'mkdir -p {} && cp -a {}/. {}/ 2>/dev/null && echo CP_OK || echo CP_FAIL'",
-            SSH_OPTS, compute_node, scratch_path,
-            state.last_sync_scratch, scratch_path));
+    if (cp_ok) {
+        // Get actual remote file listing and diff against local
+        if (cb) cb("Verifying remote files...");
+        auto remote_manifest = get_remote_manifest(compute_node, scratch_path);
 
-        // Delete old scratch regardless (it's either copied or gone)
-        dtn_.run(fmt::format("ssh {} {} 'rm -rf {}'",
-                             SSH_OPTS, compute_node, state.last_sync_scratch));
-
-        if (cp_result.stdout_data.find("CP_FAIL") != std::string::npos) {
-            // Old scratch was deleted (race with cleanup) — full sync instead
-            if (cb) cb("Previous scratch gone, doing full sync...");
+        if (remote_manifest.empty()) {
+            // Remote listing failed — fall back to full sync
             full_sync(compute_node, scratch_path, cb);
         } else {
-            // Copy succeeded — only sync changed files
-            auto changed = diff_manifests(local_manifest, state.last_sync_manifest);
+            auto changed = diff_manifests(local_manifest, remote_manifest);
 
+            // Find files present remotely but removed locally (skip runtime artifacts)
             std::set<std::string> local_set;
             for (const auto& e : local_manifest) local_set.insert(e.path);
             std::vector<std::string> deleted;
-            for (const auto& e : state.last_sync_manifest) {
-                if (local_set.find(e.path) == local_set.end()) {
+            for (const auto& e : remote_manifest) {
+                if (local_set.find(e.path) == local_set.end() && !is_runtime_artifact(e.path)) {
                     deleted.push_back(e.path);
                 }
             }
@@ -352,31 +450,16 @@ void SyncManager::sync_to_scratch(const std::string& compute_node,
                 if (cb) cb("All files up to date");
             }
         }
-    } else if (can_reuse && scratch_path == state.last_sync_scratch) {
-        // Same scratch path — just do incremental in place
-        auto changed = diff_manifests(local_manifest, state.last_sync_manifest);
 
-        std::set<std::string> local_set;
-        for (const auto& e : local_manifest) local_set.insert(e.path);
-        std::vector<std::string> deleted;
-        for (const auto& e : state.last_sync_manifest) {
-            if (local_set.find(e.path) == local_set.end()) {
-                deleted.push_back(e.path);
-            }
-        }
-
-        if (!changed.empty() || !deleted.empty()) {
-            incremental_sync(compute_node, scratch_path, changed, deleted, cb);
-        } else {
-            if (cb) cb("All files up to date");
-        }
+        // Clean up old scratch
+        dtn_.run(fmt::format("ssh {} {} 'rm -rf {}'",
+                             SSH_OPTS, compute_node, state.last_sync_scratch));
     } else {
-        // No previous sync — full upload
+        // No reusable scratch — full sync from local
         full_sync(compute_node, scratch_path, cb);
     }
 
-    // Update manifest state
-    state.last_sync_manifest = local_manifest;
+    // Update state (no manifest stored — we always verify against remote)
     state.last_sync_node = compute_node;
     state.last_sync_scratch = scratch_path;
 

@@ -225,6 +225,11 @@ void TCCPCLI::run_connected_repl() {
                 std::cout << "\n";
                 service.graceful_shutdown(cb);
             } else {
+                // Explicit quit: release idle allocations so we don't hold
+                // cluster resources after the user is done.
+                if (service.alloc_manager()) {
+                    service.alloc_manager()->deallocate_all_idle(nullptr);
+                }
                 std::cout << theme::dim("Disconnecting...") << "\n";
                 service.disconnect();
             }
@@ -269,8 +274,213 @@ void TCCPCLI::run_connected_repl() {
     }
 }
 
-void TCCPCLI::run_register() {
-    std::cout << "Project registration not yet implemented.\n";
+// ── Interactive prompt helpers ──────────────────────────
+
+// Prompt for a line of input with a label. Returns empty string on EOF.
+static std::string prompt_line(const std::string& label, const std::string& default_val = "") {
+    std::string suffix = default_val.empty() ? ": " : " [" + default_val + "]: ";
+    std::cout << theme::color::BROWN << "    " << label << suffix << theme::color::RESET;
+    std::cout.flush();
+
+    std::string answer;
+    if (!std::getline(std::cin, answer)) return default_val;
+    if (answer.empty()) return default_val;
+    return answer;
+}
+
+// Prompt for a choice from a numbered list. Returns 0-based index.
+static int prompt_choice(const std::string& label,
+                         const std::vector<std::pair<std::string, std::string>>& options,
+                         int default_idx = 0) {
+    std::cout << "\n" << theme::dim("    " + label) << "\n";
+    for (size_t i = 0; i < options.size(); i++) {
+        std::string marker = (static_cast<int>(i) == default_idx) ? "*" : " ";
+        std::cout << theme::color::BROWN << "      " << marker << " "
+                  << (i + 1) << theme::color::RESET << "  "
+                  << options[i].first;
+        if (!options[i].second.empty()) {
+            std::cout << theme::dim(" — " + options[i].second);
+        }
+        std::cout << "\n";
+    }
+    std::cout << theme::color::BROWN << "    Choice [" << (default_idx + 1) << "]: "
+              << theme::color::RESET;
+    std::cout.flush();
+
+    std::string answer;
+    if (!std::getline(std::cin, answer) || answer.empty()) return default_idx;
+    try {
+        int n = std::stoi(answer);
+        if (n >= 1 && n <= static_cast<int>(options.size())) return n - 1;
+    } catch (...) {}
+    return default_idx;
+}
+
+void TCCPCLI::run_register(const std::string& path_arg) {
+    namespace fs = std::filesystem;
+
+    // Resolve target directory
+    fs::path target = path_arg.empty() ? fs::current_path() : fs::path(path_arg);
+    if (target.is_relative()) {
+        target = fs::current_path() / target;
+    }
+    target = fs::canonical(target);
+
+    if (!fs::is_directory(target)) {
+        std::cout << theme::fail("Not a directory: " + target.string());
+        return;
+    }
+
+    // Check for existing tccp.yaml
+    fs::path config_path = target / "tccp.yaml";
+    if (fs::exists(config_path)) {
+        std::cout << theme::fail("tccp.yaml already exists in " + target.string());
+        std::cout << theme::step("Edit it directly or delete it first.");
+        return;
+    }
+
+    // Check for .gitignore (or .tccpignore)
+    bool has_tccpignore = fs::exists(target / ".tccpignore");
+    bool has_gitignore = fs::exists(target / ".gitignore");
+    if (!has_tccpignore && !has_gitignore) {
+        std::cout << theme::fail("No .gitignore found in " + target.string());
+        std::cout << theme::step("Create a .gitignore before registering so tccp knows what to sync.");
+        std::cout << theme::step("At minimum, add patterns for large files you don't want uploaded.");
+        return;
+    }
+
+    std::string dirname = target.filename().string();
+
+    std::cout << theme::banner();
+    std::cout << theme::section("Register Project");
+    std::cout << theme::kv("Directory", target.string());
+
+    // ── 1. Project type ────────────────────────────────────
+
+    std::vector<std::pair<std::string, std::string>> type_options = {
+        {"python", "PyTorch, TensorFlow, general Python scripts"},
+        {"conda",  "Conda environment with environment.yml"},
+    };
+    int type_idx = prompt_choice("Project type:", type_options, 0);
+    std::string project_type = type_options[type_idx].first;
+
+    // ── 2. Main script ─────────────────────────────────────
+
+    // Try to find a sensible default
+    std::string default_script = "main.py";
+    if (fs::exists(target / "train.py")) default_script = "train.py";
+    else if (!fs::exists(target / "main.py") && fs::exists(target / "run.py")) default_script = "run.py";
+
+    std::string script = prompt_line("Main script", default_script);
+
+    // ── 3. GPU ─────────────────────────────────────────────
+
+    std::vector<std::pair<std::string, std::string>> gpu_options = {
+        {"none", "CPU only"},
+        {"a100", "NVIDIA A100 (40/80 GB)"},
+        {"v100", "NVIDIA V100 (32 GB)"},
+        {"a10",  "NVIDIA A10 (24 GB)"},
+    };
+    int gpu_idx = prompt_choice("GPU:", gpu_options, 0);
+    std::string gpu = gpu_options[gpu_idx].first;
+
+    // ── 4. Output directory ────────────────────────────────
+
+    std::string output = prompt_line("Output directory (synced back after jobs)", "");
+
+    // ── 5. Cache directory ─────────────────────────────────
+
+    std::string cache = prompt_line("Cache directory (best-effort, persists across jobs on same node)", "");
+
+    // ── 6. Read-only datasets ──────────────────────────────
+
+    std::cout << "\n" << theme::dim("    Read-only data directories (large datasets synced once, comma-separated):") << "\n";
+    std::string rodata_input = prompt_line("Datasets", "");
+
+    // Parse comma-separated rodata
+    std::vector<std::string> rodata;
+    if (!rodata_input.empty()) {
+        std::istringstream iss(rodata_input);
+        std::string item;
+        while (std::getline(iss, item, ',')) {
+            // Trim whitespace
+            item.erase(0, item.find_first_not_of(" \t"));
+            item.erase(item.find_last_not_of(" \t") + 1);
+            if (!item.empty()) rodata.push_back(item);
+        }
+    }
+
+    // ── Build YAML ─────────────────────────────────────────
+
+    std::ostringstream yaml;
+    yaml << "# Generated by tccp register\n";
+
+    // Only write script if not main.py (since that's the default)
+    if (script != "main.py") {
+        yaml << "script: " << script << "\n";
+    }
+
+    if (project_type != "python") {
+        yaml << "type: " << project_type << "\n";
+    }
+
+    if (gpu != "none") {
+        yaml << "gpu: " << gpu << "\n";
+    }
+
+    if (!output.empty()) {
+        yaml << "output: " << output << "\n";
+    }
+
+    if (!cache.empty()) {
+        yaml << "cache: " << cache << "\n";
+    }
+
+    if (!rodata.empty()) {
+        yaml << "rodata:\n";
+        for (const auto& r : rodata) {
+            yaml << "  - " << r << "\n";
+        }
+    }
+
+    // ── Write tccp.yaml ────────────────────────────────────
+
+    std::string content = yaml.str();
+
+    std::cout << theme::divider();
+    std::cout << theme::section("tccp.yaml");
+    // Print preview
+    std::istringstream preview(content);
+    std::string line;
+    while (std::getline(preview, line)) {
+        std::cout << theme::dim("    " + line) << "\n";
+    }
+
+    std::cout << "\n";
+    std::cout << theme::color::BROWN << "    Write to " << config_path.string() << "? (Y/n) "
+              << theme::color::RESET;
+    std::cout.flush();
+
+    std::string confirm;
+    std::getline(std::cin, confirm);
+    if (!confirm.empty() && confirm[0] != 'y' && confirm[0] != 'Y') {
+        std::cout << theme::dim("    Aborted.") << "\n\n";
+        return;
+    }
+
+    {
+        std::ofstream f(config_path);
+        f << content;
+    }
+    std::cout << theme::green("    + ") << "tccp.yaml" << "\n";
+
+    // ── Next steps ─────────────────────────────────────────
+
+    std::cout << theme::divider();
+    std::cout << theme::section("Next Steps");
+    std::cout << "    " << theme::white("1.") << " Review and edit tccp.yaml as needed\n";
+    std::cout << "    " << theme::white("2.") << " Run " << theme::blue("tccp") << " to connect and start working\n";
+    std::cout << "\n";
 }
 
 static bool write_if_missing(const std::filesystem::path& path, const std::string& content) {
@@ -430,6 +640,360 @@ void TCCPCLI::run_setup() {
 #endif
     std::cout << theme::ok("    Run 'tccp' or 'tccp connect' to connect.");
     std::cout << "\n";
+}
+
+// ── Manual pages ───────────────────────────────────────
+
+static const char* MANUAL_OVERVIEW = R"(
+TCCP - Tufts Cluster Command Prompt
+====================================
+
+Run your code on the Tufts HPC cluster without thinking about the cluster.
+Write a script, point tccp at it, and get results back.
+
+QUICK START
+-----------
+
+  1. tccp setup          Store your Tufts credentials (once)
+  2. tccp new python     Scaffold a project, or write tccp.yaml by hand
+  3. tccp                Connect and enter the interactive prompt
+
+HOW IT WORKS
+------------
+
+  your laptop                              cluster
+  +-------------+      tccp connect       +----------------+
+  | tccp.yaml   | ----------------------> | your code runs |
+  | train.py    |     files synced        | deps installed |
+  | data/       |     deps installed      | GPU allocated  |
+  +-------------+     job launched        +-------+--------+
+                                                  |
+                  <-------------------------------+
+                    output synced back when done
+
+  You stay in the tccp prompt. Your job runs on the cluster. When it
+  finishes, output is automatically downloaded to your machine.
+
+  If you disconnect (close laptop, lose wifi), your job keeps running.
+  Reconnect with 'tccp' and pick up where you left off.
+
+COMMANDS
+--------
+
+  run [job]         Run a job (default: "main" or the only defined job)
+  view [job]        Watch a running job's live output
+  jobs              List all tracked jobs and their status
+  cancel <job>      Cancel a running job
+  return <job>      Download output from a completed job
+  shell             Open a shell on the cluster
+  exec <cmd>        Run a one-off command on the cluster
+  allocs            Show your active compute allocations
+  dealloc [id]      Release a compute allocation
+  gpus              Show available GPUs on the cluster
+  help              List all commands
+
+KEYBOARD SHORTCUTS (while viewing a job)
+-----------------------------------------
+
+  Ctrl+C            Cancel job (during setup) or detach (while running)
+  Ctrl+\            Detach and return to prompt
+  ESC ESC           Emergency detach
+
+PROJECT CONFIG (tccp.yaml)
+--------------------------
+
+  Minimal:
+
+    script: train.py
+
+  With a GPU:
+
+    script: train.py
+    gpu: a100
+
+  Full form:
+
+    name: myproject
+    type: python-pytorch
+    script: train.py
+    gpu: a100
+    output: output
+    cache: .model_cache
+    rodata:
+      - data
+    env_file: .env
+    jobs:
+      train:
+        script: train.py
+        args: --epochs 100
+        time: "8:00:00"
+      eval: eval.py
+
+  name       Project name (default: directory name)
+  type       "python" or "python-pytorch" (default: python)
+  script     Main script to run (default: main.py)
+  gpu        Request a GPU: a100, v100, a10
+  output     Directory downloaded back after each job
+  cache      Directory that persists across jobs (model weights, etc.)
+  rodata     Read-only data directories (uploaded once, not every run)
+  env_file   Dotfile to upload (e.g. .env — not blocked by .gitignore)
+  jobs       Named jobs (shorthand: "train: train.py" or full config)
+
+  An empty tccp.yaml runs main.py with no GPU. The project name
+  comes from the directory name.
+
+FILE SYNC
+---------
+
+  tccp respects your .gitignore when uploading files. If you need
+  different rules for the cluster, create a .tccpignore instead.
+  Common large files (.git, __pycache__, .venv, etc.) are always
+  skipped automatically.
+
+GETTING STARTED
+---------------
+
+  tccp setup              Store your Tufts credentials
+  tccp new <template>     Scaffold a project (python, qwen)
+  tccp register [path]    Create tccp.yaml for an existing project
+  tccp manual <topic>     Detailed guide (python, python-pytorch)
+)";
+
+static const char* MANUAL_PYTHON = R"(
+TCCP MANUAL: Python Projects
+==============================
+
+For CPU-based Python work: data processing, scripting, CPU training.
+Uses Python 3.11. No GPU.
+
+GETTING STARTED
+---------------
+
+  mkdir myproject && cd myproject
+
+  # Option A: scaffold from template
+  tccp new python
+
+  # Option B: create tccp.yaml for an existing project
+  tccp register
+
+  # Option C: by hand
+  echo "script: main.py" > tccp.yaml
+
+  You need a .gitignore so tccp knows what files to upload.
+
+PROJECT LAYOUT
+--------------
+
+  myproject/
+    tccp.yaml
+    main.py               your script
+    requirements.txt      pip dependencies (optional)
+    .gitignore
+    data/                 input data (optional)
+    output/               results (optional, downloaded after job)
+
+EXAMPLES
+--------
+
+  Simplest case (runs main.py):
+
+    script: main.py
+
+  With output and data:
+
+    script: process.py
+    output: results
+    rodata:
+      - data
+
+  Multiple jobs:
+
+    jobs:
+      preprocess: preprocess.py
+      train: train.py
+      eval: eval.py
+
+DEPENDENCIES
+------------
+
+  Put your pip dependencies in requirements.txt. They are installed
+  automatically before your script runs. tccp caches the install by
+  hash — if requirements.txt hasn't changed, it skips installation.
+
+  Only the Python standard library is available by default. Everything
+  else must go in requirements.txt.
+
+WORKFLOW
+--------
+
+  $ tccp                          connect to the cluster
+  tccp:myproject@cluster> run     submit the job
+                                  (watch live output, or Ctrl+\ to detach)
+  tccp:myproject@cluster> jobs    check status
+  tccp:myproject@cluster> quit    disconnect (job keeps running)
+
+  $ tccp                          reconnect later
+  tccp:myproject@cluster> return  download output
+
+TIPS
+----
+
+  - Edit requirements.txt to force a dependency reinstall next run.
+  - Set "output" in tccp.yaml to auto-download results when jobs finish.
+  - Use "rodata" for large input data — it's uploaded once per allocation,
+    not every time you run.
+)";
+
+static const char* MANUAL_PYTHON_PYTORCH = R"(
+TCCP MANUAL: Python + PyTorch Projects
+========================================
+
+For GPU training and inference. Comes with PyTorch 2.6, CUDA 12.4,
+and cuDNN 9 pre-installed. Just add "gpu: a100" to your config.
+
+GETTING STARTED
+---------------
+
+  mkdir myproject && cd myproject
+
+  # Option A: scaffold a GPU project
+  tccp new qwen
+
+  # Option B: create tccp.yaml for an existing project
+  tccp register
+
+  # Option C: by hand
+  echo -e "type: python-pytorch\nscript: train.py\ngpu: a100" > tccp.yaml
+
+  You need a .gitignore so tccp knows what files to upload.
+
+PROJECT LAYOUT
+--------------
+
+  myproject/
+    tccp.yaml
+    train.py              your training script
+    requirements.txt      extra deps (torch is already provided)
+    .gitignore
+    .env                  secrets like HF_TOKEN (optional)
+    data/                 datasets (optional)
+    output/               results (optional, downloaded after job)
+
+EXAMPLES
+--------
+
+  Minimal GPU training:
+
+    type: python-pytorch
+    script: train.py
+    gpu: a100
+
+  Full project:
+
+    type: python-pytorch
+    script: train.py
+    gpu: a100
+    output: checkpoints
+    cache: .hf_cache
+    rodata:
+      - data
+    env_file: .env
+    jobs:
+      train:
+        script: train.py
+        args: --epochs 50 --lr 0.001
+        time: "8:00:00"
+
+  Multiple jobs:
+
+    type: python-pytorch
+    gpu: a100
+    output: results
+    jobs:
+      train: train.py
+      eval: eval.py
+
+GPU OPTIONS
+-----------
+
+  gpu: a100        NVIDIA A100 (40 or 80 GB, auto-selected)
+  gpu: a100-80gb   Explicit 80 GB variant
+  gpu: a100-40gb   Explicit 40 GB variant
+  gpu: v100        NVIDIA V100 (32 GB)
+  gpu: a10         NVIDIA A10 (24 GB)
+
+  For multiple GPUs, use the full slurm block:
+
+    slurm:
+      gpu_type: a100
+      gpu_count: 2
+      memory: 64G
+      cpus_per_task: 8
+
+DEPENDENCIES
+------------
+
+  PyTorch, torchvision, torchaudio, and CUDA are already available.
+  You do NOT need to install them. If they appear in your
+  requirements.txt, tccp automatically skips them to avoid conflicts.
+
+  Put any additional dependencies (transformers, numpy, etc.) in
+  requirements.txt. They are installed automatically before your
+  script runs, and cached by hash so unchanged files skip install.
+
+  torch.cuda.is_available() will return True. Use it normally.
+
+HUGGING FACE MODELS
+-------------------
+
+  To use gated models (Llama, Qwen, etc.):
+
+    1. Create a .env file:       HF_TOKEN=hf_xxxxx
+    2. Add to tccp.yaml:         env_file: .env
+    3. Add a cache directory:    cache: .hf_cache
+
+  The cache persists across jobs, so model weights download once.
+
+WORKFLOW
+--------
+
+  $ tccp                          connect to the cluster
+  tccp:myproject@cluster> run     submit the job
+                                  (watch live output, or Ctrl+\ to detach)
+  tccp:myproject@cluster> jobs    check status
+  tccp:myproject@cluster> quit    disconnect (job keeps running)
+
+  $ tccp                          reconnect later
+  tccp:myproject@cluster> return  download output
+
+  The first run takes a few extra minutes while the environment is
+  prepared. Subsequent runs start much faster.
+
+TIPS
+----
+
+  - Don't install torch via requirements.txt. It's already there and
+    tccp will skip it automatically, but you'll save time by not
+    listing it at all.
+  - Use "cache" for model weights so they aren't re-downloaded.
+  - Use "rodata" for large datasets — uploaded once, not every run.
+  - Set "output" to auto-download results when jobs finish.
+  - For multi-GPU, use the slurm block instead of the gpu shorthand.
+)";
+
+void TCCPCLI::run_manual(const std::string& topic) {
+    if (topic.empty()) {
+        std::cout << MANUAL_OVERVIEW;
+    } else if (topic == "python") {
+        std::cout << MANUAL_PYTHON;
+    } else if (topic == "python-pytorch") {
+        std::cout << MANUAL_PYTHON_PYTORCH;
+    } else {
+        std::cout << theme::fail("Unknown manual topic: " + topic);
+        std::cout << theme::step("Available topics: python, python-pytorch");
+        std::cout << theme::step("Run 'tccp manual' for the general overview.");
+    }
 }
 
 void TCCPCLI::run_command(const std::string& command, const std::vector<std::string>& args) {

@@ -1,11 +1,16 @@
 #include "resource_spec.hpp"
+#include <managers/gpu_discovery.hpp>
 #include <fmt/format.h>
 #include <algorithm>
 #include <cctype>
 
 std::string format_gpu_gres(const std::string& gpu_type, int gpu_count) {
     if (gpu_count <= 0 || gpu_type.empty()) return "";
-    return fmt::format("gpu:{}:{}", gpu_type, gpu_count);
+    // Strip variant suffix: "a100-40gb" → "a100" (SLURM only knows the base GRES type)
+    std::string base = gpu_type;
+    const auto* variant = find_variant_by_id(gpu_type);
+    if (variant) base = variant->base_type;
+    return fmt::format("gpu:{}:{}", base, gpu_count);
 }
 
 std::string generate_sbatch_resources(const SlurmDefaults& profile) {
@@ -26,6 +31,10 @@ std::string generate_sbatch_resources(const SlurmDefaults& profile) {
     std::string gres = format_gpu_gres(profile.gpu_type, profile.gpu_count);
     if (!gres.empty()) {
         s += fmt::format("#SBATCH --gres={}\n", gres);
+    }
+
+    if (!profile.node_constraint.empty()) {
+        s += fmt::format("#SBATCH -w {}[001-999]\n", profile.node_constraint);
     }
 
     if (!profile.mail_type.empty() && profile.mail_type != "NONE") {

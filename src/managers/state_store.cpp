@@ -59,16 +59,6 @@ ProjectState StateStore::load() {
             }
         }
 
-        if (root["last_sync_manifest"] && root["last_sync_manifest"].IsSequence()) {
-            for (const auto& n : root["last_sync_manifest"]) {
-                SyncManifestEntry e;
-                e.path = n["path"].as<std::string>("");
-                e.mtime = n["mtime"].as<int64_t>(0);
-                e.size = n["size"].as<int64_t>(0);
-                state.last_sync_manifest.push_back(e);
-            }
-        }
-
         state.last_sync_node = root["last_sync_node"].as<std::string>("");
         state.last_sync_scratch = root["last_sync_scratch"].as<std::string>("");
 
@@ -128,17 +118,6 @@ void StateStore::save(const ProjectState& state) {
         out << YAML::Key << "submit_time" << YAML::Value << j.submit_time;
         out << YAML::Key << "start_time" << YAML::Value << j.start_time;
         out << YAML::Key << "end_time" << YAML::Value << j.end_time;
-        out << YAML::EndMap;
-    }
-    out << YAML::EndSeq;
-
-    // Sync manifest
-    out << YAML::Key << "last_sync_manifest" << YAML::Value << YAML::BeginSeq;
-    for (const auto& e : state.last_sync_manifest) {
-        out << YAML::BeginMap;
-        out << YAML::Key << "path" << YAML::Value << e.path;
-        out << YAML::Key << "mtime" << YAML::Value << e.mtime;
-        out << YAML::Key << "size" << YAML::Value << e.size;
         out << YAML::EndMap;
     }
     out << YAML::EndSeq;

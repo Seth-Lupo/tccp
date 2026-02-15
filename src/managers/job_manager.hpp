@@ -46,6 +46,10 @@ public:
     // Clear in-memory tracked jobs (for state reset without destroying the manager)
     void clear_tracked();
 
+    // Job ID utilities: "2026-02-15T14-44-10-637__main" → name / timestamp
+    static std::string job_name_from_id(const std::string& job_id);
+    static std::string timestamp_from_id(const std::string& job_id);
+
     Result<TrackedJob> run(const std::string& job_name, StatusCallback cb = nullptr);
     SSHResult list(StatusCallback cb = nullptr);
     Result<void> cancel_job(const std::string& job_name, StatusCallback cb = nullptr);

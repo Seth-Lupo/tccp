@@ -190,6 +190,40 @@ static bool attach_to_job(BaseCLI& cli, TrackedJob* tracked,
     return false;
 }
 
+// ── Default job resolution ───────────────────────────────────
+
+// Resolve a default job name when the user omits it.
+// Returns the job name, or empty string on failure (after printing an error).
+static std::string resolve_job_name(BaseCLI& cli, const std::string& arg) {
+    if (!arg.empty()) return arg;
+
+    if (!cli.service.has_config()) {
+        std::cout << theme::error("No config loaded");
+        return "";
+    }
+
+    const auto& jobs = cli.service.config().project().jobs;
+    if (jobs.size() == 1) {
+        return jobs.begin()->first;
+    }
+    if (jobs.empty()) {
+        std::cout << theme::error("No jobs configured in tccp.yml");
+        return "";
+    }
+    // Multiple jobs — try "main" as default
+    if (jobs.count("main")) {
+        return "main";
+    }
+    std::string names;
+    for (const auto& [name, _] : jobs) {
+        if (!names.empty()) names += ", ";
+        names += name;
+    }
+    std::cout << theme::error(fmt::format(
+        "Multiple jobs configured ({}). Specify which one.", names));
+    return "";
+}
+
 // ── Commands ────────────────────────────────────────────────
 
 static void do_view(BaseCLI& cli, const std::string& arg);  // forward decl
@@ -198,25 +232,23 @@ static void do_run(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
     if (!cli.service.job_manager()) return;
 
-    if (arg.empty()) {
-        std::cout << theme::error("Usage: run <job-name>");
-        return;
-    }
+    std::string job_name = resolve_job_name(cli, arg);
+    if (job_name.empty()) return;
 
-    auto* existing = cli.service.find_job_by_name(arg);
+    auto* existing = cli.service.find_job_by_name(job_name);
     if (existing && !existing->completed && existing->init_error.empty()) {
         if (!existing->init_complete) {
             std::cout << theme::error(fmt::format("Job '{}' is still initializing. "
-                "Use 'view {}' to check progress.", arg, arg));
+                "Use 'view {}' to check progress.", job_name, job_name));
         } else {
             std::cout << theme::error(fmt::format("Job '{}' is already running. "
-                "Cancel it first or wait for it to finish.", arg));
+                "Cancel it first or wait for it to finish.", job_name));
         }
         return;
     }
 
     // Start the job - this spawns background init and returns immediately
-    auto result = cli.service.run_job(arg, nullptr);
+    auto result = cli.service.run_job(job_name, nullptr);
 
     if (result.is_err()) {
         std::cout << theme::error(result.error);
@@ -224,40 +256,38 @@ static void do_run(BaseCLI& cli, const std::string& arg) {
     }
 
     // Immediately attach to see init progress (user can Ctrl+\ to detach)
-    do_view(cli, arg);
+    do_view(cli, job_name);
 }
 
 static void do_view(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
     if (!cli.service.job_manager()) return;
 
-    if (arg.empty()) {
-        std::cout << theme::error("Usage: view <job-name>");
-        return;
-    }
+    std::string job_name = resolve_job_name(cli, arg);
+    if (job_name.empty()) return;
 
-    auto* tracked = cli.service.find_job_by_name(arg);
+    auto* tracked = cli.service.find_job_by_name(job_name);
     if (!tracked) {
-        std::cout << theme::error(fmt::format("No tracked job named '{}'", arg));
+        std::cout << theme::error(fmt::format("No tracked job named '{}'", job_name));
         return;
     }
 
     // Check if canceled during initialization
     if (tracked->canceled && !tracked->init_complete) {
-        std::cout << fmt::format("Job '{}' was canceled during initialization", arg) << "\n";
+        std::cout << fmt::format("Job '{}' was canceled during initialization", job_name) << "\n";
         return;
     }
 
     // Check if init failed
     if (!tracked->init_error.empty()) {
-        std::cout << theme::error(fmt::format("Job '{}' init failed: {}", arg, tracked->init_error)) << "\n";
+        std::cout << theme::error(fmt::format("Job '{}' init failed: {}", job_name, tracked->init_error)) << "\n";
         return;
     }
 
     // Initializing: show init progress with incremental log tailing
     if (!tracked->init_complete) {
         enter_alt_screen();
-        draw_header(arg, "INITIALIZING...");
+        draw_header(job_name, "INITIALIZING...");
         setup_content_area();
 
         std::string init_log = "/tmp/tccp_init_" + tracked->job_id + ".log";
@@ -307,7 +337,7 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
                 tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                 leave_alt_screen();
                 std::cout << fmt::format(
-                    "Detached. Init continues in background. 'view {}' to check.", arg) << "\n";
+                    "Detached. Init continues in background. 'view {}' to check.", job_name) << "\n";
                 return;
             }
 
@@ -317,7 +347,7 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
                 std::cout << "Canceling job during initialization...\n";
                 auto cancel_result = cli.service.cancel_job_by_id(tracked->job_id, nullptr);
                 if (cancel_result.is_ok()) {
-                    std::cout << theme::dim(fmt::format("Job '{}' canceled during initialization", arg)) << "\n";
+                    std::cout << theme::dim(fmt::format("Job '{}' canceled during initialization", job_name)) << "\n";
                 } else {
                     std::cout << theme::error(cancel_result.error);
                 }
@@ -325,7 +355,7 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
             }
 
             // Refresh tracked job state
-            tracked = cli.service.find_job_by_name(arg);
+            tracked = cli.service.find_job_by_name(job_name);
             if (!tracked) {
                 tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                 leave_alt_screen();
@@ -382,20 +412,20 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
         std::cout << "\033[H\033[J" << std::flush;
 
         // Transition to live job view
-        draw_header(arg, "RUNNING on " + tracked->compute_node,
+        draw_header(job_name, "RUNNING on " + tracked->compute_node,
                     tracked->slurm_id, tracked->compute_node);
         std::cout.flush();
 
         std::string output_path = output_path_for(tracked->job_id);
         tracked->output_file = output_path;
 
-        attach_to_job(cli, tracked, arg, false);
+        attach_to_job(cli, tracked, job_name, false);
         return;
     }
 
     // Check if canceled during init (compute_node will be empty)
     if (tracked->canceled && tracked->compute_node.empty()) {
-        std::cout << fmt::format("Job '{}' was canceled during initialization", arg) << "\n";
+        std::cout << fmt::format("Job '{}' was canceled during initialization", job_name) << "\n";
         return;
     }
 
@@ -411,11 +441,11 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
         status = "RUNNING on " + tracked->compute_node;
     }
 
-    draw_header(arg, status, tracked->slurm_id, tracked->compute_node);
+    draw_header(job_name, status, tracked->slurm_id, tracked->compute_node);
     setup_content_area();
     std::cout.flush();
 
-    attach_to_job(cli, tracked, arg, true);
+    attach_to_job(cli, tracked, job_name, true);
 }
 
 static void do_jobs(BaseCLI& cli, const std::string& arg) {
@@ -445,18 +475,16 @@ static void do_cancel(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
     if (!cli.service.job_manager()) return;
 
-    if (arg.empty()) {
-        std::cout << theme::error("Usage: cancel <job-name>");
-        return;
-    }
+    std::string job_name = resolve_job_name(cli, arg);
+    if (job_name.empty()) return;
 
     auto cb = [](const std::string& msg) {
         std::cout << msg << "\n";
     };
 
-    auto result = cli.service.cancel_job(arg, cb);
+    auto result = cli.service.cancel_job(job_name, cb);
     if (result.is_ok()) {
-        std::cout << theme::dim(fmt::format("Canceled job '{}'", arg));
+        std::cout << theme::dim(fmt::format("Canceled job '{}'", job_name));
     } else {
         std::cout << theme::error(result.error);
     }
@@ -466,8 +494,13 @@ static void do_return(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
     if (!cli.service.job_manager()) return;
 
-    if (arg.empty()) {
-        std::cout << theme::error("Usage: return <job-id>");
+    std::string job_name = resolve_job_name(cli, arg);
+    if (job_name.empty()) return;
+
+    // Resolve job name → job ID
+    auto* tracked = cli.service.find_job_by_name(job_name);
+    if (!tracked) {
+        std::cout << theme::error(fmt::format("No tracked job named '{}'", job_name));
         return;
     }
 
@@ -475,9 +508,51 @@ static void do_return(BaseCLI& cli, const std::string& arg) {
         std::cout << theme::dim(msg);
     };
 
-    auto result = cli.service.return_output(arg, cb);
+    auto result = cli.service.return_output(tracked->job_id, cb);
     if (result.is_err()) {
         std::cout << theme::error(result.error);
+    }
+}
+
+static void do_clean(BaseCLI& cli, const std::string& arg) {
+    namespace fs = std::filesystem;
+
+    fs::path output_root = fs::current_path() / "output";
+    if (!fs::exists(output_root) || !fs::is_directory(output_root)) {
+        std::cout << "No output directory found.\n";
+        return;
+    }
+
+    int removed = 0;
+    std::error_code ec;
+
+    for (const auto& job_entry : fs::directory_iterator(output_root)) {
+        if (!job_entry.is_directory()) continue;
+        std::string job_name = job_entry.path().filename().string();
+
+        // If a specific job name was given, only clean that one
+        if (!arg.empty() && job_name != arg) continue;
+
+        // Find what "latest" points to so we can keep it
+        fs::path latest_link = job_entry.path() / "latest";
+        std::string keep_name;
+        if (fs::is_symlink(latest_link)) {
+            keep_name = fs::read_symlink(latest_link, ec).string();
+        }
+
+        for (const auto& run_entry : fs::directory_iterator(job_entry.path())) {
+            std::string name = run_entry.path().filename().string();
+            if (name == "latest") continue;           // don't delete the symlink
+            if (name == keep_name) continue;           // don't delete what latest points to
+            fs::remove_all(run_entry.path(), ec);
+            removed++;
+        }
+    }
+
+    if (removed > 0) {
+        std::cout << fmt::format("Cleaned {} old output run(s). Latest kept.\n", removed);
+    } else {
+        std::cout << "Nothing to clean.\n";
     }
 }
 
@@ -487,4 +562,5 @@ void register_jobs_commands(BaseCLI& cli) {
     cli.add_command("jobs", do_jobs, "List running jobs");
     cli.add_command("cancel", do_cancel, "Cancel a job");
     cli.add_command("return", do_return, "Download job output");
+    cli.add_command("clean", do_clean, "Remove old output (keeps latest)");
 }

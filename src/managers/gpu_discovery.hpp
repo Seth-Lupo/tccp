@@ -4,15 +4,41 @@
 #include <vector>
 #include <ssh/connection.hpp>
 
+// GPU variant: maps node-name prefixes to specific GPU sub-types that share
+// the same SLURM GRES base type.  Add a row here for each new node class.
+struct GpuVariant {
+    std::string id;           // "a100-40gb" — user-facing, used in gpu_type config
+    std::string base_type;    // "a100" — matches GRES from sinfo
+    std::string node_prefix;  // "cc1gpu" — node hostname prefix
+    int mem_gb;               // 40
+    int tier;                 // 1 = cheapest (preferred by default)
+};
+
+// Easily extensible — add a row for new node types
+inline const std::vector<GpuVariant>& gpu_variants() {
+    static const std::vector<GpuVariant> variants = {
+        {"a100-40gb", "a100", "cc1gpu", 40, 1},
+        {"a100-80gb", "a100", "s1cmp",  80, 2},
+    };
+    return variants;
+}
+
+// Look up a variant by its user-facing ID (e.g. "a100-40gb").  Returns nullptr if not found.
+const GpuVariant* find_variant_by_id(const std::string& id);
+
+// Look up all variants that share a GRES base type (e.g. "a100").
+std::vector<const GpuVariant*> find_variants_by_base(const std::string& base_type);
+
 // A single GPU resource entry from sinfo (one row per partition+gres combo)
 struct GpuResource {
     std::string partition;
-    std::string gpu_type;       // e.g. "a100", "v100", "rtx_a5000"
+    std::string gpu_type;       // e.g. "a100-40gb", "v100", "rtx_a5000"
     int gpu_per_node = 0;       // GPUs available per node
     int avail_nodes = 0;        // nodes in idle/mix state (can accept work)
     int total_nodes = 0;        // total nodes with this resource
     int mem_mb = 0;             // memory per node in MB
     int cpus_per_node = 0;      // CPUs per node
+    std::string node_prefix;    // variant node prefix (e.g. "cc1gpu"), empty if no variant
 };
 
 // Result of partition selection
@@ -21,6 +47,7 @@ struct PartitionMatch {
     std::string partition;
     std::string gpu_type;       // resolved type (may differ from request if generic)
     int gpu_per_node = 0;
+    std::string node_prefix;    // node prefix constraint for sbatch (empty = none)
     std::string error;          // human-readable reason if !found
 };
 

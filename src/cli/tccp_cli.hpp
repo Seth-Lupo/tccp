@@ -18,9 +18,10 @@ public:
     TCCPCLI();
 
     void run_connected_repl();
-    void run_register();
+    void run_register(const std::string& path_arg = "");
     void run_new(const std::string& template_name);
     void run_setup();
+    void run_manual(const std::string& topic = "");
     void run_command(const std::string& command, const std::vector<std::string>& args);
 
 private:

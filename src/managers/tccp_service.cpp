@@ -38,12 +38,6 @@ Result<void> TccpService::connect(StatusCallback cb) {
 }
 
 void TccpService::disconnect() {
-    // Release idle allocations before tearing down — don't hold cluster
-    // resources we're not using.
-    if (allocs_) {
-        allocs_->deallocate_all_idle(nullptr);
-    }
-
     clear_managers();
     if (cluster_) {
         cluster_->disconnect();

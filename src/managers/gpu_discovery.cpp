@@ -12,6 +12,38 @@ static void gpu_log(const std::string& msg) {
     if (out) out << "[gpu] " << msg << "\n";
 }
 
+// ── Variant helpers ─────────────────────────────────────────
+
+const GpuVariant* find_variant_by_id(const std::string& id) {
+    std::string lower = id;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    for (const auto& v : gpu_variants()) {
+        std::string vid = v.id;
+        std::transform(vid.begin(), vid.end(), vid.begin(), ::tolower);
+        if (vid == lower) return &v;
+    }
+    return nullptr;
+}
+
+std::vector<const GpuVariant*> find_variants_by_base(const std::string& base_type) {
+    std::string lower = base_type;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    std::vector<const GpuVariant*> result;
+    for (const auto& v : gpu_variants()) {
+        std::string vbase = v.base_type;
+        std::transform(vbase.begin(), vbase.end(), vbase.begin(), ::tolower);
+        if (vbase == lower) result.push_back(&v);
+    }
+    return result;
+}
+
+// Extract the GRES base type from a variant ID.  "a100-40gb" → "a100".
+// If id is not a known variant, returns it unchanged.
+static std::string base_type_for(const std::string& gpu_type) {
+    const auto* v = find_variant_by_id(gpu_type);
+    return v ? v->base_type : gpu_type;
+}
+
 // ── Parsing helpers ──────────────────────────────────────────
 
 // Parse GRES string like "gpu:a100:4" or "gpu:4" into type + count
@@ -75,8 +107,17 @@ static bool type_matches(const std::string& resource_type,
     std::transform(r.begin(), r.end(), r.begin(), ::tolower);
     std::transform(q.begin(), q.end(), q.begin(), ::tolower);
 
-    // Exact match
+    // Exact match (handles variant IDs like "a100-40gb" == "a100-40gb")
     if (r == q) return true;
+
+    // If the request is a bare base type (e.g. "a100"), match any variant
+    // whose base_type matches (e.g. resource "a100-40gb" has base "a100").
+    std::string r_base = base_type_for(r);
+    std::string q_base = base_type_for(q);
+    // If user asked for a specific variant (q != q_base), only exact match works
+    if (q != q_base) return false;
+    // Bare base type: match if resource's base type matches
+    if (r_base == q) return true;
 
     // Substring match with word boundary: the character after the match
     // must be end-of-string or a separator (-, _, ., :)
@@ -94,9 +135,77 @@ static bool type_matches(const std::string& resource_type,
 
 // ── Query: GPU resources ─────────────────────────────────────
 
+// Check if any node in a comma/space-separated node list starts with a prefix
+static bool nodes_have_prefix(const std::string& nodelist, const std::string& prefix) {
+    // nodelist can be "cc1gpu001,cc1gpu002" or "cc1gpu[001-003]" or a single name
+    std::string lower_list = nodelist;
+    std::transform(lower_list.begin(), lower_list.end(), lower_list.begin(), ::tolower);
+    std::string lower_prefix = prefix;
+    std::transform(lower_prefix.begin(), lower_prefix.end(), lower_prefix.begin(), ::tolower);
+    return lower_list.find(lower_prefix) != std::string::npos;
+}
+
+// Split a single sinfo row into variant-specific GpuResource entries.
+// If no variant matches, returns one entry with the raw gpu_type.
+static std::vector<GpuResource> split_by_variant(
+        const std::string& partition, const std::string& raw_gpu_type,
+        int gpu_count, int nodes, bool available,
+        int mem_mb, int cpus_per_node, const std::string& nodelist) {
+
+    std::vector<GpuResource> out;
+    auto variants = find_variants_by_base(raw_gpu_type);
+
+    if (variants.empty() || nodelist.empty()) {
+        // No variants for this type — keep raw
+        GpuResource r;
+        r.partition = partition;
+        r.gpu_type = raw_gpu_type;
+        r.gpu_per_node = gpu_count;
+        r.total_nodes = nodes;
+        r.avail_nodes = available ? nodes : 0;
+        r.mem_mb = mem_mb;
+        r.cpus_per_node = cpus_per_node;
+        out.push_back(r);
+        return out;
+    }
+
+    bool any_matched = false;
+    for (const auto* v : variants) {
+        if (nodes_have_prefix(nodelist, v->node_prefix)) {
+            GpuResource r;
+            r.partition = partition;
+            r.gpu_type = v->id;  // "a100-40gb" instead of "a100"
+            r.gpu_per_node = gpu_count;
+            r.total_nodes = nodes;
+            r.avail_nodes = available ? nodes : 0;
+            r.mem_mb = mem_mb;
+            r.cpus_per_node = cpus_per_node;
+            r.node_prefix = v->node_prefix;
+            out.push_back(r);
+            any_matched = true;
+        }
+    }
+
+    if (!any_matched) {
+        // Node names didn't match any known variant — keep raw
+        GpuResource r;
+        r.partition = partition;
+        r.gpu_type = raw_gpu_type;
+        r.gpu_per_node = gpu_count;
+        r.total_nodes = nodes;
+        r.avail_nodes = available ? nodes : 0;
+        r.mem_mb = mem_mb;
+        r.cpus_per_node = cpus_per_node;
+        out.push_back(r);
+    }
+
+    return out;
+}
+
 std::vector<GpuResource> discover_gpu_resources(SSHConnection& login) {
+    // %N = nodelist — needed to distinguish GPU variants by hostname prefix
     auto result = login.run(
-        "sinfo -h -o '%P|%G|%D|%m|%c|%T' 2>/dev/null");
+        "sinfo -h -o '%P|%G|%D|%m|%c|%T|%N' 2>/dev/null");
 
     gpu_log(fmt::format("sinfo exit={} stdout_len={}", result.exit_code,
                         result.stdout_data.size()));
@@ -145,29 +254,27 @@ std::vector<GpuResource> discover_gpu_resources(SSHConnection& login) {
         bool available = (state.find("idle") != std::string::npos ||
                           state.find("mix") != std::string::npos);
 
-        gpu_log(fmt::format("  found: partition={} gpu_type={} gpu_count={} nodes={} state={} avail={}",
-                            partition, gpu_type, gpu_count, nodes, state, available));
+        std::string nodelist = (fields.size() >= 7) ? fields[6] : "";
 
-        bool merged = false;
-        for (auto& r : resources) {
-            if (r.partition == partition && r.gpu_type == gpu_type) {
-                r.total_nodes += nodes;
-                if (available) r.avail_nodes += nodes;
-                merged = true;
-                break;
+        gpu_log(fmt::format("  found: partition={} gpu_type={} gpu_count={} nodes={} state={} avail={} nodelist={}",
+                            partition, gpu_type, gpu_count, nodes, state, available, nodelist));
+
+        auto split = split_by_variant(partition, gpu_type, gpu_count, nodes, available,
+                                       parse_int(fields[3]), parse_int(fields[4]), nodelist);
+
+        for (auto& entry : split) {
+            bool merged = false;
+            for (auto& r : resources) {
+                if (r.partition == entry.partition && r.gpu_type == entry.gpu_type) {
+                    r.total_nodes += entry.total_nodes;
+                    r.avail_nodes += entry.avail_nodes;
+                    merged = true;
+                    break;
+                }
             }
-        }
-
-        if (!merged) {
-            GpuResource r;
-            r.partition = partition;
-            r.gpu_type = gpu_type;
-            r.gpu_per_node = gpu_count;
-            r.total_nodes = nodes;
-            r.avail_nodes = available ? nodes : 0;
-            r.mem_mb = parse_int(fields[3]);
-            r.cpus_per_node = parse_int(fields[4]);
-            resources.push_back(r);
+            if (!merged) {
+                resources.push_back(std::move(entry));
+            }
         }
     }
 
@@ -293,6 +400,12 @@ PartitionMatch find_gpu_partition(const std::vector<GpuResource>& resources,
         score -= (r.gpu_per_node - gpu_count) * 10;
         score += r.total_nodes;
 
+        // Tier penalty: prefer cheapest GPU variant (lower tier = cheaper)
+        const auto* variant = find_variant_by_id(r.gpu_type);
+        if (variant) {
+            score -= variant->tier * 5;
+        }
+
         gpu_log(fmt::format("  candidate: {} type={} gpus={} score={}",
                             r.partition, r.gpu_type, r.gpu_per_node, score));
         candidates.push_back({&r, score});
@@ -328,9 +441,10 @@ PartitionMatch find_gpu_partition(const std::vector<GpuResource>& resources,
     result.partition = best.partition;
     result.gpu_type = best.gpu_type;
     result.gpu_per_node = best.gpu_per_node;
+    result.node_prefix = best.node_prefix;
 
-    gpu_log(fmt::format("find_gpu_partition: selected partition={} type={} gpus={}",
-                        result.partition, result.gpu_type, result.gpu_per_node));
+    gpu_log(fmt::format("find_gpu_partition: selected partition={} type={} gpus={} node_prefix={}",
+                        result.partition, result.gpu_type, result.gpu_per_node, result.node_prefix));
     return result;
 }
 

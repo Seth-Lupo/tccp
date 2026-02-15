@@ -82,7 +82,6 @@ ProjectTemplate make_python_template() {
             "*.egg-info/\n"
             ".env\n"
             "output/\n"
-            "tccp-output/\n"
         },
     };
 

@@ -30,7 +30,7 @@ constexpr int DEFAULT_ALLOC_MINUTES      = 240;   // 4 hours
 constexpr const char* DEFAULT_MEMORY     = "4G";
 constexpr const char* DEFAULT_PARTITION  = "batch";
 constexpr const char* DEFAULT_ALLOC_TIME = "4:00:00";
-constexpr const char* DEFAULT_JOB_TIME   = "1:00:00";
+constexpr const char* DEFAULT_JOB_TIME   = "0:05:00";
 
 // ── Cache management ──────────────────────────────────────────
 constexpr int64_t CACHE_SOFT_CAP_BYTES = 20LL * 1024 * 1024 * 1024;  // 20 GB
