@@ -1,6 +1,7 @@
 #include "job_manager.hpp"
 #include "job_log.hpp"
 #include <environments/environment.hpp>
+#include <core/constants.hpp>
 #include <fmt/format.h>
 
 // ── Directory setup ────────────────────────────────────────
@@ -30,7 +31,7 @@ void JobManager::ensure_environment(StatusCallback cb) {
     std::string image = cc + "/images/" + env.sif_filename;
     std::string docker_uri = env.docker_uri;
     std::string venv = env_dir() + "/default/venv";
-    std::string tccp_home = fmt::format("/cluster/home/{}/tccp", username_);
+    std::string tccp_home = fmt::format(REMOTE_TCCP_HOME, username_);
     std::string dtach_bin = tccp_home + "/bin/dtach";
     bool gpu = env.gpu;
 
@@ -102,7 +103,7 @@ void JobManager::ensure_environment(StatusCallback cb) {
 }
 
 void JobManager::ensure_dtach(StatusCallback cb) {
-    std::string tccp_home = fmt::format("/cluster/home/{}/tccp", username_);
+    std::string tccp_home = fmt::format(REMOTE_TCCP_HOME, username_);
     std::string bin = tccp_home + "/bin/dtach";
 
     auto check = dtn_.run("test -x " + bin + " && echo DTACH_OK || echo DTACH_MISSING");
@@ -188,8 +189,6 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
     bool gpu = env.gpu;
     std::string nv_flag = gpu ? "--nv " : "";
 
-    const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes";
-
     if (cb) cb("Launching job on compute node...");
 
     // Build bind mount flags (--nv for GPU types enables NVIDIA driver access)
@@ -239,13 +238,13 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
 
     // Copy script to compute node
     r = dtn_.run(fmt::format("scp {} {} {}:{}/tccp_run.sh",
-                             ssh_opts, dtn_script, compute_node, scratch));
+                             SSH_OPTS, dtn_script, compute_node, scratch));
     tccp_log_ssh("launch:scp-script", "scp script to node", r);
     dtn_.run("rm -f " + dtn_script);
 
     // Create output symlink
     r = dtn_.run(fmt::format("ssh {} {} 'ln -sfn {} {}/output'",
-                             ssh_opts, compute_node, out_dir, scratch));
+                             SSH_OPTS, compute_node, out_dir, scratch));
     tccp_log_ssh("launch:output-symlink", "ln -sfn", r);
 
     // Create shared cache directory
@@ -253,14 +252,14 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
         std::string shared_cache = fmt::format("/tmp/{}/{}/.tccp-cache",
                                                username_, proj.name);
         r = dtn_.run(fmt::format("ssh {} {} 'mkdir -p {}'",
-                                 ssh_opts, compute_node, shared_cache));
+                                 SSH_OPTS, compute_node, shared_cache));
         tccp_log_ssh("launch:cache-dir", "mkdir cache", r);
     }
 
     // Launch dtach
     std::string launch_cmd = fmt::format(
         "ssh {} {} '$HOME/tccp/bin/dtach -n {} {}/tccp_run.sh'",
-        ssh_opts, compute_node, sock, scratch);
+        SSH_OPTS, compute_node, sock, scratch);
     r = dtn_.run(launch_cmd);
     tccp_log_ssh("launch:dtach", launch_cmd, r);
 

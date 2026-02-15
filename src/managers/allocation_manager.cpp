@@ -1,7 +1,8 @@
 #include "allocation_manager.hpp"
 #include "gpu_discovery.hpp"
 #include <core/config.hpp>
-#include <core/credentials.hpp>
+#include <core/constants.hpp>
+#include <core/utils.hpp>
 #include <core/resource_spec.hpp>
 #include <fmt/format.h>
 #include <chrono>
@@ -10,36 +11,6 @@
 #include <set>
 #include <ctime>
 
-static std::string get_cluster_username() {
-    auto result = CredentialManager::instance().get("user");
-    return result.is_ok() ? result.value : "unknown";
-}
-
-static std::string now_iso() {
-    auto now = std::chrono::system_clock::now();
-    auto t = std::chrono::system_clock::to_time_t(now);
-    struct tm tm_buf;
-    localtime_r(&t, &tm_buf);
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d",
-                  tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
-                  tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
-    return buf;
-}
-
-// Parse ISO timestamp to time_t
-static std::time_t parse_iso(const std::string& iso) {
-    struct tm tm_buf = {};
-    if (sscanf(iso.c_str(), "%d-%d-%dT%d:%d:%d",
-               &tm_buf.tm_year, &tm_buf.tm_mon, &tm_buf.tm_mday,
-               &tm_buf.tm_hour, &tm_buf.tm_min, &tm_buf.tm_sec) == 6) {
-        tm_buf.tm_year -= 1900;
-        tm_buf.tm_mon -= 1;
-        return mktime(&tm_buf);
-    }
-    return 0;
-}
-
 AllocationManager::AllocationManager(const Config& config, SSHConnection& dtn,
                                      SSHConnection& login, StateStore& store)
     : config_(config), dtn_(dtn), login_(login), store_(store),
@@ -47,12 +18,11 @@ AllocationManager::AllocationManager(const Config& config, SSHConnection& dtn,
 }
 
 std::string AllocationManager::persistent_base() const {
-    return fmt::format("/cluster/home/{}/tccp/projects/{}",
-                       username_, config_.project().name);
+    return fmt::format(REMOTE_PROJECT_BASE, username_, config_.project().name);
 }
 
 std::string AllocationManager::container_cache() const {
-    return fmt::format("/cluster/home/{}/tccp/container-cache", username_);
+    return fmt::format(REMOTE_CONTAINER_CACHE, username_);
 }
 
 void AllocationManager::persist() {
@@ -60,13 +30,13 @@ void AllocationManager::persist() {
 }
 
 int AllocationManager::parse_time_minutes(const std::string& time_str) {
-    if (time_str.empty()) return 240; // default 4 hours
+    if (time_str.empty()) return DEFAULT_ALLOC_MINUTES;
 
     int h = 0, m = 0, s = 0;
     if (sscanf(time_str.c_str(), "%d:%d:%d", &h, &m, &s) >= 2) {
         return h * 60 + m + (s > 0 ? 1 : 0);
     }
-    return 240;
+    return DEFAULT_ALLOC_MINUTES;
 }
 
 void AllocationManager::reconcile(StatusCallback cb) {
@@ -90,15 +60,10 @@ void AllocationManager::reconcile(StatusCallback cb) {
 
     std::vector<AllocationState> live;
     for (auto& alloc : state_.allocations) {
-        std::string cmd = fmt::format("squeue -j {} -h -o \"%T %N\"", alloc.slurm_id);
-        auto result = login_.run(cmd);
+        auto result = query_alloc_slurm(alloc.slurm_id);
 
-        std::string state_str, node;
-        std::istringstream iss(result.stdout_data);
-        iss >> state_str >> node;
-
-        if (state_str == "RUNNING") {
-            if (!node.empty()) alloc.node = node;
+        if (result.state == "RUNNING") {
+            if (!result.node.empty()) alloc.node = result.node;
             // Clear stale active_job_id if that job is no longer active
             if (!alloc.active_job_id.empty() &&
                 active_jobs.find(alloc.active_job_id) == active_jobs.end()) {
@@ -107,12 +72,12 @@ void AllocationManager::reconcile(StatusCallback cb) {
             live.push_back(alloc);
             if (cb) cb(fmt::format("  Allocation {} RUNNING on {}{}", alloc.slurm_id, alloc.node,
                                    alloc.active_job_id.empty() ? " (idle)" : " (busy)"));
-        } else if (state_str == "PENDING") {
+        } else if (result.state == "PENDING") {
             live.push_back(alloc);
             if (cb) cb(fmt::format("  Allocation {} PENDING", alloc.slurm_id));
         } else {
             if (cb) cb(fmt::format("  Allocation {} gone ({})", alloc.slurm_id,
-                                   state_str.empty() ? "not found" : state_str));
+                                   result.state.empty() ? "not found" : result.state));
         }
     }
 
@@ -143,29 +108,11 @@ AllocationState* AllocationManager::find_free_unlocked(int required_minutes,
 
     if (cb) cb(fmt::format("Checking {} allocation(s) (need {}min, partition={}, gpu={}:{})",
                            state_.allocations.size(), required_minutes,
-                           required_resources.partition.empty() ? "batch" : required_resources.partition,
+                           required_resources.partition.empty() ? DEFAULT_PARTITION : required_resources.partition,
                            required_resources.gpu_type, required_resources.gpu_count));
 
-    // First pass: clear stale active_job_ids (job completed but release_job wasn't
-    // called properly, e.g. due to crash or previous bugs)
-    bool cleared_stale = false;
-    for (auto& alloc : state_.allocations) {
-        if (alloc.active_job_id.empty()) continue;
-        bool job_still_active = false;
-        for (const auto& js : state_.jobs) {
-            if (js.job_id == alloc.active_job_id) {
-                job_still_active = !js.completed && !js.canceled && js.init_error.empty();
-                break;
-            }
-        }
-        if (!job_still_active) {
-            if (cb) cb(fmt::format("  Clearing stale job ref on alloc {} (job {} done)",
-                                   alloc.slurm_id, alloc.active_job_id));
-            alloc.active_job_id.clear();
-            cleared_stale = true;
-        }
-    }
-    if (cleared_stale) persist();
+    // First pass: clear stale active_job_ids
+    clear_stale_job_refs(cb);
 
     // Second pass: find a compatible idle allocation
     for (auto& alloc : state_.allocations) {
@@ -179,29 +126,13 @@ AllocationState* AllocationManager::find_free_unlocked(int required_minutes,
                 continue;
             }
 
-            // Check resource compatibility
-            SlurmDefaults alloc_res;
-            alloc_res.partition = alloc.partition;
-            alloc_res.nodes = alloc.nodes;
-            alloc_res.cpus_per_task = alloc.cpus;
-            alloc_res.memory = alloc.memory;
-            alloc_res.gpu_type = alloc.gpu_type;
-            alloc_res.gpu_count = alloc.gpu_count;
-
+            SlurmDefaults alloc_res = alloc_to_slurm_defaults(alloc);
             if (resources_compatible(alloc_res, required_resources)) {
                 if (cb) cb(fmt::format("  {} — match! ({}min left, partition={}, gpu={}:{})",
                                        id, rem, alloc.partition, alloc.gpu_type, alloc.gpu_count));
                 return &alloc;
             } else {
-                if (cb) cb(fmt::format("  {} — skip: resources mismatch (alloc: partition={} gpu={}:{} "
-                                       "cpus={} mem={} | need: partition={} gpu={}:{} cpus={} mem={})",
-                                       id,
-                                       alloc.partition, alloc.gpu_type, alloc.gpu_count,
-                                       alloc.cpus, alloc.memory,
-                                       required_resources.partition.empty() ? "batch" : required_resources.partition,
-                                       required_resources.gpu_type, required_resources.gpu_count,
-                                       required_resources.cpus_per_task,
-                                       required_resources.memory.empty() ? "4G" : required_resources.memory));
+                if (cb) cb(fmt::format("  {} — skip: resources mismatch", id));
             }
         } else if (alloc.node.empty()) {
             if (cb) cb(fmt::format("  {} — skip: no node yet (PENDING)", id));
@@ -212,6 +143,58 @@ AllocationState* AllocationManager::find_free_unlocked(int required_minutes,
 
     if (cb) cb("No compatible free allocation found");
     return nullptr;
+}
+
+void AllocationManager::clear_stale_job_refs(StatusCallback cb) {
+    bool cleared = false;
+    for (auto& alloc : state_.allocations) {
+        if (alloc.active_job_id.empty()) continue;
+        bool job_still_active = false;
+        for (const auto& js : state_.jobs) {
+            if (js.job_id == alloc.active_job_id) {
+                job_still_active = !js.completed && !js.canceled && js.init_error.empty();
+                break;
+            }
+        }
+        if (!job_still_active) {
+            if (cb) cb(fmt::format("  Clearing stale job ref on alloc {} (job {} done)",
+                                   alloc.slurm_id, alloc.active_job_id));
+            alloc.active_job_id.clear();
+            cleared = true;
+        }
+    }
+    if (cleared) persist();
+}
+
+SlurmDefaults AllocationManager::alloc_to_slurm_defaults(const AllocationState& alloc) const {
+    SlurmDefaults d{};
+    d.partition = alloc.partition;
+    d.nodes = alloc.nodes;
+    d.cpus_per_task = alloc.cpus;
+    d.memory = alloc.memory;
+    d.gpu_type = alloc.gpu_type;
+    d.gpu_count = alloc.gpu_count;
+    return d;
+}
+
+AllocationManager::SlurmQueryResult AllocationManager::query_alloc_slurm(const std::string& slurm_id) {
+    SlurmQueryResult result;
+    std::string cmd = fmt::format("squeue -j {} -h -o \"%T %N\"", slurm_id);
+
+    // Retry on empty responses (transient SSH/SLURM hiccups)
+    for (int attempt = 0; attempt <= SSH_CMD_MAX_RETRIES; attempt++) {
+        auto qr = login_.run(cmd);
+        std::istringstream iss(qr.stdout_data);
+        iss >> result.state >> result.node;
+
+        if (!result.state.empty()) return result;
+
+        // Empty response — could be transient
+        if (attempt < SSH_CMD_MAX_RETRIES) {
+            std::this_thread::sleep_for(std::chrono::seconds(SSH_RETRY_DELAY_SECS));
+        }
+    }
+    return result;  // Return empty if all retries failed
 }
 
 AllocationState* AllocationManager::find_by_id(const std::string& slurm_id) {
@@ -226,15 +209,7 @@ AllocationState* AllocationManager::find_by_id(const std::string& slurm_id) {
 AllocationState* AllocationManager::find_pending(const SlurmDefaults& required_resources) {
     for (auto& alloc : state_.allocations) {
         if (alloc.active_job_id.empty() && alloc.node.empty()) {
-            // Check resource compatibility before returning
-            SlurmDefaults alloc_res;
-            alloc_res.partition = alloc.partition;
-            alloc_res.nodes = alloc.nodes;
-            alloc_res.cpus_per_task = alloc.cpus;
-            alloc_res.memory = alloc.memory;
-            alloc_res.gpu_type = alloc.gpu_type;
-            alloc_res.gpu_count = alloc.gpu_count;
-
+            SlurmDefaults alloc_res = alloc_to_slurm_defaults(alloc);
             if (resources_compatible(alloc_res, required_resources)) {
                 return &alloc;
             }
@@ -243,115 +218,83 @@ AllocationState* AllocationManager::find_pending(const SlurmDefaults& required_r
     return nullptr;
 }
 
-Result<AllocationState> AllocationManager::wait_for_allocation(
-        const std::string& slurm_id, StatusCallback cb) {
-    // Poll until RUNNING (up to 10 minutes)
-    for (int i = 0; i < 120; i++) {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+// ── wait_for_allocation (decomposed) ────────────────────────
 
-        std::string cmd = fmt::format("squeue -j {} -h -o \"%T %N\"", slurm_id);
-        auto qr = login_.run(cmd);
-
-        std::string state_str, node;
-        std::istringstream iss(qr.stdout_data);
-        iss >> state_str >> node;
-
-        if (state_str == "RUNNING" && !node.empty()) {
-            // Update the persisted allocation with node info
-            for (auto& alloc : state_.allocations) {
-                if (alloc.slurm_id == slurm_id) {
-                    alloc.node = node;
-                    alloc.start_time = now_iso();
-                    persist();
-                    if (cb) cb(fmt::format("Allocation {} running on {}", slurm_id, node));
-                    return Result<AllocationState>::Ok(alloc);
-                }
-            }
-        }
-
-        if (state_str == "COMPLETED" || state_str == "FAILED" ||
-            state_str == "CANCELLED") {
-            // Truly dead — remove from state
-            auto& allocs = state_.allocations;
-            allocs.erase(
-                std::remove_if(allocs.begin(), allocs.end(),
-                    [&](const AllocationState& a) { return a.slurm_id == slurm_id; }),
-                allocs.end());
-            persist();
-            return Result<AllocationState>::Err(
-                fmt::format("Allocation {} died: {}", slurm_id, state_str));
-        }
-
-        // Empty state_str likely means SSH connection issue — retry a few times
-        // before giving up (transient failures are common on HPC networks)
-        if (state_str.empty()) {
-            static const int max_empty_retries = 3;
-            int retries = 0;
-            bool recovered = false;
-            while (retries < max_empty_retries) {
-                retries++;
-                if (cb) cb(fmt::format("SSH hiccup querying allocation {}, retrying ({}/{})...",
-                                       slurm_id, retries, max_empty_retries));
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                auto retry_qr = login_.run(cmd);
-                std::istringstream retry_iss(retry_qr.stdout_data);
-                retry_iss >> state_str >> node;
-                if (!state_str.empty()) {
-                    recovered = true;
-                    break;
-                }
-            }
-            if (!recovered) {
-                return Result<AllocationState>::Err(
-                    fmt::format("Lost connection while waiting for allocation {}", slurm_id));
-            }
-            // If recovered, check the state we got
-            if (state_str == "RUNNING" && !node.empty()) {
-                for (auto& alloc : state_.allocations) {
-                    if (alloc.slurm_id == slurm_id) {
-                        alloc.node = node;
-                        alloc.start_time = now_iso();
-                        persist();
-                        if (cb) cb(fmt::format("Allocation {} running on {}", slurm_id, node));
-                        return Result<AllocationState>::Ok(alloc);
-                    }
-                }
-            }
-            if (state_str == "COMPLETED" || state_str == "FAILED" ||
-                state_str == "CANCELLED") {
-                auto& allocs = state_.allocations;
-                allocs.erase(
-                    std::remove_if(allocs.begin(), allocs.end(),
-                        [&](const AllocationState& a) { return a.slurm_id == slurm_id; }),
-                    allocs.end());
-                persist();
-                return Result<AllocationState>::Err(
-                    fmt::format("Allocation {} died: {}", slurm_id, state_str));
-            }
-            // Otherwise it's PENDING — continue the main loop
-        }
-
-        // Still PENDING — keep waiting (report every 10 seconds)
-        if (i > 0 && i % 2 == 0 && cb) {
-            cb(fmt::format("Still waiting for allocation {}... ({}s)", slurm_id, (i + 1) * 5));
-        }
-    }
-
-    // Timed out — cancel and remove
-    login_.run("scancel " + slurm_id);
+void AllocationManager::remove_allocation(const std::string& slurm_id) {
     auto& allocs = state_.allocations;
     allocs.erase(
         std::remove_if(allocs.begin(), allocs.end(),
             [&](const AllocationState& a) { return a.slurm_id == slurm_id; }),
         allocs.end());
     persist();
-    return Result<AllocationState>::Err("Timed out waiting for allocation");
+}
+
+AllocationManager::WaitOutcome AllocationManager::check_alloc_state(
+        const std::string& slurm_id, StatusCallback cb) {
+    auto qr = query_alloc_slurm(slurm_id);
+
+    if (qr.state == "RUNNING" && !qr.node.empty()) {
+        // Update persisted allocation with node info
+        for (auto& alloc : state_.allocations) {
+            if (alloc.slurm_id == slurm_id) {
+                alloc.node = qr.node;
+                alloc.start_time = now_iso();
+                persist();
+                if (cb) cb(fmt::format("Allocation {} running on {}", slurm_id, qr.node));
+                return {WaitOutcome::RUNNING, alloc, ""};
+            }
+        }
+    }
+
+    if (qr.state == "COMPLETED" || qr.state == "FAILED" || qr.state == "CANCELLED") {
+        remove_allocation(slurm_id);
+        return {WaitOutcome::DEAD, {}, fmt::format("Allocation {} died: {}", slurm_id, qr.state)};
+    }
+
+    if (qr.state.empty()) {
+        // Could be transient or truly gone — query_alloc_slurm already retried
+        remove_allocation(slurm_id);
+        return {WaitOutcome::DEAD, {},
+                fmt::format("Lost contact with allocation {} (SLURM not responding)", slurm_id)};
+    }
+
+    // Still PENDING
+    return {WaitOutcome::PENDING, {}, ""};
+}
+
+Result<AllocationState> AllocationManager::wait_for_allocation(
+        const std::string& slurm_id, StatusCallback cb) {
+    for (int i = 0; i < ALLOC_WAIT_MAX_ITERS; i++) {
+        std::this_thread::sleep_for(std::chrono::seconds(ALLOC_WAIT_POLL_SECS));
+
+        auto outcome = check_alloc_state(slurm_id, cb);
+
+        switch (outcome.status) {
+            case WaitOutcome::RUNNING:
+                return Result<AllocationState>::Ok(outcome.alloc);
+            case WaitOutcome::DEAD:
+                return Result<AllocationState>::Err(outcome.error);
+            case WaitOutcome::PENDING:
+                if (i > 0 && i % ALLOC_WAIT_REPORT_INTERVAL == 0 && cb) {
+                    cb(fmt::format("Still waiting for allocation {}... ({}s)",
+                                   slurm_id, (i + 1) * ALLOC_WAIT_POLL_SECS));
+                }
+                break;
+        }
+    }
+
+    // Timed out — cancel and remove
+    login_.run("scancel " + slurm_id);
+    remove_allocation(slurm_id);
+    return Result<AllocationState>::Err(
+        fmt::format("Timed out waiting for allocation {} ({}s)",
+                    slurm_id, ALLOC_WAIT_MAX_ITERS * ALLOC_WAIT_POLL_SECS));
 }
 
 int AllocationManager::remaining_minutes(const AllocationState& alloc) const {
     if (alloc.start_time.empty()) return 0;
 
-    auto start = parse_iso(alloc.start_time);
+    auto start = parse_iso_time(alloc.start_time);
     if (start == 0) return 0;
 
     auto now = std::time(nullptr);
@@ -390,9 +333,8 @@ SlurmDefaults AllocationManager::resolve_profile(const std::string& job_name) co
         if (js.gpu_count > 0) profile.gpu_count = js.gpu_count;
     }
 
-    // Default allocation time if not set
     if (profile.time.empty()) {
-        profile.time = "4:00:00";
+        profile.time = DEFAULT_ALLOC_TIME;
     }
 
     return profile;
@@ -417,11 +359,10 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
                                                      StatusCallback cb) {
     if (cb) cb("Requesting compute allocation...");
 
-    // Auto-resolve GPU partition if GPUs are requested and partition
-    // hasn't already been resolved by the caller
+    // Auto-resolve GPU partition if needed
     SlurmDefaults resolved = profile;
     if ((resolved.gpu_count > 0 || !resolved.gpu_type.empty()) &&
-        (resolved.partition.empty() || resolved.partition == "batch")) {
+        (resolved.partition.empty() || resolved.partition == DEFAULT_PARTITION)) {
         if (cb) cb("Discovering GPU resources...");
         auto match = resolve_gpu_partition(login_, username_,
                                             resolved.partition,
@@ -445,7 +386,7 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
     dtn_.run(fmt::format("mkdir -p {} {}/env {}/images {}/cache {}/tmp",
                          base, base, cc, cc, cc));
 
-    // Submit allocation via login node using heredoc pipe to sbatch
+    // Submit allocation
     std::string script_content = generate_alloc_script(resolved);
     std::string submit_cmd = "sbatch << 'TCCP_ALLOC_EOF'\n"
                              + script_content + "\nTCCP_ALLOC_EOF";
@@ -466,15 +407,14 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
 
     if (cb) cb(fmt::format("Allocation {} submitted, waiting for node...", slurm_id));
 
-    // Create allocation state and persist IMMEDIATELY so it survives
-    // connection drops. We'll update node/start_time once RUNNING.
+    // Persist immediately so allocation survives connection drops
     AllocationState alloc;
     alloc.slurm_id = slurm_id;
     alloc.duration_minutes = parse_time_minutes(resolved.time);
-    alloc.partition = resolved.partition.empty() ? "batch" : resolved.partition;
+    alloc.partition = resolved.partition.empty() ? DEFAULT_PARTITION : resolved.partition;
     alloc.nodes = resolved.nodes > 0 ? resolved.nodes : 1;
     alloc.cpus = resolved.cpus_per_task > 0 ? resolved.cpus_per_task : 1;
-    alloc.memory = resolved.memory.empty() ? "4G" : resolved.memory;
+    alloc.memory = resolved.memory.empty() ? DEFAULT_MEMORY : resolved.memory;
     alloc.gpu_type = resolved.gpu_type;
     alloc.gpu_count = resolved.gpu_count;
     state_.allocations.push_back(alloc);
@@ -508,13 +448,35 @@ void AllocationManager::release_job(const std::string& slurm_id) {
 void AllocationManager::deallocate(const std::string& slurm_id, StatusCallback cb) {
     login_.run("scancel " + slurm_id);
     if (cb) cb(fmt::format("Cancelled allocation {}", slurm_id));
+    remove_allocation(slurm_id);
+}
 
-    auto& allocs = state_.allocations;
-    allocs.erase(
-        std::remove_if(allocs.begin(), allocs.end(),
-                       [&](const AllocationState& a) { return a.slurm_id == slurm_id; }),
-        allocs.end());
-    persist();
+void AllocationManager::reap_expired_idle(const Config& config, StatusCallback cb) {
+    // Find the shortest job time across all configured jobs.
+    const auto& jobs = config.project().jobs;
+    int min_job_minutes = DEFAULT_ALLOC_MINUTES;
+    for (const auto& [name, jc] : jobs) {
+        std::string jt = jc.time.empty() ? DEFAULT_JOB_TIME : jc.time;
+        int m = parse_time_minutes(jt);
+        if (m < min_job_minutes) min_job_minutes = m;
+    }
+
+    // Cancel idle allocations that can't fit even the shortest job.
+    std::vector<std::string> to_cancel;
+    for (const auto& alloc : state_.allocations) {
+        if (!alloc.active_job_id.empty()) continue;  // busy
+        if (alloc.node.empty()) continue;             // still pending
+        int rem = remaining_minutes(alloc);
+        if (rem < min_job_minutes) {
+            if (cb) cb(fmt::format("Releasing allocation {} — {}min left < {}min needed by shortest job",
+                                   alloc.slurm_id, rem, min_job_minutes));
+            to_cancel.push_back(alloc.slurm_id);
+        }
+    }
+
+    for (const auto& id : to_cancel) {
+        deallocate(id, nullptr);
+    }
 }
 
 void AllocationManager::deallocate_all_idle(StatusCallback cb) {

@@ -8,6 +8,7 @@
     "libssh2",
     "yaml-cpp",
     "cli11",
-    "fmt"
+    "fmt",
+    "gtest"
   ]
 }

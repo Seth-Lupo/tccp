@@ -1,18 +1,14 @@
 #include "sync_manager.hpp"
 #include "gitignore.hpp"
 #include <core/config.hpp>
-#include <core/credentials.hpp>
+#include <core/constants.hpp>
+#include <core/utils.hpp>
 #include <fmt/format.h>
 #include <filesystem>
 #include <set>
 #include <algorithm>
 
 namespace fs = std::filesystem;
-
-static std::string get_cluster_username() {
-    auto result = CredentialManager::instance().get("user");
-    return result.is_ok() ? result.value : "unknown";
-}
 
 SyncManager::SyncManager(const Config& config, SSHConnection& dtn)
     : config_(config), dtn_(dtn), username_(get_cluster_username()) {
@@ -151,11 +147,10 @@ void SyncManager::full_sync(const std::string& compute_node,
                              const std::string& scratch_path,
                              StatusCallback cb) {
     const auto& proj = config_.project();
-    const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes";
 
     // Create scratch on compute node
     if (cb) cb("Creating scratch directory...");
-    dtn_.run(fmt::format("ssh {} {} 'mkdir -p {}'", ssh_opts, compute_node, scratch_path));
+    dtn_.run(fmt::format("ssh {} {} 'mkdir -p {}'", SSH_OPTS, compute_node, scratch_path));
 
     // Collect code files
     GitignoreParser parser(config_.project_dir());
@@ -231,7 +226,7 @@ void SyncManager::full_sync(const std::string& compute_node,
     // Tar from DTN to compute node
     if (cb) cb("Transferring files to compute node...");
     dtn_.run(fmt::format("cd {} && tar cf - . | ssh {} {} 'cd {} && tar xf -'",
-                         dtn_tmp, ssh_opts, compute_node, scratch_path));
+                         dtn_tmp, SSH_OPTS, compute_node, scratch_path));
 
     // Clean up DTN temp
     dtn_.run("rm -rf " + dtn_tmp);
@@ -244,14 +239,13 @@ void SyncManager::incremental_sync(const std::string& compute_node,
                                     const std::vector<std::string>& changed_files,
                                     const std::vector<std::string>& deleted_files,
                                     StatusCallback cb) {
-    const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes";
     const auto& proj = config_.project();
 
     // Delete removed files on remote
     if (!deleted_files.empty()) {
         for (const auto& f : deleted_files) {
             dtn_.run(fmt::format("ssh {} {} 'rm -f {}/{}'",
-                                 ssh_opts, compute_node, scratch_path, f));
+                                 SSH_OPTS, compute_node, scratch_path, f));
         }
     }
 
@@ -291,7 +285,7 @@ void SyncManager::incremental_sync(const std::string& compute_node,
 
     // Tar delta to compute node
     dtn_.run(fmt::format("cd {} && tar cf - . | ssh {} {} 'cd {} && tar xf -'",
-                         dtn_tmp, ssh_opts, compute_node, scratch_path));
+                         dtn_tmp, SSH_OPTS, compute_node, scratch_path));
 
     dtn_.run("rm -rf " + dtn_tmp);
 
@@ -302,7 +296,6 @@ void SyncManager::sync_to_scratch(const std::string& compute_node,
                                    const std::string& scratch_path,
                                    ProjectState& state,
                                    StatusCallback cb) {
-    const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes";
 
     // Build current local manifest
     auto local_manifest = build_local_manifest();
@@ -316,40 +309,48 @@ void SyncManager::sync_to_scratch(const std::string& compute_node,
     if (can_reuse) {
         // Verify old scratch still exists
         auto check = dtn_.run(fmt::format("ssh {} {} 'test -d {} && echo YES || echo NO'",
-                                          ssh_opts, compute_node, state.last_sync_scratch));
+                                          SSH_OPTS, compute_node, state.last_sync_scratch));
         if (check.stdout_data.find("YES") == std::string::npos) {
             can_reuse = false;
         }
     }
 
     if (can_reuse && scratch_path != state.last_sync_scratch) {
-        // Copy previous scratch to new scratch as starting point
+        // Copy previous scratch to new scratch as starting point.
+        // Race guard: the old scratch may be deleted by poll/cleanup between
+        // the exists-check above and this cp. If cp fails, fall back to full sync.
         if (cb) cb("Reusing files from previous sync...");
-        dtn_.run(fmt::format("ssh {} {} 'mkdir -p {} && cp -a {}/. {}/'",
-                             ssh_opts, compute_node, scratch_path,
-                             state.last_sync_scratch, scratch_path));
+        auto cp_result = dtn_.run(fmt::format(
+            "ssh {} {} 'mkdir -p {} && cp -a {}/. {}/ 2>/dev/null && echo CP_OK || echo CP_FAIL'",
+            SSH_OPTS, compute_node, scratch_path,
+            state.last_sync_scratch, scratch_path));
 
-        // Delete old scratch now that it's been copied
+        // Delete old scratch regardless (it's either copied or gone)
         dtn_.run(fmt::format("ssh {} {} 'rm -rf {}'",
-                             ssh_opts, compute_node, state.last_sync_scratch));
+                             SSH_OPTS, compute_node, state.last_sync_scratch));
 
-        // Diff manifests
-        auto changed = diff_manifests(local_manifest, state.last_sync_manifest);
-
-        // Find deleted files
-        std::set<std::string> local_set;
-        for (const auto& e : local_manifest) local_set.insert(e.path);
-        std::vector<std::string> deleted;
-        for (const auto& e : state.last_sync_manifest) {
-            if (local_set.find(e.path) == local_set.end()) {
-                deleted.push_back(e.path);
-            }
-        }
-
-        if (!changed.empty() || !deleted.empty()) {
-            incremental_sync(compute_node, scratch_path, changed, deleted, cb);
+        if (cp_result.stdout_data.find("CP_FAIL") != std::string::npos) {
+            // Old scratch was deleted (race with cleanup) — full sync instead
+            if (cb) cb("Previous scratch gone, doing full sync...");
+            full_sync(compute_node, scratch_path, cb);
         } else {
-            if (cb) cb("All files up to date");
+            // Copy succeeded — only sync changed files
+            auto changed = diff_manifests(local_manifest, state.last_sync_manifest);
+
+            std::set<std::string> local_set;
+            for (const auto& e : local_manifest) local_set.insert(e.path);
+            std::vector<std::string> deleted;
+            for (const auto& e : state.last_sync_manifest) {
+                if (local_set.find(e.path) == local_set.end()) {
+                    deleted.push_back(e.path);
+                }
+            }
+
+            if (!changed.empty() || !deleted.empty()) {
+                incremental_sync(compute_node, scratch_path, changed, deleted, cb);
+            } else {
+                if (cb) cb("All files up to date");
+            }
         }
     } else if (can_reuse && scratch_path == state.last_sync_scratch) {
         // Same scratch path — just do incremental in place
@@ -378,4 +379,17 @@ void SyncManager::sync_to_scratch(const std::string& compute_node,
     state.last_sync_manifest = local_manifest;
     state.last_sync_node = compute_node;
     state.last_sync_scratch = scratch_path;
+
+    // Clean up stale scratch dirs from previous runs (crashes, edge cases).
+    // scratch_path is /tmp/{user}/{project}/{job_id} — delete any siblings
+    // under the same parent that aren't the current scratch.
+    fs::path scratch_parent = fs::path(scratch_path).parent_path().string();
+    std::string current_dir = fs::path(scratch_path).filename().string();
+    if (!scratch_parent.empty() && !current_dir.empty()) {
+        std::string cleanup_cmd = fmt::format(
+            "ssh {} {} 'for d in {}/*/; do b=$(basename \"$d\"); "
+            "[ \"$b\" != \"{}\" ] && rm -rf \"$d\"; done 2>/dev/null; true'",
+            SSH_OPTS, compute_node, scratch_parent.string(), current_dir);
+        dtn_.run(cleanup_cmd);
+    }
 }

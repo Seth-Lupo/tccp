@@ -1,5 +1,7 @@
 #include "job_manager.hpp"
 #include "job_log.hpp"
+#include <core/constants.hpp>
+#include <core/utils.hpp>
 #include <fmt/format.h>
 #include <sstream>
 #include <set>
@@ -28,12 +30,11 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
     }
 
     // Check REMOTE state (don't trust local completed flag)
-    const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3";
     std::string dtach_socket = fmt::format("/tmp/tccp_{}.sock", tj->job_id);
 
     std::string check_cmd = fmt::format(
         "ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
-        ssh_opts, tj->compute_node, dtach_socket);
+        SSH_OPTS_FAST, tj->compute_node, dtach_socket);
 
     auto check_result = dtn_.run(check_cmd);
     tccp_log_ssh("cancel:check-remote", check_cmd, check_result);
@@ -54,7 +55,7 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
     // Kill the dtach process
     std::string kill_cmd = fmt::format(
         "ssh {} {} 'fuser -k -9 {} 2>/dev/null'",
-        ssh_opts, tj->compute_node, dtach_socket);
+        SSH_OPTS_FAST, tj->compute_node, dtach_socket);
     auto kill_result = dtn_.run(kill_cmd);
     tccp_log_ssh("cancel:kill", kill_cmd, kill_result);
 
@@ -162,10 +163,9 @@ void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
             if (!tj.init_complete) continue;
 
             if (!tj.compute_node.empty()) {
-                const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3";
                 std::string sock = "/tmp/tccp_" + tj.job_id + ".sock";
                 auto check = dtn_.run(fmt::format("ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
-                                                  ssh_opts, tj.compute_node, sock));
+                                                  SSH_OPTS_FAST, tj.compute_node, sock));
 
                 if (check.stdout_data.find("DONE") != std::string::npos) {
                     tj.completed = true;
@@ -222,9 +222,13 @@ void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
 
 void JobManager::cleanup_compute_node(const TrackedJob& tj) {
     if (tj.compute_node.empty()) return;
-    const char* ssh_opts = "-o StrictHostKeyChecking=no -o BatchMode=yes";
-    std::string cmd = fmt::format("ssh {} {} 'rm -rf {} /tmp/tccp_{}.sock'",
-                                  ssh_opts, tj.compute_node, tj.scratch_path, tj.job_id);
+
+    // Only remove the dtach socket — keep the scratch directory alive so the
+    // next job on the same node can reuse the synced files (cp + incremental
+    // diff) instead of a full re-upload.  The scratch is cleaned up later by
+    // sync_to_scratch after it copies files to the new scratch.
+    std::string cmd = fmt::format("ssh {} {} 'rm -f /tmp/tccp_{}.sock'",
+                                  SSH_OPTS, tj.compute_node, tj.job_id);
     dtn_.run(cmd);
 }
 

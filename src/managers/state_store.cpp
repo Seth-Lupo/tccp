@@ -72,8 +72,11 @@ ProjectState StateStore::load() {
         state.last_sync_node = root["last_sync_node"].as<std::string>("");
         state.last_sync_scratch = root["last_sync_scratch"].as<std::string>("");
 
-    } catch (const std::exception&) {
-        // Corrupted state file — start fresh
+    } catch (const std::exception& e) {
+        // Corrupted state file — log and start fresh
+        std::ofstream log("/tmp/tccp_debug.log", std::ios::app);
+        if (log) log << "[StateStore] Corrupt state file " << state_path_.string()
+                     << ": " << e.what() << " — starting fresh\n";
         return ProjectState{};
     }
 

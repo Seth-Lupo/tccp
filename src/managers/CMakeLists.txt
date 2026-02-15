@@ -8,6 +8,7 @@ add_library(tccp_managers
     allocation_manager.cpp
     sync_manager.cpp
     gpu_discovery.cpp
+    tccp_service.cpp
 )
 
 target_include_directories(tccp_managers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

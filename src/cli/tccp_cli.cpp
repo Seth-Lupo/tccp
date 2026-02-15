@@ -16,12 +16,6 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 
-// Check if SLURM is responding (exit code 0 = healthy)
-static bool check_slurm_health(ClusterConnection& cluster) {
-    auto result = cluster.login().run("sinfo -h 2>&1");
-    return result.exit_code == 0;
-}
-
 TCCPCLI::TCCPCLI() : BaseCLI() {
     register_all_commands();
 }
@@ -32,13 +26,11 @@ void TCCPCLI::register_all_commands() {
     }, "Show this help message");
 
     add_command("quit", [](BaseCLI& cli, const std::string& arg) {
-        std::cout << theme::dim("Disconnecting...") << "\n";
-        exit(0);
+        cli.quit_requested_ = true;
     }, "Exit TCCP");
 
     add_command("exit", [](BaseCLI& cli, const std::string& arg) {
-        std::cout << theme::dim("Disconnecting...") << "\n";
-        exit(0);
+        cli.quit_requested_ = true;
     }, "Exit TCCP");
 
     add_command("clear", [](BaseCLI& cli, const std::string& arg) {
@@ -55,19 +47,19 @@ void TCCPCLI::register_all_commands() {
 #ifdef TCCP_DEV
     add_command("debug", [](BaseCLI& cli, const std::string& arg) {
         if (arg == "clean-state") {
-            if (!cli.state_store) {
+            if (!cli.service.state_store()) {
                 std::cout << theme::fail("No project loaded.");
                 return;
             }
             ProjectState empty;
-            cli.state_store->save(empty);
+            cli.service.state_store()->save(empty);
             // Reset in-memory state without destroying managers
             // (background init threads hold references to the managers)
-            if (cli.allocs) {
-                cli.allocs->state() = empty;
+            if (cli.service.alloc_manager()) {
+                cli.service.alloc_manager()->state() = empty;
             }
-            if (cli.jobs) {
-                cli.jobs->clear_tracked();
+            if (cli.service.job_manager()) {
+                cli.service.job_manager()->clear_tracked();
             }
             std::cout << theme::ok("State wiped. All allocations and jobs forgotten.");
         } else {
@@ -97,53 +89,45 @@ void TCCPCLI::run_connected_repl() {
     std::cout << theme::check("Project config loaded");
 
     // Reload config (preflight confirmed it's valid)
-    auto config_result = Config::load();
-    if (config_result.is_err()) {
-        std::cout << theme::fail(config_result.error) << "\n";
+    service.reload_config();
+    if (!service.has_config()) {
+        std::cout << theme::fail("Failed to load config") << "\n";
         return;
     }
-    config = config_result.value;
 
     // Connect
     std::cout << theme::section("Connecting");
-    cluster = std::make_unique<ClusterConnection>(config.value());
 
     auto callback = [](const std::string& msg) {
         std::cout << theme::dim("    " + msg) << "\n";
     };
 
-    auto result = cluster->connect(callback);
-    if (result.failed()) {
-        std::cout << theme::fail("Connection failed: " + result.stderr_data);
+    auto result = service.connect(callback);
+    if (result.is_err()) {
+        std::cout << theme::fail(result.error);
         std::cout << theme::dim("    If you're off campus, make sure the Tufts VPN is connected.") << "\n\n";
-        cluster.reset();
         return;
     }
     std::cout << theme::check("Connection is HEALTHY");
 
-    // Initialize managers
-    init_managers();
-
     // Check SLURM health before starting REPL
     std::cout << theme::section("Checking SLURM");
-    if (!check_slurm_health(*cluster)) {
+    if (!service.check_slurm_health()) {
         std::cout << theme::fail("SLURM is not responding.");
         std::cout << theme::dim("    Run 'exec sinfo' to test cluster connectivity.") << "\n";
         std::cout << theme::dim("    The cluster may be down or undergoing maintenance.") << "\n";
         std::cout << theme::dim("    Check for maintenance announcements from Tufts HPC.") << "\n\n";
         std::cout << theme::dim("    Try again later when the cluster is healthy.") << "\n\n";
-        cluster->disconnect();
-        cluster.reset();
-        clear_managers();
+        service.disconnect();
         return;
     }
     std::cout << theme::check("SLURM controller is UP");
     std::cout << "\n";
 
     std::cout << theme::section("Connected");
-    std::cout << theme::kv("DTN", config.value().dtn().host);
-    std::cout << theme::kv("Login", config.value().login().host);
-    std::cout << theme::kv("Project", config.value().project().name);
+    std::cout << theme::kv("DTN", service.config().dtn().host);
+    std::cout << theme::kv("Login", service.config().login().host);
+    std::cout << theme::kv("Project", service.config().project().name);
     std::cout << theme::divider();
     std::cout << theme::dim("    Type 'help' for commands, 'quit' to exit.") << "\n\n";
 
@@ -151,7 +135,7 @@ void TCCPCLI::run_connected_repl() {
     std::string line;
     while (true) {
         // Check connection health before prompting
-        if (!cluster || !cluster->check_alive()) {
+        if (!service.check_alive()) {
             std::cout << "\n" << theme::divider();
             std::cout << theme::fail("Connection to cluster lost.");
             std::cout << theme::dim("    The SSH session to the DTN has ended.") << "\n";
@@ -163,7 +147,7 @@ void TCCPCLI::run_connected_repl() {
         }
 
         // Check SLURM health before each command
-        if (!check_slurm_health(*cluster)) {
+        if (!service.check_slurm_health()) {
             std::cout << "\n" << theme::divider();
             std::cout << theme::fail("SLURM is not responding.");
             std::cout << theme::dim("    The cluster has become unavailable.") << "\n";
@@ -174,9 +158,9 @@ void TCCPCLI::run_connected_repl() {
 
         // Poll for completed jobs (throttled to every 30s)
         auto now = std::chrono::steady_clock::now();
-        if (jobs && (now - last_poll_time_) >= std::chrono::seconds(30)) {
+        if (service.job_manager() && (now - last_poll_time_) >= std::chrono::seconds(30)) {
             last_poll_time_ = now;
-            jobs->poll([this](const TrackedJob& tj) {
+            service.poll_jobs([this](const TrackedJob& tj) {
                 std::cout << "\n" << theme::dim(
                     "Job '" + tj.job_name + "' (" + tj.slurm_id + ") completed.") << "\n";
 
@@ -184,7 +168,7 @@ void TCCPCLI::run_connected_repl() {
                 auto cb = [](const std::string& msg) {
                     std::cout << theme::dim(msg) << "\n";
                 };
-                jobs->return_output(tj.job_id, cb);
+                service.return_output(tj.job_id, cb);
             });
         }
 
@@ -215,8 +199,40 @@ void TCCPCLI::run_connected_repl() {
 
         execute_command(command, args);
 
+        // Handle quit/exit request
+        if (quit_requested_) {
+            int init_count = service.initializing_job_count();
+            if (init_count > 0) {
+                std::cout << "\n" << theme::yellow(fmt::format(
+                    "    {} job{} still initializing.", init_count,
+                    init_count == 1 ? " is" : "s are")) << "\n";
+                std::cout << theme::dim("    Exiting will cancel them and release their allocations.") << "\n";
+                std::cout << theme::dim("    Running jobs will continue on the cluster.") << "\n\n";
+                std::cout << theme::color::BROWN << "    Continue? (y/n) " << theme::color::RESET;
+                std::cout.flush();
+
+                std::string answer;
+                std::getline(std::cin, answer);
+                if (answer.empty() || (answer[0] != 'y' && answer[0] != 'Y')) {
+                    quit_requested_ = false;
+                    std::cout << theme::dim("    Exit canceled.") << "\n\n";
+                    continue;
+                }
+
+                auto cb = [](const std::string& msg) {
+                    std::cout << theme::dim("    " + msg) << "\n";
+                };
+                std::cout << "\n";
+                service.graceful_shutdown(cb);
+            } else {
+                std::cout << theme::dim("Disconnecting...") << "\n";
+                service.disconnect();
+            }
+            break;
+        }
+
         // Check connection after each command
-        if (cluster && !cluster->check_alive()) {
+        if (service.is_connected() && !service.check_alive()) {
             std::cout << "\n" << theme::divider();
             std::cout << theme::fail("Connection to cluster lost.");
             std::cout << theme::dim("    The SSH session to the DTN has ended.") << "\n";
@@ -228,7 +244,7 @@ void TCCPCLI::run_connected_repl() {
         }
 
         // Check SLURM health after each command
-        if (cluster && !check_slurm_health(*cluster)) {
+        if (service.is_connected() && !service.check_slurm_health()) {
             std::cout << "\n" << theme::divider();
             std::cout << theme::fail("SLURM stopped responding.");
             std::cout << theme::dim("    The cluster has become unavailable.") << "\n";
@@ -238,11 +254,18 @@ void TCCPCLI::run_connected_repl() {
         }
     }
 
-    // Cleanup
-    clear_managers();
-    if (cluster) {
-        cluster->disconnect();
-        cluster.reset();
+    // Cleanup — if we broke out of the loop without quit_requested_ (Ctrl+D,
+    // connection loss), still do graceful shutdown for any init jobs.
+    if (!quit_requested_) {
+        int init_count = service.initializing_job_count();
+        if (init_count > 0) {
+            auto cb = [](const std::string& msg) {
+                std::cout << theme::dim("    " + msg) << "\n";
+            };
+            service.graceful_shutdown(cb);
+        } else {
+            service.disconnect();
+        }
     }
 }
 

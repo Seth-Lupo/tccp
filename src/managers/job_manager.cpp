@@ -2,7 +2,8 @@
 #include "job_log.hpp"
 #include "gpu_discovery.hpp"
 #include <environments/environment.hpp>
-#include <core/credentials.hpp>
+#include <core/constants.hpp>
+#include <core/utils.hpp>
 #include <fmt/format.h>
 #include <chrono>
 #include <thread>
@@ -12,11 +13,6 @@
 #include <filesystem>
 
 namespace fs = std::filesystem;
-
-static std::string get_cluster_username() {
-    auto result = CredentialManager::instance().get("user");
-    return result.is_ok() ? result.value : "unknown";
-}
 
 // ── Constructor ────────────────────────────────────────────
 
@@ -71,8 +67,7 @@ void JobManager::clear_tracked() {
 // ── Path helpers ───────────────────────────────────────────
 
 std::string JobManager::persistent_base() const {
-    return fmt::format("/cluster/home/{}/tccp/projects/{}",
-                       username_, config_.project().name);
+    return fmt::format(REMOTE_PROJECT_BASE, username_, config_.project().name);
 }
 
 std::string JobManager::job_output_dir(const std::string& job_id) const {
@@ -84,11 +79,11 @@ std::string JobManager::env_dir() const {
 }
 
 std::string JobManager::container_cache() const {
-    return fmt::format("/cluster/home/{}/tccp/container-cache", username_);
+    return fmt::format(REMOTE_CONTAINER_CACHE, username_);
 }
 
 std::string JobManager::scratch_dir(const std::string& job_id) const {
-    return fmt::format("/tmp/{}/{}/{}", username_, config_.project().name, job_id);
+    return fmt::format(REMOTE_SCRATCH_DIR, username_, config_.project().name, job_id);
 }
 
 std::string JobManager::generate_job_id(const std::string& job_name) const {
@@ -188,7 +183,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
         const auto& proj = config_.project();
         auto it = proj.jobs.find(job_name);
         std::string job_time = (it != proj.jobs.end() && !it->second.time.empty())
-                               ? it->second.time : "1:00:00";
+                               ? it->second.time : DEFAULT_JOB_TIME;
         int job_minutes = AllocationManager::parse_time_minutes(job_time);
 
         // Resolve GPU partition early

@@ -5,14 +5,12 @@
 #include <core/config.hpp>
 
 static void do_disconnect(BaseCLI& cli, const std::string& arg) {
-    if (!cli.cluster) {
+    if (!cli.service.is_connected()) {
         std::cout << theme::error("Not connected.");
         return;
     }
 
-    cli.clear_managers();
-    cli.cluster->disconnect();
-    cli.cluster.reset();
+    cli.service.disconnect();
     std::cout << theme::dim("    Disconnecting...") << "\n";
     exit(0);
 }
@@ -28,15 +26,15 @@ static void do_status(BaseCLI& cli, const std::string& arg) {
     }
 
     // Project
-    if (cli.config.has_value()) {
-        std::cout << theme::kv("Project", cli.config.value().project().name);
-        std::cout << theme::kv("Remote", cli.config.value().project().remote_dir);
+    if (cli.service.has_config()) {
+        std::cout << theme::kv("Project", cli.service.config().project().name);
+        std::cout << theme::kv("Remote", cli.service.config().project().remote_dir);
     } else {
         std::cout << theme::error("Project not registered");
     }
 
     // Connection
-    if (cli.cluster && cli.cluster->is_connected()) {
+    if (cli.service.is_connected()) {
         std::cout << theme::kv("DTN", "connected");
         std::cout << theme::kv("Login", "connected");
     } else {

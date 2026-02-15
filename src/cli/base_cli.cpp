@@ -4,10 +4,7 @@
 #include <fmt/format.h>
 
 BaseCLI::BaseCLI() {
-    auto config_result = Config::load();
-    if (config_result.is_ok()) {
-        config = config_result.value;
-    }
+    // Config is loaded by TccpService constructor
 }
 
 void BaseCLI::add_command(const std::string& name,
@@ -17,7 +14,7 @@ void BaseCLI::add_command(const std::string& name,
 }
 
 bool BaseCLI::require_config() {
-    if (!config.has_value()) {
+    if (!service.has_config()) {
         std::cout << theme::fail("Project not configured. Run 'tccp init' first.");
         return false;
     }
@@ -28,30 +25,11 @@ bool BaseCLI::require_connection() {
     if (!require_config()) {
         return false;
     }
-    if (!cluster || !cluster->is_connected()) {
+    if (!service.is_connected()) {
         std::cout << theme::fail("Not connected.");
         return false;
     }
     return true;
-}
-
-void BaseCLI::init_managers() {
-    if (config && cluster && cluster->is_connected()) {
-        state_store = std::make_unique<StateStore>(config.value().project().name);
-        allocs = std::make_unique<AllocationManager>(
-            config.value(), cluster->dtn(), cluster->login(), *state_store);
-        allocs->reconcile();
-        sync = std::make_unique<SyncManager>(config.value(), cluster->dtn());
-        jobs = std::make_unique<JobManager>(
-            config.value(), cluster->dtn(), cluster->login(), *allocs, *sync);
-    }
-}
-
-void BaseCLI::clear_managers() {
-    jobs.reset();
-    sync.reset();
-    allocs.reset();
-    state_store.reset();
 }
 
 void BaseCLI::execute_command(const std::string& command, const std::string& args) {
@@ -118,20 +96,20 @@ std::string BaseCLI::get_prompt_string() const {
         return std::string("\001") + code + std::string("\002");
     };
 
-    if (!config.has_value()) {
+    if (!service.has_config()) {
         return rl_esc(theme::color::BROWN) + "tccp"
              + rl_esc(theme::color::RESET) + "> ";
-    } else if (cluster && cluster->is_connected()) {
+    } else if (service.is_connected()) {
         return rl_esc(theme::color::BROWN) + "tccp"
              + rl_esc(theme::color::RESET) + ":"
-             + rl_esc(theme::color::BLUE) + config.value().project().name
+             + rl_esc(theme::color::BLUE) + service.config().project().name
              + rl_esc(theme::color::RESET) + "@"
              + rl_esc(theme::color::GREEN) + "cluster"
              + rl_esc(theme::color::RESET) + "> ";
     } else {
         return rl_esc(theme::color::BROWN) + "tccp"
              + rl_esc(theme::color::RESET) + ":"
-             + rl_esc(theme::color::BLUE) + config.value().project().name
+             + rl_esc(theme::color::BLUE) + service.config().project().name
              + rl_esc(theme::color::RESET) + "> ";
     }
 }

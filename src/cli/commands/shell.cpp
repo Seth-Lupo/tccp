@@ -12,7 +12,7 @@ static void do_exec(BaseCLI& cli, const std::string& arg) {
         std::cout << "Usage: exec <command>\n";
         return;
     }
-    auto result = cli.cluster->login().run(arg);
+    auto result = cli.service.exec_remote(arg);
     std::cout << result.stdout_data;
     if (!result.stderr_data.empty()) {
         std::cerr << result.stderr_data;

@@ -5,19 +5,12 @@
 #include <chrono>
 #include <ctime>
 #include <ssh/connection.hpp>
+#include <core/utils.hpp>
 #include <fmt/format.h>
 
 static const char* TCCP_LOG_PATH = "/tmp/tccp_debug.log";
 
-inline std::string now_iso() {
-    auto now = std::chrono::system_clock::now();
-    auto t = std::chrono::system_clock::to_time_t(now);
-    struct tm tm_buf;
-    localtime_r(&t, &tm_buf);
-    char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm_buf);
-    return std::string(buf);
-}
+// now_iso() is provided by core/utils.hpp — no duplicate here.
 
 inline void tccp_log(const std::string& msg) {
     std::ofstream out(TCCP_LOG_PATH, std::ios::app);

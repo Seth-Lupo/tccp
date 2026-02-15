@@ -1,4 +1,6 @@
 #include "connection.hpp"
+#include <core/constants.hpp>
+#include <core/utils.hpp>
 #include <libssh2.h>
 #include <fstream>
 #include <sstream>
@@ -20,7 +22,7 @@ SSHResult SSHConnection::run(const std::string& command) {
     }
 
     // Drain any stale data sitting in the channel buffer
-    char drain[4096];
+    char drain[SSH_DRAIN_BUF_SIZE];
     while (libssh2_channel_read(channel_, drain, sizeof(drain)) > 0) {}
 
     // Send command wrapped in BEGIN/DONE markers.
@@ -34,44 +36,49 @@ SSHResult SSHConnection::run(const std::string& command) {
 
     int total = full_cmd.length();
     int sent = 0;
+    int write_retries = 0;
     while (sent < total) {
         int w = libssh2_channel_write(channel_, full_cmd.c_str() + sent, total - sent);
         if (w == LIBSSH2_ERROR_EAGAIN) {
+            if (++write_retries > 100) {
+                return SSHResult{-1, "", "Write stalled (EAGAIN for too long)"};
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
         if (w < 0) {
-            return SSHResult{-1, "", "Failed to send command"};
+            return SSHResult{-1, "", "Failed to send command (channel write error)"};
         }
+        write_retries = 0;
         sent += w;
     }
 
     // Read until we see the marker
     std::string output;
-    char buf[4096];
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    char buf[SSH_READ_BUF_SIZE];
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(SSH_CMD_TIMEOUT_SECS);
+    int consecutive_eagain = 0;
 
     while (std::chrono::steady_clock::now() < deadline) {
         int n = libssh2_channel_read(channel_, buf, sizeof(buf) - 1);
         if (n > 0) {
+            consecutive_eagain = 0;
             output.append(buf, n);
             // Check if DONE marker has arrived
             auto done_pos = output.find(done_marker);
             if (done_pos != std::string::npos) {
-                // Parse exit code after DONE marker
+                // Parse exit code after DONE marker (safe_stoi avoids exception)
                 int exit_code = 0;
                 auto code_start = done_pos + done_marker.length();
                 if (code_start < output.length()) {
                     std::string code_str = output.substr(code_start);
                     auto num_start = code_str.find_first_of("0123456789");
                     if (num_start != std::string::npos) {
-                        exit_code = std::stoi(code_str.substr(num_start));
+                        exit_code = safe_stoi(code_str.substr(num_start), 0);
                     }
                 }
 
                 // Extract text between BEGIN and DONE markers.
-                // The BEGIN marker line (including its trailing newline)
-                // cleanly separates the command echo from real output.
                 std::string clean;
                 auto begin_pos = output.find(begin_marker);
                 if (begin_pos != std::string::npos) {
@@ -98,14 +105,19 @@ SSHResult SSHConnection::run(const std::string& command) {
                 return SSHResult{exit_code, clean, ""};
             }
         } else if (n == LIBSSH2_ERROR_EAGAIN || n == 0) {
+            if (++consecutive_eagain > 500) {
+                // 500 * 10ms = 5s of pure EAGAIN with no data — likely stalled
+                return SSHResult{-1, output, "Channel stalled (no data for 5s)"};
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         } else {
-            break;
+            // Negative return other than EAGAIN = channel error
+            return SSHResult{-1, output, "SSH channel read error"};
         }
     }
 
     // Timeout or error — return what we have
-    return SSHResult{-1, output, "Command timed out or channel error"};
+    return SSHResult{-1, output, "Command timed out after " + std::to_string(SSH_CMD_TIMEOUT_SECS) + "s"};
 }
 
 SSHResult SSHConnection::upload(const fs::path& local, const std::string& remote) {

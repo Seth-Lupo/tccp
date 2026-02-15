@@ -39,12 +39,24 @@ elseif(UNIX AND NOT APPLE)
     endif()
 endif()
 
+# Test option
+option(TCCP_BUILD_TESTS "Build unit tests" OFF)
+
 # Source subdirectories
 add_subdirectory(src/core)
 add_subdirectory(src/ssh)
 add_subdirectory(src/environments)
 add_subdirectory(src/managers)
 add_subdirectory(src/cli)
+
+# libtccp: interface library bundling all core libraries (for tests and future frontends)
+add_library(libtccp INTERFACE)
+target_link_libraries(libtccp INTERFACE
+    tccp_core
+    tccp_ssh
+    tccp_environments
+    tccp_managers
+)
 
 # Main executable
 add_executable(tccp src/main.cpp)
@@ -76,6 +88,12 @@ elseif(UNIX)
         target_link_libraries(tccp PRIVATE ${LIBSECRET_LIBRARIES})
     endif()
     target_link_libraries(tccp PRIVATE pthread)
+endif()
+
+# Tests
+if(TCCP_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
 endif()
 
 # Installation
