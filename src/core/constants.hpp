@@ -7,6 +7,7 @@ constexpr const char* SSH_OPTS_FAST = "-o StrictHostKeyChecking=no -o BatchMode=
 
 // ── Timeouts ────────────────────────────────────────────────
 constexpr int SSH_CMD_TIMEOUT_SECS       = 300;   // Max time for a single SSH command
+constexpr int CONTAINER_PULL_TIMEOUT_SECS = 1800;  // 30 min for container pull
 constexpr int ALLOC_WAIT_POLL_SECS       = 5;     // Seconds between allocation state polls
 constexpr int ALLOC_WAIT_MAX_ITERS       = 120;   // Max iterations (120 * 5s = 10 min)
 constexpr int ALLOC_WAIT_REPORT_INTERVAL = 2;     // Report progress every N iterations
@@ -30,6 +31,9 @@ constexpr const char* DEFAULT_MEMORY     = "4G";
 constexpr const char* DEFAULT_PARTITION  = "batch";
 constexpr const char* DEFAULT_ALLOC_TIME = "4:00:00";
 constexpr const char* DEFAULT_JOB_TIME   = "1:00:00";
+
+// ── Cache management ──────────────────────────────────────────
+constexpr int64_t CACHE_SOFT_CAP_BYTES = 20LL * 1024 * 1024 * 1024;  // 20 GB
 
 // ── Remote path templates ───────────────────────────────────
 // Use fmt::format with these: fmt::format(REMOTE_PROJECT_BASE, username, project_name)

@@ -8,6 +8,7 @@ add_library(tccp_managers
     allocation_manager.cpp
     sync_manager.cpp
     gpu_discovery.cpp
+    cache_manager.cpp
     tccp_service.cpp
 )
 

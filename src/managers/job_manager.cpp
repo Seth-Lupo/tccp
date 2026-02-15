@@ -17,9 +17,9 @@ namespace fs = std::filesystem;
 // ── Constructor ────────────────────────────────────────────
 
 JobManager::JobManager(const Config& config, SSHConnection& dtn, SSHConnection& login,
-                       AllocationManager& allocs, SyncManager& sync)
+                       AllocationManager& allocs, SyncManager& sync, CacheManager& cache)
     : config_(config), dtn_(dtn), login_(login),
-      allocs_(allocs), sync_(sync),
+      allocs_(allocs), sync_(sync), cache_(cache),
       username_(get_cluster_username()) {
 
     // Restore tracked jobs from persistent state
@@ -157,13 +157,18 @@ Result<TrackedJob> JobManager::run(const std::string& job_name, StatusCallback c
 void JobManager::background_init_thread(std::string job_id, std::string job_name) {
     tccp_log(fmt::format("INIT THREAD START: job_id={}", job_id));
 
+    auto t0 = std::chrono::steady_clock::now();
     auto log_to_file = [&](const std::string& msg) {
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        std::string ts = (ms < 1000) ? fmt::format("{}ms", ms) : fmt::format("{:.1f}s", ms / 1000.0);
+        std::string stamped = fmt::format("[{}] {}", ts, msg);
         std::string init_log = "/tmp/tccp_init_" + job_id + ".log";
         std::ofstream f(init_log, std::ios::app);
         if (f) {
-            f << msg << "\n";
+            f << stamped << "\n";
         }
-        tccp_log(fmt::format("INIT: {}", msg));
+        tccp_log(fmt::format("INIT: {}", stamped));
     };
 
     auto check_canceled = [&]() -> bool {
@@ -250,7 +255,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
             throw std::runtime_error("Canceled during initialization");
         }
 
-        ensure_environment(log_to_file);
+        ensure_environment(alloc->node, log_to_file);
 
         if (check_canceled()) {
             log_to_file("Canceled during environment setup");

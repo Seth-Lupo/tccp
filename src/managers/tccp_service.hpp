@@ -10,6 +10,7 @@
 #include "state_store.hpp"
 #include "allocation_manager.hpp"
 #include "sync_manager.hpp"
+#include "cache_manager.hpp"
 #include "job_manager.hpp"
 
 // Pure data structs for UI consumption — no manager dependencies needed.
@@ -125,6 +126,7 @@ private:
     std::unique_ptr<StateStore> state_store_;
     std::unique_ptr<AllocationManager> allocs_;
     std::unique_ptr<SyncManager> sync_;
+    std::unique_ptr<CacheManager> cache_;
     std::unique_ptr<JobManager> jobs_;
 
     void init_managers();

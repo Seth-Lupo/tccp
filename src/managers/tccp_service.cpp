@@ -290,13 +290,15 @@ void TccpService::init_managers() {
             config_.value(), cluster_->dtn(), cluster_->login(), *state_store_);
         allocs_->reconcile();
         sync_ = std::make_unique<SyncManager>(config_.value(), cluster_->dtn());
+        cache_ = std::make_unique<CacheManager>(cluster_->dtn(), get_cluster_username());
         jobs_ = std::make_unique<JobManager>(
-            config_.value(), cluster_->dtn(), cluster_->login(), *allocs_, *sync_);
+            config_.value(), cluster_->dtn(), cluster_->login(), *allocs_, *sync_, *cache_);
     }
 }
 
 void TccpService::clear_managers() {
     jobs_.reset();
+    cache_.reset();
     sync_.reset();
     allocs_.reset();
     state_store_.reset();

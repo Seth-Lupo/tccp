@@ -15,7 +15,7 @@ bool SSHConnection::is_active() const {
     return channel_ != nullptr;
 }
 
-SSHResult SSHConnection::run(const std::string& command) {
+SSHResult SSHConnection::run(const std::string& command, int timeout_secs) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!channel_) {
         return SSHResult{-1, "", "No channel available"};
@@ -56,7 +56,8 @@ SSHResult SSHConnection::run(const std::string& command) {
     // Read until we see the marker
     std::string output;
     char buf[SSH_READ_BUF_SIZE];
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(SSH_CMD_TIMEOUT_SECS);
+    int effective_timeout = (timeout_secs > 0) ? timeout_secs : SSH_CMD_TIMEOUT_SECS;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(effective_timeout);
     int consecutive_eagain = 0;
 
     while (std::chrono::steady_clock::now() < deadline) {
@@ -105,8 +106,10 @@ SSHResult SSHConnection::run(const std::string& command) {
                 return SSHResult{exit_code, clean, ""};
             }
         } else if (n == LIBSSH2_ERROR_EAGAIN || n == 0) {
-            if (++consecutive_eagain > 500) {
-                // 500 * 10ms = 5s of pure EAGAIN with no data — likely stalled
+            // Stall detection: for default-timeout commands, bail after 5s of silence.
+            // For explicit long timeouts (e.g. container pull), skip stall detection
+            // and rely solely on the deadline — long silence is expected.
+            if (timeout_secs == 0 && ++consecutive_eagain > 500) {
                 return SSHResult{-1, output, "Channel stalled (no data for 5s)"};
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -117,7 +120,7 @@ SSHResult SSHConnection::run(const std::string& command) {
     }
 
     // Timeout or error — return what we have
-    return SSHResult{-1, output, "Command timed out after " + std::to_string(SSH_CMD_TIMEOUT_SECS) + "s"};
+    return SSHResult{-1, output, "Command timed out after " + std::to_string(effective_timeout) + "s"};
 }
 
 SSHResult SSHConnection::upload(const fs::path& local, const std::string& remote) {

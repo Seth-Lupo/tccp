@@ -3,6 +3,7 @@
 #include <environments/environment.hpp>
 #include <core/constants.hpp>
 #include <fmt/format.h>
+#include <chrono>
 
 // ── Directory setup ────────────────────────────────────────
 
@@ -18,13 +19,26 @@ void JobManager::ensure_dirs(const std::string& job_id, StatusCallback cb) {
     dtn_.run(cmd);
 }
 
-void JobManager::ensure_environment(StatusCallback cb) {
+void JobManager::ensure_environment(const std::string& compute_node, StatusCallback cb) {
     // Skip check if already validated this session
     if (environment_checked_) {
         return;
     }
 
-    if (cb) cb("Checking environment...");
+    auto t0 = std::chrono::steady_clock::now();
+    auto elapsed = [&]() -> std::string {
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        if (ms < 1000) return fmt::format("{}ms", ms);
+        return fmt::format("{:.1f}s", ms / 1000.0);
+    };
+
+    // Evict stale cache items if storage exceeds soft cap
+    const auto& env_info = get_environment(config_.project().type);
+    if (cb) cb(fmt::format("[{}] Checking cluster storage usage...", elapsed()));
+    cache_.ensure_within_cap(config_.project().name, env_info.sif_filename, cb);
+
+    if (cb) cb(fmt::format("[{}] Checking environment components...", elapsed()));
 
     const auto& env = get_environment(config_.project().type);
     std::string cc = container_cache();
@@ -48,58 +62,95 @@ void JobManager::ensure_environment(StatusCallback cb) {
     bool need_dtach = result.stdout_data.find("DTACH_MISSING") != std::string::npos;
 
     // Show what we found
-    if (!need_image && cb) cb("Container image: OK");
-    if (!need_venv && cb) cb("Python venv: OK");
-    if (!need_dtach && cb) cb("dtach: OK");
+    if (cb) {
+        if (!need_image) cb(fmt::format("[{}] Container image ({}): found", elapsed(), env.sif_filename));
+        else cb(fmt::format("[{}] Container image ({}): MISSING — will pull", elapsed(), env.sif_filename));
+
+        if (!need_venv) cb(fmt::format("[{}] Python venv: found", elapsed()));
+        else cb(fmt::format("[{}] Python venv: MISSING — will create", elapsed()));
+
+        if (!need_dtach) cb(fmt::format("[{}] dtach binary: found", elapsed()));
+        else cb(fmt::format("[{}] dtach binary: MISSING — will build", elapsed()));
+    }
 
     // Only load modules if we need to create something
     if (need_image || need_venv) {
-        if (cb) cb("Loading Singularity module...");
+        if (cb) cb(fmt::format("[{}] Loading Singularity/Apptainer module...", elapsed()));
         dtn_.run("module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true");
+        if (cb) cb(fmt::format("[{}] Module loaded", elapsed()));
     }
 
-    // Pull container image if missing
+    // Pull container image if missing — runs on compute node via SSH hop
+    // through DTN. Compute node /tmp is large and not quota-limited, unlike
+    // DTN /tmp (often full) or home dir (30GB quota).
     if (need_image) {
-        if (cb) cb(fmt::format("Pulling container image {} (first time only)...", docker_uri));
-        dtn_.run(fmt::format("mkdir -p {}/images {}/cache {}/tmp", cc, cc, cc));
+        if (cb) cb(fmt::format("[{}] Pulling container on {}: {} (this may take 5-15 min)...",
+                               elapsed(), compute_node, docker_uri));
+        dtn_.run(fmt::format("mkdir -p {}/images", cc));
+        std::string pull_cache = fmt::format("/tmp/{}/singularity-cache", username_);
+        std::string pull_tmp = fmt::format("/tmp/{}/singularity-tmp", username_);
         std::string pull_cmd = fmt::format(
-            "SINGULARITY_CACHEDIR={0}/cache "
-            "SINGULARITY_TMPDIR={0}/tmp "
-            "singularity pull {1} {2}", cc, image, docker_uri);
-        auto pull_result = dtn_.run(pull_cmd);
-        // Verify the image was actually pulled
+            "ssh {} {} '"
+            "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
+            "mkdir -p {} {}; "
+            "SINGULARITY_CACHEDIR={} SINGULARITY_TMPDIR={} singularity pull {} {}; "
+            "rm -rf {} {}'",
+            SSH_OPTS, compute_node,
+            pull_cache, pull_tmp,
+            pull_cache, pull_tmp, image, docker_uri,
+            pull_cache, pull_tmp);
+        auto pull_result = dtn_.run(pull_cmd, CONTAINER_PULL_TIMEOUT_SECS);
+        if (pull_result.exit_code != 0 && !pull_result.stderr_data.empty()) {
+            throw std::runtime_error(fmt::format("Container pull failed ({}): {}",
+                                                 pull_result.stderr_data, pull_result.get_output()));
+        }
+        if (cb) cb(fmt::format("[{}] Container pull finished, verifying...", elapsed()));
+        // Verify the image was actually pulled (check from DTN — NFS-visible)
         auto img_check = dtn_.run("test -f " + image + " && echo IMG_OK || echo IMG_FAIL");
         if (img_check.stdout_data.find("IMG_FAIL") != std::string::npos) {
             throw std::runtime_error(fmt::format("Container pull failed: {}", pull_result.get_output()));
         }
-        if (cb) cb("Container image: OK");
+        // Report image size
+        auto sz = dtn_.run(fmt::format("du -sh {} 2>/dev/null | cut -f1", image));
+        std::string size_str = sz.stdout_data;
+        while (!size_str.empty() && (size_str.back() == '\n' || size_str.back() == '\r'))
+            size_str.pop_back();
+        if (cb) cb(fmt::format("[{}] Container image ready ({})", elapsed(), size_str.empty() ? "?" : size_str));
     }
 
     // Create venv if missing
     if (need_venv) {
-        if (cb) cb("Creating Python virtual environment...");
+        if (cb) cb(fmt::format("[{}] Creating Python venv ({}site-packages)...",
+                               elapsed(), gpu ? "with system " : ""));
         std::string base = persistent_base();
-        // For GPU types (pytorch, etc.), use --system-site-packages so the
-        // container's pre-installed packages (PyTorch, CUDA, etc.) are visible
         std::string venv_flags = gpu ? "--system-site-packages " : "";
         std::string nv_flag = gpu ? "--nv " : "";
+        // Set TMPDIR so pip writes temp files to a namespaced location
+        // instead of polluting the DTN's /tmp with orphan wheel dirs.
+        std::string pip_tmp = fmt::format("/tmp/{}/tccp-pip-tmp", username_);
+        dtn_.run(fmt::format("mkdir -p {}", pip_tmp));
         std::string venv_cmd = fmt::format(
-            "singularity exec {}--bind {}:{} {} python -m venv {}{}",
-            nv_flag, base, base, image, venv_flags, venv);
+            "TMPDIR={} singularity exec {}--bind {}:{} {} python -m venv {}{}",
+            pip_tmp, nv_flag, base, base, image, venv_flags, venv);
         dtn_.run(venv_cmd);
-        if (cb) cb("Python venv: OK");
+        dtn_.run(fmt::format("rm -rf {} 2>/dev/null; true", pip_tmp));
+        if (cb) cb(fmt::format("[{}] Python venv created", elapsed()));
     }
 
     // Build dtach if missing
     if (need_dtach) {
-        if (cb) cb("Building dtach...");
+        if (cb) cb(fmt::format("[{}] Building dtach...", elapsed()));
         ensure_dtach(cb);
-        if (cb) cb("dtach: OK");
+        if (cb) cb(fmt::format("[{}] dtach ready", elapsed()));
     }
 
     // Mark as checked for this session
     environment_checked_ = true;
-    if (cb) cb("Environment OK");
+
+    // Touch LRU timestamps on the container and env we just validated
+    cache_.touch_used(image, env_dir());
+
+    if (cb) cb(fmt::format("[{}] Environment ready", elapsed()));
 }
 
 void JobManager::ensure_dtach(StatusCallback cb) {
@@ -127,7 +178,7 @@ void JobManager::ensure_dtach(StatusCallback cb) {
         }
     }
 
-    if (cb) cb("Building dtach (first time only)...");
+    if (cb) cb("Downloading dtach source...");
 
     std::string build_dir = tccp_home + "/dtach-build";
     dtn_.run("mkdir -p " + tccp_home + "/bin");
@@ -146,6 +197,7 @@ void JobManager::ensure_dtach(StatusCallback cb) {
         }
     }
 
+    if (cb) cb("Compiling dtach...");
     auto build = dtn_.run("cd " + build_dir + " && cc -o dtach dtach.c master.c attach.c -lutil 2>&1");
     if (build.exit_code != 0) {
         if (cb) cb("Direct compile failed, trying configure/make...");
@@ -156,12 +208,13 @@ void JobManager::ensure_dtach(StatusCallback cb) {
         }
     }
 
+    if (cb) cb("Installing dtach binary...");
     dtn_.run("cp " + build_dir + "/dtach " + bin + " && chmod +x " + bin);
     dtn_.run("rm -rf " + build_dir);
 
     auto verify = dtn_.run("test -x " + bin + " && echo DTACH_OK || echo DTACH_FAIL");
     if (verify.stdout_data.find("DTACH_OK") != std::string::npos) {
-        if (cb) cb("dtach built successfully");
+        if (cb) cb("dtach compiled and installed");
     } else {
         throw std::runtime_error("Failed to install dtach binary");
     }

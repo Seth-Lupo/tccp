@@ -14,7 +14,7 @@ class SSHConnection {
 public:
     explicit SSHConnection(LIBSSH2_CHANNEL* channel);
 
-    SSHResult run(const std::string& command);
+    SSHResult run(const std::string& command, int timeout_secs = 0);
     SSHResult upload(const fs::path& local, const std::string& remote);
     SSHResult download(const std::string& remote, const fs::path& local);
 
