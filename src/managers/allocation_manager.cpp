@@ -120,9 +120,22 @@ void AllocationManager::reconcile(StatusCallback cb) {
     persist();
 }
 
-AllocationState* AllocationManager::find_free(int required_minutes,
-                                               const SlurmDefaults& required_resources,
-                                               StatusCallback cb) {
+AllocationState* AllocationManager::claim_free(int required_minutes,
+                                                const SlurmDefaults& required_resources,
+                                                const std::string& job_id,
+                                                StatusCallback cb) {
+    std::lock_guard<std::mutex> lock(alloc_mutex_);
+    auto* alloc = find_free_unlocked(required_minutes, required_resources, cb);
+    if (alloc) {
+        alloc->active_job_id = job_id;
+        persist();
+    }
+    return alloc;
+}
+
+AllocationState* AllocationManager::find_free_unlocked(int required_minutes,
+                                                        const SlurmDefaults& required_resources,
+                                                        StatusCallback cb) {
     if (state_.allocations.empty()) {
         if (cb) cb("No existing allocations to reuse");
         return nullptr;
@@ -135,6 +148,7 @@ AllocationState* AllocationManager::find_free(int required_minutes,
 
     // First pass: clear stale active_job_ids (job completed but release_job wasn't
     // called properly, e.g. due to crash or previous bugs)
+    bool cleared_stale = false;
     for (auto& alloc : state_.allocations) {
         if (alloc.active_job_id.empty()) continue;
         bool job_still_active = false;
@@ -148,9 +162,10 @@ AllocationState* AllocationManager::find_free(int required_minutes,
             if (cb) cb(fmt::format("  Clearing stale job ref on alloc {} (job {} done)",
                                    alloc.slurm_id, alloc.active_job_id));
             alloc.active_job_id.clear();
-            persist();
+            cleared_stale = true;
         }
     }
+    if (cleared_stale) persist();
 
     // Second pass: find a compatible idle allocation
     for (auto& alloc : state_.allocations) {
@@ -208,10 +223,21 @@ AllocationState* AllocationManager::find_by_id(const std::string& slurm_id) {
     return nullptr;
 }
 
-AllocationState* AllocationManager::find_pending() {
+AllocationState* AllocationManager::find_pending(const SlurmDefaults& required_resources) {
     for (auto& alloc : state_.allocations) {
         if (alloc.active_job_id.empty() && alloc.node.empty()) {
-            return &alloc;
+            // Check resource compatibility before returning
+            SlurmDefaults alloc_res;
+            alloc_res.partition = alloc.partition;
+            alloc_res.nodes = alloc.nodes;
+            alloc_res.cpus_per_task = alloc.cpus;
+            alloc_res.memory = alloc.memory;
+            alloc_res.gpu_type = alloc.gpu_type;
+            alloc_res.gpu_count = alloc.gpu_count;
+
+            if (resources_compatible(alloc_res, required_resources)) {
+                return &alloc;
+            }
         }
     }
     return nullptr;
@@ -256,11 +282,53 @@ Result<AllocationState> AllocationManager::wait_for_allocation(
                 fmt::format("Allocation {} died: {}", slurm_id, state_str));
         }
 
-        // Empty state_str likely means SSH connection issue — don't kill
-        // the allocation, just report the error so caller can retry later
+        // Empty state_str likely means SSH connection issue — retry a few times
+        // before giving up (transient failures are common on HPC networks)
         if (state_str.empty()) {
-            return Result<AllocationState>::Err(
-                fmt::format("Lost connection while waiting for allocation {}", slurm_id));
+            static const int max_empty_retries = 3;
+            int retries = 0;
+            bool recovered = false;
+            while (retries < max_empty_retries) {
+                retries++;
+                if (cb) cb(fmt::format("SSH hiccup querying allocation {}, retrying ({}/{})...",
+                                       slurm_id, retries, max_empty_retries));
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                auto retry_qr = login_.run(cmd);
+                std::istringstream retry_iss(retry_qr.stdout_data);
+                retry_iss >> state_str >> node;
+                if (!state_str.empty()) {
+                    recovered = true;
+                    break;
+                }
+            }
+            if (!recovered) {
+                return Result<AllocationState>::Err(
+                    fmt::format("Lost connection while waiting for allocation {}", slurm_id));
+            }
+            // If recovered, check the state we got
+            if (state_str == "RUNNING" && !node.empty()) {
+                for (auto& alloc : state_.allocations) {
+                    if (alloc.slurm_id == slurm_id) {
+                        alloc.node = node;
+                        alloc.start_time = now_iso();
+                        persist();
+                        if (cb) cb(fmt::format("Allocation {} running on {}", slurm_id, node));
+                        return Result<AllocationState>::Ok(alloc);
+                    }
+                }
+            }
+            if (state_str == "COMPLETED" || state_str == "FAILED" ||
+                state_str == "CANCELLED") {
+                auto& allocs = state_.allocations;
+                allocs.erase(
+                    std::remove_if(allocs.begin(), allocs.end(),
+                        [&](const AllocationState& a) { return a.slurm_id == slurm_id; }),
+                    allocs.end());
+                persist();
+                return Result<AllocationState>::Err(
+                    fmt::format("Allocation {} died: {}", slurm_id, state_str));
+            }
+            // Otherwise it's PENDING — continue the main loop
         }
 
         // Still PENDING — keep waiting (report every 10 seconds)
@@ -349,9 +417,11 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
                                                      StatusCallback cb) {
     if (cb) cb("Requesting compute allocation...");
 
-    // Auto-resolve GPU partition if GPUs are requested
+    // Auto-resolve GPU partition if GPUs are requested and partition
+    // hasn't already been resolved by the caller
     SlurmDefaults resolved = profile;
-    if (resolved.gpu_count > 0 || !resolved.gpu_type.empty()) {
+    if ((resolved.gpu_count > 0 || !resolved.gpu_type.empty()) &&
+        (resolved.partition.empty() || resolved.partition == "batch")) {
         if (cb) cb("Discovering GPU resources...");
         auto match = resolve_gpu_partition(login_, username_,
                                             resolved.partition,
@@ -414,6 +484,7 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
 }
 
 void AllocationManager::assign_job(const std::string& slurm_id, const std::string& job_id) {
+    std::lock_guard<std::mutex> lock(alloc_mutex_);
     for (auto& alloc : state_.allocations) {
         if (alloc.slurm_id == slurm_id) {
             alloc.active_job_id = job_id;
@@ -424,6 +495,7 @@ void AllocationManager::assign_job(const std::string& slurm_id, const std::strin
 }
 
 void AllocationManager::release_job(const std::string& slurm_id) {
+    std::lock_guard<std::mutex> lock(alloc_mutex_);
     for (auto& alloc : state_.allocations) {
         if (alloc.slurm_id == slurm_id) {
             alloc.active_job_id.clear();

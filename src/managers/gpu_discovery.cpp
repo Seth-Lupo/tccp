@@ -58,7 +58,13 @@ static std::string trim(const std::string& s) {
     return s.substr(start, end - start + 1);
 }
 
-// Case-insensitive check: does `haystack` contain `needle` as a substring?
+// Case-insensitive match with word-boundary awareness.
+// "a100" matches "a100", "a100-sxm4-80gb", "nvidia_a100"
+// "a10" does NOT match "a100" (no boundary after "a10" in "a100")
+static bool is_boundary(char c) {
+    return c == '-' || c == '_' || c == '.' || c == ':';
+}
+
 static bool type_matches(const std::string& resource_type,
                           const std::string& requested_type) {
     if (requested_type.empty()) return true;
@@ -72,8 +78,16 @@ static bool type_matches(const std::string& resource_type,
     // Exact match
     if (r == q) return true;
 
-    // Substring match: "a100" matches "a100-sxm4-80gb" or "nvidia_a100"
-    if (r.find(q) != std::string::npos) return true;
+    // Substring match with word boundary: the character after the match
+    // must be end-of-string or a separator (-, _, ., :)
+    auto pos = r.find(q);
+    while (pos != std::string::npos) {
+        size_t end = pos + q.size();
+        bool boundary_after = (end == r.size() || is_boundary(r[end]));
+        bool boundary_before = (pos == 0 || is_boundary(r[pos - 1]));
+        if (boundary_after && boundary_before) return true;
+        pos = r.find(q, pos + 1);
+    }
 
     return false;
 }

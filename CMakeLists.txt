@@ -42,9 +42,9 @@ endif()
 # Source subdirectories
 add_subdirectory(src/core)
 add_subdirectory(src/ssh)
+add_subdirectory(src/environments)
 add_subdirectory(src/managers)
 add_subdirectory(src/cli)
-add_subdirectory(src/util)
 
 # Main executable
 add_executable(tccp src/main.cpp)
@@ -52,9 +52,9 @@ add_executable(tccp src/main.cpp)
 target_link_libraries(tccp PRIVATE
     tccp_core
     tccp_ssh
+    tccp_environments
     tccp_managers
     tccp_cli
-    tccp_util
     libssh2::libssh2
     yaml-cpp::yaml-cpp
     CLI11::CLI11

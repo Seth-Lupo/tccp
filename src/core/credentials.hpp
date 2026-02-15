@@ -26,9 +26,6 @@ public:
     // List all stored credentials
     std::vector<CredentialInfo> list();
 
-    // Check if using system keyring
-    bool uses_keyring() const;
-
 private:
     CredentialManager() = default;
 
@@ -36,6 +33,4 @@ private:
     Result<std::string> get_impl(const std::string& key);
     Result<void> set_impl(const std::string& key, const std::string& value);
     Result<void> remove_impl(const std::string& key);
-
-    bool keyring_available_;
 };

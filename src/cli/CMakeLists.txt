@@ -8,13 +8,14 @@ add_library(tccp_cli
     commands/setup.cpp
     commands/connection.cpp
     commands/jobs.cpp
+    commands/allocations.cpp
     commands/shell.cpp
     commands/credentials.cpp
 )
 
 target_include_directories(tccp_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(tccp_cli PUBLIC CLI11::CLI11 fmt::fmt)
-target_link_libraries(tccp_cli PRIVATE tccp_core tccp_ssh tccp_managers)
+target_link_libraries(tccp_cli PRIVATE tccp_core tccp_ssh tccp_managers tccp_environments)
 
 # Readline (libedit on macOS, GNU readline on Linux)
 if(APPLE)

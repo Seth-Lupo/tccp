@@ -11,6 +11,7 @@ void register_jobs_commands(BaseCLI& cli);
 void register_shell_commands(BaseCLI& cli);
 void register_setup_commands(BaseCLI& cli);
 void register_credentials_commands(BaseCLI& cli);
+void register_allocations_commands(BaseCLI& cli);
 
 class TCCPCLI : public BaseCLI {
 public:

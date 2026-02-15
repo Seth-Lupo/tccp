@@ -22,7 +22,3 @@ std::vector<CredentialInfo> CredentialManager::list() {
     // Platform-specific implementation would populate this
     return infos;
 }
-
-bool CredentialManager::uses_keyring() const {
-    return keyring_available_;
-}

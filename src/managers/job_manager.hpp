@@ -79,11 +79,6 @@ private:
     std::string container_cache() const;
     std::string scratch_dir(const std::string& job_id) const;
 
-    // Container/environment helpers (type-aware)
-    std::string container_docker_uri() const;   // e.g. "docker://python:3.11-slim"
-    std::string container_image_path() const;   // full path to .sif file
-    bool is_gpu_type() const;                   // true for pytorch, etc.
-
     std::string generate_job_id(const std::string& job_name) const;
     void ensure_environment(StatusCallback cb);
     void ensure_dtach(StatusCallback cb);

@@ -60,9 +60,8 @@ login:
 slurm:
   partition: "batch"
   time: "4:00:00"
-  mem: "4G"
-  cpus: 1
-  gres: ""
+  memory: "4G"
+  cpus_per_task: 1
 
 # Optional: Environment modules to load
 modules: []

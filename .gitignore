@@ -15,3 +15,5 @@ cmake-build-release/
 .venv
 vcpkg_installed/
 .cache/
+prompts
+
