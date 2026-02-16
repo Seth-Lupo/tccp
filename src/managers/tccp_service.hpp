@@ -60,8 +60,9 @@ public:
 
     // ── Job operations ────────────────────────────────────────
 
-    // Submit a job by name.
-    Result<TrackedJob> run_job(const std::string& job_name, StatusCallback cb = nullptr);
+    // Submit a job by name, with optional runtime args appended to config args.
+    Result<TrackedJob> run_job(const std::string& job_name, const std::string& extra_args = "",
+                               StatusCallback cb = nullptr);
 
     // Cancel a job by name.
     Result<void> cancel_job(const std::string& job_name, StatusCallback cb = nullptr);

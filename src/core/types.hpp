@@ -90,7 +90,8 @@ struct SlurmDefaults {
 };
 
 struct JobConfig {
-    std::string script;
+    std::string script;                          // python script to run (e.g. "train.py")
+    std::string package;                         // python package to run with -m (e.g. "myapp")
     std::string args;
     std::string time;                            // job time limit, default "1:00:00"
     std::optional<SlurmDefaults> slurm;          // per-job SLURM overrides

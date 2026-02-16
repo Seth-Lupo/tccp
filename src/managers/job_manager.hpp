@@ -24,6 +24,7 @@ struct TrackedJob {
     int exit_code = -1;       // -1 = unknown/still running
     std::string output_file;  // local path to captured output
     std::string scratch_path; // /tmp/{user}/{project}/{job_id}
+    std::string extra_args;   // runtime args from CLI (appended to config args)
 
     // Init tracking (for background initialization)
     bool init_complete = false;      // true when job is launched on compute node
@@ -59,7 +60,8 @@ public:
     // (e.g. "bash"). Add new implicit job types here.
     static bool is_implicit_job(const std::string& job_name);
 
-    Result<TrackedJob> run(const std::string& job_name, StatusCallback cb = nullptr);
+    Result<TrackedJob> run(const std::string& job_name, const std::string& extra_args = "",
+                           StatusCallback cb = nullptr);
     SSHResult list(StatusCallback cb = nullptr);
     Result<void> cancel_job(const std::string& job_name, StatusCallback cb = nullptr);
     Result<void> cancel_job_by_id(const std::string& job_id, StatusCallback cb = nullptr);
@@ -125,17 +127,19 @@ private:
     // Job-type-specific payload: the command(s) appended after the preamble.
     // Override this pattern for new implicit job types.
     std::string build_job_payload(const std::string& job_name,
-                                  const JobEnvPaths& paths) const;
+                                  const JobEnvPaths& paths,
+                                  const std::string& extra_args = "") const;
 
     // Launch the job on the compute node via SSH + dtach
     Result<void> launch_on_node(const std::string& job_id,
                                  const std::string& job_name,
                                  const std::string& compute_node,
                                  const std::string& scratch,
+                                 const std::string& extra_args,
                                  StatusCallback cb);
 
     // Background init thread (does allocation, sync, launch)
-    void background_init_thread(std::string job_id, std::string job_name);
+    void background_init_thread(std::string job_id, std::string job_name, std::string extra_args);
 
     // Polling helpers
     struct SlurmJobState {

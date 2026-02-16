@@ -204,7 +204,16 @@ void do_run(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
     if (!cli.service.job_manager()) return;
 
-    std::string job_name = resolve_job_name(cli, arg);
+    // Parse: "job_name [extra_args...]"
+    std::string job_name_arg = arg;
+    std::string extra_args;
+    auto space = arg.find(' ');
+    if (space != std::string::npos) {
+        job_name_arg = arg.substr(0, space);
+        extra_args = arg.substr(space + 1);
+    }
+
+    std::string job_name = resolve_job_name(cli, job_name_arg);
     if (job_name.empty()) return;
 
     auto* existing = cli.service.find_job_by_name(job_name);
@@ -219,7 +228,7 @@ void do_run(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
-    auto result = cli.service.run_job(job_name, nullptr);
+    auto result = cli.service.run_job(job_name, extra_args, nullptr);
 
     if (result.is_err()) {
         std::cout << theme::error(result.error);
@@ -252,7 +261,7 @@ void do_restart(BaseCLI& cli, const std::string& arg) {
     }
 
     // Now submit fresh
-    auto result = cli.service.run_job(job_name, nullptr);
+    auto result = cli.service.run_job(job_name, "", nullptr);
     if (result.is_err()) {
         std::cout << theme::error(result.error);
         return;
@@ -321,10 +330,7 @@ void do_tail(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
-    std::string remote_log = dtach_sock_for(tracked->job_id);
-    auto dot = remote_log.rfind('.');
-    if (dot != std::string::npos)
-        remote_log = remote_log.substr(0, dot) + ".log";
+    std::string remote_log = tracked->scratch_path + "/tccp.log";
 
     std::string ssh_cmd = fmt::format(
         "ssh {} {} 'tail -n {} {} 2>/dev/null'",

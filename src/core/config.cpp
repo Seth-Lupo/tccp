@@ -12,6 +12,13 @@ namespace fs = std::filesystem;
 // Bare base types like "a100" are resolved to the cheapest variant (lowest tier).
 static void parse_gpu_shorthand(const std::string& value,
                                 std::string& out_type, int& out_count) {
+    // Explicit opt-out
+    if (value == "none" || value == "false") {
+        out_type = "";
+        out_count = 0;
+        return;
+    }
+
     auto colon = value.find(':');
     if (colon != std::string::npos) {
         out_type = value.substr(0, colon);
@@ -265,6 +272,7 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
             } else if (job_kv.second.IsMap()) {
                 const auto& jnode = job_kv.second;
                 jc.script = jnode["script"].as<std::string>("");
+                jc.package = jnode["package"].as<std::string>("");
                 jc.args = jnode["args"].as<std::string>("");
                 jc.time = jnode["time"].as<std::string>("");
 
@@ -335,6 +343,29 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
 
     if (node["cache"]) {
         project.cache = node["cache"].as<std::string>("");
+    }
+
+    // Environment-type defaults: python-pytorch gets a GPU if none was specified.
+    // An explicit `gpu: none` counts as "specified" and opts out.
+    if (project.type == "python-pytorch") {
+        bool gpu_explicitly_set = (node["gpu"] && node["gpu"].IsScalar());
+        bool slurm_has_gpu = project.slurm.has_value() &&
+            (!project.slurm->gpu_type.empty() || project.slurm->gpu_count > 0);
+        if (!gpu_explicitly_set && !slurm_has_gpu) {
+            if (!project.slurm.has_value()) {
+                project.slurm = SlurmDefaults{};
+                project.slurm->partition = "batch";
+                project.slurm->time = "00:30:00";
+                project.slurm->nodes = 1;
+                project.slurm->cpus_per_task = 1;
+                project.slurm->memory = "4G";
+                project.slurm->gpu_count = 0;
+                project.slurm->mail_type = "NONE";
+            }
+            project.slurm->gpu_type = "t4";
+            project.slurm->gpu_count = 1;
+            apply_gpu_smart_defaults(project.slurm.value(), false, false);
+        }
     }
 
     return project;

@@ -236,17 +236,18 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
                                          const std::string& job_name,
                                          const std::string& compute_node,
                                          const std::string& scratch,
+                                         const std::string& extra_args,
                                          StatusCallback cb) {
     const auto& proj = config_.project();
     std::string out_dir = job_output_dir(job_id);
-    std::string sock = "/tmp/tccp_" + job_id + ".sock";
+    std::string sock = scratch + "/tccp.sock";
 
     if (cb) cb("Launching job on compute node...");
 
     // Resolve all environment paths and build the run script
     auto paths = resolve_env_paths(job_id, scratch);
     std::string run_script = build_run_preamble(paths, scratch)
-                           + build_job_payload(job_name, paths);
+                           + build_job_payload(job_name, paths, extra_args);
 
     // Write to DTN first, then scp to compute node
     std::string dtn_script = fmt::format("/tmp/tccp_run_{}.sh", job_id);

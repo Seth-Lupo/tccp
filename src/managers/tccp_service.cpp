@@ -61,9 +61,10 @@ bool TccpService::check_slurm_health() {
 
 // ── Job operations ────────────────────────────────────────────
 
-Result<TrackedJob> TccpService::run_job(const std::string& job_name, StatusCallback cb) {
+Result<TrackedJob> TccpService::run_job(const std::string& job_name, const std::string& extra_args,
+                                        StatusCallback cb) {
     if (!jobs_) return Result<TrackedJob>::Err("Not connected");
-    return jobs_->run(job_name, cb);
+    return jobs_->run(job_name, extra_args, cb);
 }
 
 Result<void> TccpService::cancel_job(const std::string& job_name, StatusCallback cb) {

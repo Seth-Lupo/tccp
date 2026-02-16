@@ -162,7 +162,7 @@ void do_open(BaseCLI& cli, const std::string& arg) {
     }
 
     // Start a fresh bash job
-    auto result = cli.service.run_job(job_name, nullptr);
+    auto result = cli.service.run_job(job_name, "", nullptr);
     if (result.is_err()) {
         std::cout << theme::error(result.error);
         return;

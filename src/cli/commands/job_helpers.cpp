@@ -15,8 +15,8 @@ std::string output_path_for(const std::string& job_id) {
     return "/tmp/tccp_output_" + job_id + ".log";
 }
 
-std::string dtach_sock_for(const std::string& job_id) {
-    return "/tmp/tccp_" + job_id + ".sock";
+std::string dtach_sock_for(const TrackedJob& tj) {
+    return tj.scratch_path + "/tccp.sock";
 }
 
 void draw_job_header(const std::string& job_name,
@@ -87,7 +87,7 @@ bool attach_to_job(BaseCLI& cli, TrackedJob* tracked,
     JobView view(*cli.service.cluster()->get_session(),
                  tracked->compute_node,
                  get_cluster_username(),
-                 dtach_sock_for(tracked->job_id),
+                 dtach_sock_for(*tracked),
                  job_name,
                  tracked->slurm_id,
                  output_path,

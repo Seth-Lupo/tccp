@@ -124,7 +124,7 @@ JobManager::JobEnvPaths JobManager::resolve_env_paths(const std::string& job_id,
     JobEnvPaths p;
     p.image = cc + "/images/" + env.sif_filename;
     p.venv = venv;
-    p.log = "/tmp/tccp_" + job_id + ".log";
+    p.log = scratch + "/tccp.log";
     p.has_python = (env.type_name.find("python") != std::string::npos);
 
     // Bind mounts
@@ -174,8 +174,7 @@ std::string JobManager::build_run_preamble(const JobEnvPaths& paths,
         "mkdir -p $XDG_CACHE_HOME $TMPDIR $PIP_CACHE_DIR $HF_HOME $TORCH_HOME\n"
         "if [ -f requirements.txt ]; then\n"
         "    REQ_HASH=$(md5sum requirements.txt 2>/dev/null | cut -d' ' -f1)\n"
-        "    mkdir -p {scratch}/env\n"
-        "    STAMP={scratch}/env/.req_installed\n"
+        "    STAMP={venv}/.req_installed\n"
         "    if [ ! -f \"$STAMP\" ] || [ \"$(cat $STAMP 2>/dev/null)\" != \"$REQ_HASH\" ]; then\n"
         "{req_filter}"
         "        singularity exec {binds} {image} {venv}/bin/pip install -q -r $TCCP_REQ_FILE\n"
@@ -193,7 +192,8 @@ std::string JobManager::build_run_preamble(const JobEnvPaths& paths,
 }
 
 std::string JobManager::build_job_payload(const std::string& job_name,
-                                           const JobEnvPaths& paths) const {
+                                           const JobEnvPaths& paths,
+                                           const std::string& extra_args) const {
     // ── Implicit job types ──────────────────────────────────
     // Add new cases here for future implicit jobs (e.g. "jupyter", "tensorboard")
     if (job_name == "bash") {
@@ -203,19 +203,34 @@ std::string JobManager::build_job_payload(const std::string& job_name,
             paths.binds, paths.image);
     }
 
-    // ── Normal script jobs ──────────────────────────────────
+    // ── Normal script/package jobs ──────────────────────────
     const auto& proj = config_.project();
     auto it = proj.jobs.find(job_name);
-    std::string script = (it != proj.jobs.end()) ? it->second.script : "main.py";
     std::string args = (it != proj.jobs.end()) ? it->second.args : "";
+    // Append runtime CLI args after config args
+    if (!extra_args.empty()) {
+        if (!args.empty()) args += " ";
+        args += extra_args;
+    }
+
+    // python -m package  or  python script.py
+    std::string python_cmd;
+    if (it != proj.jobs.end() && !it->second.package.empty()) {
+        python_cmd = fmt::format("{}/bin/python -m {} {}",
+                                  paths.venv, it->second.package, args);
+    } else {
+        std::string script = (it != proj.jobs.end()) ? it->second.script : "main.py";
+        python_cmd = fmt::format("{}/bin/python {} {}",
+                                  paths.venv, script, args);
+    }
 
     return fmt::format(
-        "CMD=\"singularity exec {} {} {}/bin/python {} {}\"\n"
+        "CMD=\"singularity exec {} {} {}\"\n"
         "script -fq -c \"$CMD\" {}\n"
         "EC=$?\n"
         "printf '\\033[J'\n"
         "exit $EC\n",
-        paths.binds, paths.image, paths.venv, script, args, paths.log);
+        paths.binds, paths.image, python_cmd, paths.log);
 }
 
 std::string JobManager::shell_command(const TrackedJob& tj, const std::string& inner_cmd) const {
@@ -299,9 +314,10 @@ SSHResult JobManager::list(StatusCallback cb) {
 
 // ── run ────────────────────────────────────────────────────
 
-Result<TrackedJob> JobManager::run(const std::string& job_name, StatusCallback cb) {
+Result<TrackedJob> JobManager::run(const std::string& job_name, const std::string& extra_args,
+                                   StatusCallback cb) {
     tccp_log("========================================");
-    tccp_log(fmt::format("=== run job_name={} ===", job_name));
+    tccp_log(fmt::format("=== run job_name={} extra_args='{}' ===", job_name, extra_args));
 
     // Validate job exists in config (implicit jobs like "bash" are always available)
     const auto& proj = config_.project();
@@ -316,6 +332,7 @@ Result<TrackedJob> JobManager::run(const std::string& job_name, StatusCallback c
     TrackedJob tj;
     tj.job_id = job_id;
     tj.job_name = job_name;
+    tj.extra_args = extra_args;
     tj.submit_time = now_iso();
     tj.init_complete = false;
 
@@ -336,14 +353,14 @@ Result<TrackedJob> JobManager::run(const std::string& job_name, StatusCallback c
     if (cb) cb("Starting initialization in background...");
 
     // Spawn background thread to do all init work
-    init_threads_.emplace_back(&JobManager::background_init_thread, this, job_id, job_name);
+    init_threads_.emplace_back(&JobManager::background_init_thread, this, job_id, job_name, extra_args);
 
     return Result<TrackedJob>::Ok(tj);
 }
 
 // ── Background init thread ─────────────────────────────────
 
-void JobManager::background_init_thread(std::string job_id, std::string job_name) {
+void JobManager::background_init_thread(std::string job_id, std::string job_name, std::string extra_args) {
     tccp_log(fmt::format("INIT THREAD START: job_id={}", job_id));
 
     // Ensure persistent log directory exists
@@ -469,7 +486,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
 
         // Launch job on compute node
         log_to_file("Launching job on compute node...");
-        auto launch_result = launch_on_node(job_id, job_name, alloc->node, scratch, nullptr);
+        auto launch_result = launch_on_node(job_id, job_name, alloc->node, scratch, extra_args, nullptr);
         if (launch_result.is_err()) {
             throw std::runtime_error(launch_result.error);
         }
