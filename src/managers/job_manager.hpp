@@ -130,4 +130,11 @@ private:
 
     // Auto-return output and clean remote
     void try_return_output(TrackedJob& tj);
+
+    // Mark a job's output as returned in tracked + persisted state
+    void mark_output_returned(const std::string& job_id);
+
+    // Download output files from remote. Returns file count, -1 on error.
+    int download_remote_output(const std::string& job_id,
+                               const std::string& remote_output);
 };

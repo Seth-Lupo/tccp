@@ -40,70 +40,33 @@ JobView::JobView(SessionManager& session, const std::string& compute_node,
       output_file_(output_file), job_id_(job_id), canceled_(canceled) {}
 
 void JobView::draw_header(bool terminated, int exit_code, bool canceled) {
-    struct winsize ws;
-    int w = 80, h = 24;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
-        if (ws.ws_col > 0) w = ws.ws_col;
-        if (ws.ws_row > 0) h = ws.ws_row;
-    }
-
-    // Top line: tccp | job_name | SLURM:id | node
-    std::string l1_content = fmt::format(
-        " \033[38;2;62;120;178;1mtccp\033[22;38;2;178;178;178m | {} | SLURM:{} | {}",
-        job_name_, slurm_id_, compute_node_);
-    std::string l1_plain = fmt::format(
-        " tccp | {} | SLURM:{} | {}", job_name_, slurm_id_, compute_node_);
-    int l1_pad = std::max(0, w - static_cast<int>(l1_plain.size()));
-
-    // Bottom line: status + controls hint
-    std::string l2_left, l2_right, l2_bg, l2_fg;
+    TerminalUI::StatusBar bar;
+    bar.job_name = job_name_;
+    bar.slurm_id = slurm_id_;
+    bar.node = compute_node_;
 
     if (terminated && canceled) {
-        l2_left = " CANCELED";
-        l2_right = "↑↓ scroll  Ctrl+T top  Ctrl+\\ exit ";
-        l2_bg = "\033[48;2;60;60;60m";   // Grey
-        l2_fg = "\033[38;2;120;120;120m";
+        bar.status = "CANCELED";
+        bar.controls = "↑↓ scroll  Ctrl+T top  Ctrl+\\ exit ";
+        bar.l2_bg = "\033[48;2;60;60;60m";
+        bar.l2_fg = "\033[38;2;120;120;120m";
     } else if (terminated) {
-        l2_left = exit_code == 0 ? " TERMINATED" : fmt::format(" TERMINATED (exit {})", exit_code);
-        l2_right = "↑↓ scroll  Ctrl+T top  Ctrl+\\ exit ";
-        l2_bg = "\033[48;2;60;60;60m";   // Grey
-        l2_fg = "\033[38;2;120;120;120m";
+        bar.status = exit_code == 0 ? "TERMINATED" : fmt::format("TERMINATED (exit {})", exit_code);
+        bar.controls = "↑↓ scroll  Ctrl+T top  Ctrl+\\ exit ";
+        bar.l2_bg = "\033[48;2;60;60;60m";
+        bar.l2_fg = "\033[38;2;120;120;120m";
     } else if (!got_first_output_) {
-        l2_left = " Loading...";
-        l2_right = "";
-        l2_bg = "\033[48;2;60;60;60m";   // Grey
-        l2_fg = "\033[38;2;120;120;120m";
+        bar.status = "Loading...";
+        bar.l2_bg = "\033[48;2;60;60;60m";
+        bar.l2_fg = "\033[38;2;120;120;120m";
     } else {
-        l2_left = " RUNNING";
-        l2_right = "↑↓ scroll  Ctrl+T top  Ctrl+C cancel  Ctrl+\\ detach ";
-        l2_bg = "\033[48;2;85;72;62m";   // Brown
-        l2_fg = "\033[38;2;150;150;150m";
+        bar.status = "RUNNING";
+        bar.controls = "↑↓ scroll  Ctrl+T top  Ctrl+C cancel  Ctrl+\\ detach ";
+        bar.l2_bg = "\033[48;2;85;72;62m";
+        bar.l2_fg = "\033[38;2;150;150;150m";
     }
 
-    int l2_pad = std::max(0, w - static_cast<int>(l2_left.size()) - static_cast<int>(l2_right.size()));
-
-    // Render header (save/restore cursor to avoid displacement)
-    std::string out;
-    out.reserve(256);
-    out += "\0337";  // Save cursor
-
-    out += fmt::format("\033[{};1H", h - 1);
-    out += "\033[48;2;62;62;62m\033[38;2;178;178;178m";
-    out += l1_content;
-    out.append(l1_pad, ' ');
-    out += "\033[0m";
-
-    out += fmt::format("\033[{};1H", h);
-    out += l2_bg + l2_fg;
-    out += l2_left;
-    out.append(l2_pad, ' ');
-    out += l2_right;
-    // Clear to end of line with background color still applied
-    out += "\033[K";
-    out += "\033[0m";
-
-    out += "\0338";  // Restore cursor
-    write(STDOUT_FILENO, out.data(), out.size());
+    TerminalUI::draw_status_bar(bar);
 }
 
 Result<int> JobView::attach(bool skip_remote_replay) {

@@ -95,7 +95,28 @@ SSHResult SSHConnection::run(const std::string& command, int timeout_secs) {
                     clean = output.substr(0, done_pos);
                 }
 
-                // Trim trailing whitespace/prompt remnants
+                // Strip trailing whitespace first so rfind('\n') finds
+                // the newline *before* the last content line, not a
+                // trailing \r\n at the very end of the buffer.
+                while (!clean.empty() && (clean.back() == '\n' || clean.back() == '\r'
+                                       || clean.back() == ' ' || clean.back() == '\t'))
+                    clean.pop_back();
+
+                // Strip trailing prompt echo of the sentinel command.
+                // PTY channels echo typed input, so the line
+                // "[user@host ~]$ echo __TCCP_DO''NE__ $?" appears
+                // just before the actual DONE marker output.
+                auto last_nl = clean.rfind('\n');
+                if (last_nl != std::string::npos) {
+                    auto trailing = clean.substr(last_nl + 1);
+                    if (trailing.find("__TCCP_DO") != std::string::npos) {
+                        clean = clean.substr(0, last_nl);
+                    }
+                } else if (clean.find("__TCCP_DO") != std::string::npos) {
+                    clean.clear();
+                }
+
+                // Trim any remaining trailing whitespace
                 auto last_content = clean.find_last_not_of(" \t\r\n");
                 if (last_content != std::string::npos) {
                     clean = clean.substr(0, last_content + 1);

@@ -1,6 +1,8 @@
 add_library(tccp_cli
     base_cli.cpp
     tccp_cli.cpp
+    setup_wizards.cpp
+    manual_pages.cpp
     preflight.cpp
     terminal_output.cpp
     terminal_ui.cpp
@@ -8,6 +10,9 @@ add_library(tccp_cli
     commands/setup.cpp
     commands/connection.cpp
     commands/jobs.cpp
+    commands/job_helpers.cpp
+    commands/job_view_cmd.cpp
+    commands/job_logs.cpp
     commands/allocations.cpp
     commands/shell.cpp
     commands/credentials.cpp

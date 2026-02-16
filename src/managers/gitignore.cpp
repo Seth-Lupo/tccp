@@ -1,4 +1,5 @@
 #include "gitignore.hpp"
+#include <core/utils.hpp>
 #include <fstream>
 #include <algorithm>
 
@@ -59,9 +60,7 @@ void GitignoreParser::load_gitignore() {
     std::string line;
 
     while (std::getline(file, line)) {
-        // Trim whitespace
-        line.erase(0, line.find_first_not_of(" \t\r\n"));
-        line.erase(line.find_last_not_of(" \t\r\n") + 1);
+        trim(line);
 
         // Skip empty lines and comments
         if (line.empty() || line[0] == '#') {
