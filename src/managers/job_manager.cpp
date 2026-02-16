@@ -20,7 +20,8 @@ JobManager::JobManager(const Config& config, SSHConnection& dtn, SSHConnection& 
                        AllocationManager& allocs, SyncManager& sync, CacheManager& cache)
     : config_(config), dtn_(dtn), login_(login),
       allocs_(allocs), sync_(sync), cache_(cache),
-      username_(get_cluster_username()) {
+      username_(get_cluster_username()),
+      port_fwd_(config.dtn()) {
 
     // Restore tracked jobs from persistent state
     auto& state = allocs_.state();
@@ -38,16 +39,38 @@ JobManager::JobManager(const Config& config, SSHConnection& dtn, SSHConnection& 
         tj.init_complete = js.init_complete;
         tj.init_error = js.init_error;
         tj.output_returned = js.output_returned;
+        tj.forwarded_ports = js.forwarded_ports;
         tj.submit_time = js.submit_time;
         tj.start_time = js.start_time;
         tj.end_time = js.end_time;
         tracked_.push_back(tj);
+    }
+
+    // Re-establish port forwarding tunnels for running jobs
+    bool keys_ensured = false;
+    for (auto& tj : tracked_) {
+        if (!tj.completed && tj.init_complete && !tj.compute_node.empty()
+            && !tj.forwarded_ports.empty()) {
+            if (!keys_ensured) {
+                keys_ensured = port_fwd_.ensure_keys(dtn_);
+                if (!keys_ensured) break;
+            }
+            tj.tunnel_pids = port_fwd_.start(tj.compute_node, tj.forwarded_ports);
+        }
     }
 }
 
 JobManager::~JobManager() {
     // Signal all background init threads to stop
     shutdown_.store(true);
+
+    // Stop all tunnel processes
+    for (auto& tj : tracked_) {
+        if (!tj.tunnel_pids.empty()) {
+            PortForwarder::stop(tj.tunnel_pids);
+            tj.tunnel_pids.clear();
+        }
+    }
 
     // Join all joinable threads (with a short timeout via detach fallback)
     for (auto& t : init_threads_) {
@@ -278,10 +301,13 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
             throw std::runtime_error("Canceled during initialization");
         }
 
+        // Ensure SSH keys (needed for sync pipe + port forwarding)
+        port_fwd_.ensure_keys(dtn_, log_to_file);
+
         // Sync code to compute node
         std::string scratch = scratch_dir(job_id);
         log_to_file(fmt::format("Syncing code to {}...", alloc->node));
-        sync_.sync_to_scratch(alloc->node, scratch, allocs_.state(), nullptr);
+        sync_.sync_to_scratch(alloc->node, scratch, allocs_.state(), log_to_file);
 
         if (check_canceled()) {
             log_to_file("Canceled after sync");
@@ -297,6 +323,15 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
 
         log_to_file(fmt::format("Job launched successfully on {}", alloc->node));
 
+        // Start port forwarding tunnels if configured
+        std::vector<pid_t> tunnel_pids;
+        std::vector<int> fwd_ports;
+        auto job_it = config_.project().jobs.find(job_name);
+        if (job_it != config_.project().jobs.end() && !job_it->second.ports.empty()) {
+            fwd_ports = job_it->second.ports;
+            tunnel_pids = port_fwd_.start(alloc->node, fwd_ports, log_to_file);
+        }
+
         // Update tracked job with final info
         std::string start = now_iso();
         {
@@ -308,6 +343,8 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
                     tj.scratch_path = scratch;
                     tj.init_complete = true;
                     tj.start_time = start;
+                    tj.tunnel_pids = tunnel_pids;
+                    tj.forwarded_ports = fwd_ports;
                     break;
                 }
             }
@@ -321,6 +358,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
                 js.scratch_path = scratch;
                 js.init_complete = true;
                 js.start_time = start;
+                js.forwarded_ports = fwd_ports;
                 break;
             }
         }

@@ -52,9 +52,27 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
         }
     }
 
-    // Kill the dtach process
+    // Kill the dtach process and its entire child tree (singularity, python, etc.)
+    // fuser alone only kills processes holding the socket fd open — container
+    // children in separate PID namespaces survive. So we find the dtach PID,
+    // walk /proc to collect all descendants, then SIGKILL the whole tree.
     std::string kill_cmd = fmt::format(
-        "ssh {} {} 'fuser -k -9 {} 2>/dev/null'",
+        "ssh {} {} '"
+        "DPID=$(fuser {} 2>/dev/null | tr -d \" \"); "
+        "if [ -n \"$DPID\" ]; then "
+        "  PIDS=$DPID; "
+        "  TODO=$DPID; "
+        "  while [ -n \"$TODO\" ]; do "
+        "    NEXT=\"\"; "
+        "    for P in $TODO; do "
+        "      for C in $(ps -o pid= --ppid $P 2>/dev/null); do "
+        "        PIDS=\"$PIDS $C\"; NEXT=\"$NEXT $C\"; "
+        "      done; "
+        "    done; "
+        "    TODO=$NEXT; "
+        "  done; "
+        "  kill -9 $PIDS 2>/dev/null; "
+        "fi'",
         SSH_OPTS_FAST, tj->compute_node, dtach_socket);
     auto kill_result = dtn_.run(kill_cmd);
     tccp_log_ssh("cancel:kill", kill_cmd, kill_result);
@@ -221,6 +239,10 @@ void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
 // ── Cleanup helpers ────────────────────────────────────────
 
 void JobManager::cleanup_compute_node(const TrackedJob& tj) {
+    if (!tj.tunnel_pids.empty()) {
+        PortForwarder::stop(tj.tunnel_pids);
+    }
+
     if (tj.compute_node.empty()) return;
 
     // Only remove the dtach socket — keep the scratch directory alive so the
@@ -241,6 +263,7 @@ void JobManager::persist_job_state(const TrackedJob& tj) {
             js.exit_code = tj.exit_code;
             js.output_file = tj.output_file;
             js.end_time = tj.end_time;
+            js.forwarded_ports = tj.forwarded_ports;
             break;
         }
     }

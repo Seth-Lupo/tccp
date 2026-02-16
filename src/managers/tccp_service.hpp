@@ -24,6 +24,7 @@ struct JobSummary {
     std::string timestamp;    // formatted submit time (HH:MM)
     std::string wait;         // formatted wait duration
     std::string duration;     // formatted run duration
+    std::string ports;         // forwarded ports, e.g. "6006,8888"
 };
 
 struct AllocationSummary {

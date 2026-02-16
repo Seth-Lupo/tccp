@@ -12,6 +12,7 @@
 #include "allocation_manager.hpp"
 #include "sync_manager.hpp"
 #include "cache_manager.hpp"
+#include "port_forwarder.hpp"
 
 struct TrackedJob {
     std::string job_id;       // YYYY-MM-DDTHH-MM-SS-mmm__<job-name>
@@ -30,6 +31,10 @@ struct TrackedJob {
 
     // Output tracking
     bool output_returned = false;    // true if output was downloaded and remote cleaned
+
+    // Port forwarding
+    std::vector<pid_t> tunnel_pids;
+    std::vector<int> forwarded_ports;
 
     // Timing
     std::string submit_time;          // ISO timestamp when job was first submitted
@@ -77,6 +82,7 @@ private:
     std::mutex cancel_mutex_;
     std::atomic<bool> shutdown_{false};        // signals init threads to exit
     bool environment_checked_ = false;  // Cache: only check environment once per session
+    PortForwarder port_fwd_;
 
     // Path helpers (new directory structure)
     std::string persistent_base() const;

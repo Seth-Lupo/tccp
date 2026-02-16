@@ -52,6 +52,10 @@ ProjectState StateStore::load() {
                 j.init_complete = n["init_complete"].as<bool>(false);
                 j.init_error = n["init_error"].as<std::string>("");
                 j.output_returned = n["output_returned"].as<bool>(false);
+                if (n["forwarded_ports"] && n["forwarded_ports"].IsSequence()) {
+                    for (const auto& p : n["forwarded_ports"])
+                        j.forwarded_ports.push_back(p.as<int>());
+                }
                 j.submit_time = n["submit_time"].as<std::string>("");
                 j.start_time = n["start_time"].as<std::string>("");
                 j.end_time = n["end_time"].as<std::string>("");
@@ -61,6 +65,16 @@ ProjectState StateStore::load() {
 
         state.last_sync_node = root["last_sync_node"].as<std::string>("");
         state.last_sync_scratch = root["last_sync_scratch"].as<std::string>("");
+
+        if (root["last_sync_manifest"] && root["last_sync_manifest"].IsSequence()) {
+            for (const auto& n : root["last_sync_manifest"]) {
+                SyncManifestEntry e;
+                e.path = n["path"].as<std::string>("");
+                e.mtime = n["mtime"].as<int64_t>(0);
+                e.size = n["size"].as<int64_t>(0);
+                state.last_sync_manifest.push_back(e);
+            }
+        }
 
     } catch (const std::exception& e) {
         // Corrupted state file — log and start fresh
@@ -115,6 +129,12 @@ void StateStore::save(const ProjectState& state) {
         out << YAML::Key << "init_complete" << YAML::Value << j.init_complete;
         out << YAML::Key << "init_error" << YAML::Value << j.init_error;
         out << YAML::Key << "output_returned" << YAML::Value << j.output_returned;
+        if (!j.forwarded_ports.empty()) {
+            out << YAML::Key << "forwarded_ports" << YAML::Value << YAML::BeginSeq;
+            for (int p : j.forwarded_ports)
+                out << p;
+            out << YAML::EndSeq;
+        }
         out << YAML::Key << "submit_time" << YAML::Value << j.submit_time;
         out << YAML::Key << "start_time" << YAML::Value << j.start_time;
         out << YAML::Key << "end_time" << YAML::Value << j.end_time;
@@ -124,6 +144,18 @@ void StateStore::save(const ProjectState& state) {
 
     out << YAML::Key << "last_sync_node" << YAML::Value << state.last_sync_node;
     out << YAML::Key << "last_sync_scratch" << YAML::Value << state.last_sync_scratch;
+
+    if (!state.last_sync_manifest.empty()) {
+        out << YAML::Key << "last_sync_manifest" << YAML::Value << YAML::BeginSeq;
+        for (const auto& e : state.last_sync_manifest) {
+            out << YAML::BeginMap;
+            out << YAML::Key << "path" << YAML::Value << e.path;
+            out << YAML::Key << "mtime" << YAML::Value << e.mtime;
+            out << YAML::Key << "size" << YAML::Value << e.size;
+            out << YAML::EndMap;
+        }
+        out << YAML::EndSeq;
+    }
 
     out << YAML::EndMap;
 

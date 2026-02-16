@@ -94,6 +94,7 @@ struct JobConfig {
     std::string args;
     std::string time;                            // job time limit, default "1:00:00"
     std::optional<SlurmDefaults> slurm;          // per-job SLURM overrides
+    std::vector<int> ports;                      // localhost ports to forward to compute node
 };
 
 struct ProjectConfig {

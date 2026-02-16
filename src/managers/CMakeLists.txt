@@ -9,6 +9,7 @@ add_library(tccp_managers
     sync_manager.cpp
     gpu_discovery.cpp
     cache_manager.cpp
+    port_forwarder.cpp
     tccp_service.cpp
 )
 

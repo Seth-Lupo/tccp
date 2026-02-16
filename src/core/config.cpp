@@ -268,6 +268,16 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
                 jc.args = jnode["args"].as<std::string>("");
                 jc.time = jnode["time"].as<std::string>("");
 
+                auto ports_node = jnode["ports"] ? jnode["ports"] : jnode["port"];
+                if (ports_node) {
+                    if (ports_node.IsScalar()) {
+                        jc.ports.push_back(ports_node.as<int>());
+                    } else if (ports_node.IsSequence()) {
+                        for (const auto& p : ports_node)
+                            jc.ports.push_back(p.as<int>());
+                    }
+                }
+
                 // Full slurm: block (backwards compat)
                 if (jnode["slurm"] && jnode["slurm"].IsMap()) {
                     jc.slurm = parse_slurm_config(jnode["slurm"]);

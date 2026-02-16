@@ -135,6 +135,16 @@ std::vector<JobSummary> TccpService::list_jobs() {
             s.duration = "-";
         }
 
+        // Port forwarding info
+        if (!tj.forwarded_ports.empty()) {
+            std::string port_str;
+            for (int p : tj.forwarded_ports) {
+                if (!port_str.empty()) port_str += ",";
+                port_str += std::to_string(p);
+            }
+            s.ports = port_str;
+        }
+
         summaries.push_back(std::move(s));
     }
 

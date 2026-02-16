@@ -460,13 +460,17 @@ static void do_jobs(BaseCLI& cli, const std::string& arg) {
 
     std::cout << "\n";
     std::cout << theme::color::DIM
-              << fmt::format("  {:<16} {:<20} {:<16} {:<8} {:<10} {:<14}",
+              << fmt::format("  {:<16} {:<30} {:<16} {:<8} {:<10} {:<14}",
                              "JOB", "STATUS", "TIMESTAMP", "WAIT", "DURATION", "NODE")
               << theme::color::RESET << "\n";
 
     for (const auto& s : summaries) {
-        std::cout << fmt::format("  {:<16} {:<20} {:<16} {:<8} {:<10} {:<14}\n",
-                                  s.job_name, s.status, s.timestamp, s.wait, s.duration, s.compute_node);
+        std::string status = s.status;
+        if (!s.ports.empty() && status == "RUNNING") {
+            status = fmt::format("RUNNING (ports: {})", s.ports);
+        }
+        std::cout << fmt::format("  {:<16} {:<30} {:<16} {:<8} {:<10} {:<14}\n",
+                                  s.job_name, status, s.timestamp, s.wait, s.duration, s.compute_node);
     }
     std::cout << "\n";
 }

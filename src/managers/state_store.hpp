@@ -41,6 +41,9 @@ struct JobState {
     // Output tracking
     bool output_returned = false;   // true if output was downloaded and remote cleaned
 
+    // Port forwarding
+    std::vector<int> forwarded_ports;
+
     // Timing
     std::string submit_time;        // ISO timestamp when job was submitted
     std::string start_time;         // ISO timestamp when job started running
@@ -58,6 +61,7 @@ struct ProjectState {
     std::vector<JobState> jobs;
     std::string last_sync_node;
     std::string last_sync_scratch;
+    std::vector<SyncManifestEntry> last_sync_manifest;  // local manifest at last sync time
 };
 
 class StateStore {
