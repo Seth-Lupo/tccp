@@ -36,7 +36,7 @@ void BaseCLI::execute_command(const std::string& command, const std::string& arg
     auto it = commands_.find(command);
     if (it == commands_.end()) {
         std::cout << theme::error("Unknown command: " + command);
-        std::cout << theme::step("Type 'help' for available commands.");
+        std::cout << theme::dim("Type 'help' for available commands.") << "\n";
         return;
     }
 

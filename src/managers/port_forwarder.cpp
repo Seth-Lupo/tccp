@@ -67,7 +67,7 @@ bool PortForwarder::ensure_keys(SSHConnection& dtn, StatusCallback log) {
     emit("Verifying system SSH to DTN...");
     std::string verify = fmt::format(
         "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no "
-        "-i {} {}@{} echo OK",
+        "-i {} {}@{} echo OK >/dev/null 2>&1",
         key_path_, username_, dtn_.host);
     if (std::system(verify.c_str()) != 0) {
         emit(fmt::format("System SSH verify failed ({}@{})", username_, dtn_.host));
@@ -97,7 +97,8 @@ bool PortForwarder::is_port_open(int port) {
 
 // ── Tunnel lifecycle ──────────────────────────────────────
 
-pid_t PortForwarder::spawn_tunnel(const std::string& local_fwd,
+pid_t PortForwarder::spawn_tunnel(int port,
+                                   const std::string& compute_node,
                                    const std::string& dtn_host) {
     pid_t pid = fork();
     if (pid != 0) return pid;  // parent or error
@@ -109,10 +110,24 @@ pid_t PortForwarder::spawn_tunnel(const std::string& local_fwd,
     int fd = open("/tmp/tccp_tunnel.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) { dup2(fd, STDERR_FILENO); close(fd); }
 
-    // SSH to DTN with -L forwarding through to compute node.
-    // Only authenticates to DTN; DTN does TCP forwarding to compute node.
+    // Two-hop tunnel so we reach localhost on the compute node.
+    // Servers inside Singularity containers often bind to 127.0.0.1, which
+    // is not reachable via the node's external IP.
+    //
+    // Hop 1 (local → DTN):  ssh -L port:localhost:port user@DTN
+    //   Binds local:port, forwards to DTN:localhost:port
+    // Hop 2 (DTN → compute): ssh -N -L localhost:port:localhost:port compute
+    //   Binds DTN:localhost:port, forwards to compute:localhost:port
+    //
+    // Chain: local:port → DTN:port → compute:localhost:port
+    // DTN→compute uses cluster-internal auth (GSSAPI/hostbased).
+    std::string local_fwd = fmt::format("{}:localhost:{}", port, port);
+    std::string inner_cmd = fmt::format(
+        "exec ssh -N -o StrictHostKeyChecking=no -o BatchMode=yes "
+        "-L localhost:{}:localhost:{} {}", port, port, compute_node);
+
     execlp("ssh", "ssh",
-           "-N", "-T",
+           "-T",
            "-L", local_fwd.c_str(),
            "-o", "StrictHostKeyChecking=no",
            "-o", "BatchMode=yes",
@@ -121,6 +136,7 @@ pid_t PortForwarder::spawn_tunnel(const std::string& local_fwd,
            "-o", "ServerAliveCountMax=3",
            "-i", key_path_.c_str(),
            dtn_host.c_str(),
+           inner_cmd.c_str(),
            nullptr);
     _exit(127);
 }
@@ -171,9 +187,6 @@ std::vector<pid_t> PortForwarder::start(const std::string& compute_node,
     std::string dtn_host = fmt::format("{}@{}", username_, dtn_.host);
 
     for (int port : ports) {
-        // -L localport:compute_node:remoteport — DTN does TCP forwarding
-        std::string local_fwd = fmt::format("{}:{}:{}", port, compute_node, port);
-
         if (is_port_open(port)) {
             emit(fmt::format("Port {} already in use — skipping", port));
             continue;
@@ -181,7 +194,7 @@ std::vector<pid_t> PortForwarder::start(const std::string& compute_node,
 
         emit(fmt::format("Forwarding localhost:{} → {}:{}...", port, compute_node, port));
 
-        pid_t pid = spawn_tunnel(local_fwd, dtn_host);
+        pid_t pid = spawn_tunnel(port, compute_node, dtn_host);
         if (pid < 0) {
             emit(fmt::format("fork failed for port {}", port));
             continue;

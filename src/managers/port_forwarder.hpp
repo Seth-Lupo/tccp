@@ -32,8 +32,9 @@ private:
     bool keys_ready_ = false;
     std::string key_path_;
 
-    // Fork an SSH tunnel process. Returns pid, or -1 on failure.
-    pid_t spawn_tunnel(const std::string& local_fwd,
+    // Fork a two-hop SSH tunnel process. Returns pid, or -1 on failure.
+    pid_t spawn_tunnel(int port,
+                       const std::string& compute_node,
                        const std::string& dtn_host);
 
     // Wait for a tunnel to bind its local port (up to timeout_ms).

@@ -4,6 +4,7 @@
 #include <fstream>
 #include <chrono>
 #include <ctime>
+#include <filesystem>
 #include <ssh/connection.hpp>
 #include <core/utils.hpp>
 #include <fmt/format.h>
@@ -11,6 +12,23 @@
 static const char* TCCP_LOG_PATH = "/tmp/tccp_debug.log";
 
 // now_iso() is provided by core/utils.hpp — no duplicate here.
+
+// Persistent job log path: ~/.tccp/logs/{job_id}.log
+inline std::string job_log_path(const std::string& job_id) {
+    const char* home = std::getenv("HOME");
+    if (!home) home = "/tmp";
+    return std::string(home) + "/.tccp/logs/" + job_id + ".log";
+}
+
+// Append a timestamped line to a job's persistent log file.
+inline void append_job_log(const std::string& job_id, const std::string& msg) {
+    std::string path = job_log_path(job_id);
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream f(path, std::ios::app);
+    if (f) {
+        f << "[" << now_iso() << "] " << msg << "\n";
+    }
+}
 
 inline void tccp_log(const std::string& msg) {
     std::ofstream out(TCCP_LOG_PATH, std::ios::app);

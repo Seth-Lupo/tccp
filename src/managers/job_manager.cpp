@@ -196,14 +196,17 @@ Result<TrackedJob> JobManager::run(const std::string& job_name, StatusCallback c
 void JobManager::background_init_thread(std::string job_id, std::string job_name) {
     tccp_log(fmt::format("INIT THREAD START: job_id={}", job_id));
 
+    // Ensure persistent log directory exists
+    std::string log_path = job_log_path(job_id);
+    fs::create_directories(fs::path(log_path).parent_path());
+
     auto t0 = std::chrono::steady_clock::now();
     auto log_to_file = [&](const std::string& msg) {
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
         std::string ts = (ms < 1000) ? fmt::format("{}ms", ms) : fmt::format("{:.1f}s", ms / 1000.0);
         std::string stamped = fmt::format("[{}] {}", ts, msg);
-        std::string init_log = "/tmp/tccp_init_" + job_id + ".log";
-        std::ofstream f(init_log, std::ios::app);
+        std::ofstream f(log_path, std::ios::app);
         if (f) {
             f << stamped << "\n";
         }
@@ -331,6 +334,8 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
             fwd_ports = job_it->second.ports;
             tunnel_pids = port_fwd_.start(alloc->node, fwd_ports, log_to_file);
         }
+
+        log_to_file("=== Job running ===");
 
         // Update tracked job with final info
         std::string start = now_iso();

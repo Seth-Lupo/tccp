@@ -116,7 +116,10 @@ private:
     // Shared cancel logic (used by both cancel_job and cancel_job_by_id)
     Result<void> do_cancel(TrackedJob* tj, const std::string& job_name);
 
-    // Shared cleanup: remove scratch + socket from compute node (preserves log)
+    // Kill all processes associated with a job on its compute node
+    void kill_job_processes(const TrackedJob& tj);
+
+    // Shared cleanup: kill job processes + remove socket from compute node
     void cleanup_compute_node(const TrackedJob& tj);
 
     // Shared: persist tracked job fields to state store

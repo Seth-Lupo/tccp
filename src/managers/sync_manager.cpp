@@ -146,7 +146,7 @@ void SyncManager::pipe_tar_to_node(const fs::path& tar_path,
     std::string cmd = fmt::format(
         "cat {} | ssh -T -i {} "
         "-o StrictHostKeyChecking=no -o BatchMode=yes "
-        "{} 'exec ssh {} {} \"mkdir -p {} && cd {} && tar xf -\"'",
+        "{} 'exec ssh {} {} \"mkdir -p {} && cd {} && tar xf - 2>/dev/null\"'",
         tar_path.string(), key_path,
         dtn_host, SSH_OPTS, compute_node, scratch_path, scratch_path);
     int rc = std::system(cmd.c_str());

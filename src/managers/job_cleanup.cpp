@@ -6,6 +6,7 @@
 #include <sstream>
 #include <set>
 #include <map>
+#include <filesystem>
 
 // ── Cancel ─────────────────────────────────────────────────
 
@@ -23,6 +24,7 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
         tj->completed = true;
         tj->exit_code = 130;
         tj->end_time = now_iso();
+        append_job_log(tj->job_id, "Job canceled");
         persist_job_state(*tj);
         allocs_.persist();
 
@@ -52,36 +54,12 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
         }
     }
 
-    // Kill the dtach process and its entire child tree (singularity, python, etc.)
-    // fuser alone only kills processes holding the socket fd open — container
-    // children in separate PID namespaces survive. So we find the dtach PID,
-    // walk /proc to collect all descendants, then SIGKILL the whole tree.
-    std::string kill_cmd = fmt::format(
-        "ssh {} {} '"
-        "DPID=$(fuser {} 2>/dev/null | tr -d \" \"); "
-        "if [ -n \"$DPID\" ]; then "
-        "  PIDS=$DPID; "
-        "  TODO=$DPID; "
-        "  while [ -n \"$TODO\" ]; do "
-        "    NEXT=\"\"; "
-        "    for P in $TODO; do "
-        "      for C in $(ps -o pid= --ppid $P 2>/dev/null); do "
-        "        PIDS=\"$PIDS $C\"; NEXT=\"$NEXT $C\"; "
-        "      done; "
-        "    done; "
-        "    TODO=$NEXT; "
-        "  done; "
-        "  kill -9 $PIDS 2>/dev/null; "
-        "fi'",
-        SSH_OPTS_FAST, tj->compute_node, dtach_socket);
-    auto kill_result = dtn_.run(kill_cmd);
-    tccp_log_ssh("cancel:kill", kill_cmd, kill_result);
-
     // Mark as canceled and finalize
     tj->canceled = true;
     tj->completed = true;
     tj->exit_code = 130;  // 128 + SIGINT
     tj->end_time = now_iso();
+    append_job_log(tj->job_id, "Job canceled");
 
     cleanup_compute_node(*tj);
     persist_job_state(*tj);
@@ -219,6 +197,11 @@ void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
 
     // Phase 2: Process completions without the lock held.
     for (auto& tj : newly_completed) {
+        if (tj.exit_code == 0) {
+            append_job_log(tj.job_id, "Job completed (exit 0)");
+        } else {
+            append_job_log(tj.job_id, fmt::format("Job completed (exit {})", tj.exit_code));
+        }
         allocs_.release_job(tj.slurm_id);
         cleanup_compute_node(tj);
         persist_job_state(tj);
@@ -238,6 +221,44 @@ void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
 
 // ── Cleanup helpers ────────────────────────────────────────
 
+void JobManager::kill_job_processes(const TrackedJob& tj) {
+    if (tj.compute_node.empty()) return;
+
+    // Kill everything associated with this job on the compute node.
+    // The process tree (dtach → bash → script → singularity → python) can have
+    // orphaned children that survive if only the dtach PID is killed.  We use
+    // multiple strategies to be thorough:
+    //   1. fuser on dtach socket → walk /proc descendants → SIGKILL tree
+    //   2. pkill -f matching the job_id (catches orphaned singularity/python)
+    //   3. Remove the dtach socket
+    std::string sock = fmt::format("/tmp/tccp_{}.sock", tj.job_id);
+    std::string cmd = fmt::format(
+        "ssh {} {} '"
+        // Strategy 1: fuser + process tree walk
+        "DPID=$(fuser {} 2>/dev/null | tr -d \" \"); "
+        "if [ -n \"$DPID\" ]; then "
+        "  PIDS=$DPID; "
+        "  TODO=$DPID; "
+        "  while [ -n \"$TODO\" ]; do "
+        "    NEXT=\"\"; "
+        "    for P in $TODO; do "
+        "      for C in $(ps -o pid= --ppid $P 2>/dev/null); do "
+        "        PIDS=\"$PIDS $C\"; NEXT=\"$NEXT $C\"; "
+        "      done; "
+        "    done; "
+        "    TODO=$NEXT; "
+        "  done; "
+        "  kill -9 $PIDS 2>/dev/null; "
+        "fi; "
+        // Strategy 2: pkill anything referencing this job_id
+        "pkill -9 -f \"tccp_{}\" 2>/dev/null; "
+        // Clean up socket
+        "rm -f {}'",
+        SSH_OPTS_FAST, tj.compute_node, sock, tj.job_id, sock);
+    auto result = dtn_.run(cmd);
+    tccp_log_ssh("cleanup:kill", cmd, result);
+}
+
 void JobManager::cleanup_compute_node(const TrackedJob& tj) {
     if (!tj.tunnel_pids.empty()) {
         PortForwarder::stop(tj.tunnel_pids);
@@ -245,13 +266,11 @@ void JobManager::cleanup_compute_node(const TrackedJob& tj) {
 
     if (tj.compute_node.empty()) return;
 
-    // Only remove the dtach socket — keep the scratch directory alive so the
-    // next job on the same node can reuse the synced files (cp + incremental
-    // diff) instead of a full re-upload.  The scratch is cleaned up later by
-    // sync_to_scratch after it copies files to the new scratch.
-    std::string cmd = fmt::format("ssh {} {} 'rm -f /tmp/tccp_{}.sock'",
-                                  SSH_OPTS, tj.compute_node, tj.job_id);
-    dtn_.run(cmd);
+    // Kill all job processes and remove the dtach socket.
+    // Keep the scratch directory alive so the next job on the same node can
+    // reuse the synced files (cp + incremental diff) instead of a full
+    // re-upload.  Scratch is cleaned up later by sync_to_scratch.
+    kill_job_processes(tj);
 }
 
 void JobManager::persist_job_state(const TrackedJob& tj) {
@@ -270,6 +289,11 @@ void JobManager::persist_job_state(const TrackedJob& tj) {
 }
 
 void JobManager::on_job_complete(TrackedJob& tj) {
+    if (tj.exit_code == 0) {
+        append_job_log(tj.job_id, "Job completed (exit 0)");
+    } else {
+        append_job_log(tj.job_id, fmt::format("Job completed (exit {})", tj.exit_code));
+    }
     allocs_.release_job(tj.slurm_id);
     if (tj.end_time.empty()) tj.end_time = now_iso();
     cleanup_compute_node(tj);
@@ -314,6 +338,13 @@ void JobManager::prune_completed_jobs() {
     }
 
     if (kept_jobs.size() < state_jobs.size()) {
+        // Delete log files for pruned jobs
+        for (size_t i = 0; i < state_jobs.size(); i++) {
+            if (!keep[i]) {
+                std::filesystem::remove(job_log_path(state_jobs[i].job_id));
+            }
+        }
+
         state_jobs = kept_jobs;
 
         {

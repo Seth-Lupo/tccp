@@ -1,6 +1,7 @@
 #include "../base_cli.hpp"
 #include "../job_view.hpp"
 #include "../theme.hpp"
+#include <managers/job_log.hpp>
 #include <core/utils.hpp>
 #include <core/time_utils.hpp>
 #include <iostream>
@@ -14,6 +15,7 @@
 #include <fstream>
 #include <sstream>
 #include <ctime>
+#include <filesystem>
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -290,7 +292,7 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
         draw_header(job_name, "INITIALIZING...");
         setup_content_area();
 
-        std::string init_log = "/tmp/tccp_init_" + tracked->job_id + ".log";
+        std::string init_log = job_log_path(tracked->job_id);
 
         // Raw terminal for Ctrl+\ detection
         struct termios old_term, raw_term;
@@ -396,7 +398,6 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                     tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                     leave_alt_screen();
-                    std::remove(init_log.c_str());
                     return;
                 }
 
@@ -407,8 +408,7 @@ static void do_view(BaseCLI& cli, const std::string& arg) {
         // Restore terminal before attaching (JobView sets its own raw mode)
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
 
-        // Clean up init log and clear init output from screen
-        std::remove(init_log.c_str());
+        // Clear init output from screen
         std::cout << "\033[H\033[J" << std::flush;
 
         // Transition to live job view
@@ -488,7 +488,7 @@ static void do_cancel(BaseCLI& cli, const std::string& arg) {
 
     auto result = cli.service.cancel_job(job_name, cb);
     if (result.is_ok()) {
-        std::cout << theme::dim(fmt::format("Canceled job '{}'", job_name));
+        std::cout << theme::dim(fmt::format("Canceled job '{}'", job_name)) << "\n";
     } else {
         std::cout << theme::error(result.error);
     }
@@ -560,11 +560,125 @@ static void do_clean(BaseCLI& cli, const std::string& arg) {
     }
 }
 
+static void do_logs(BaseCLI& cli, const std::string& arg) {
+    namespace fs = std::filesystem;
+
+    std::string logs_dir;
+    {
+        const char* home = std::getenv("HOME");
+        if (!home) home = "/tmp";
+        logs_dir = std::string(home) + "/.tccp/logs";
+    }
+
+    if (!fs::exists(logs_dir)) {
+        std::cout << "No logs found.\n";
+        return;
+    }
+
+    if (arg.empty()) {
+        // List all logs with summary
+        std::vector<std::pair<std::string, fs::path>> entries;  // {job_id, path}
+        for (const auto& entry : fs::directory_iterator(logs_dir)) {
+            if (entry.path().extension() == ".log") {
+                entries.emplace_back(entry.path().stem().string(), entry.path());
+            }
+        }
+
+        if (entries.empty()) {
+            std::cout << "No logs found.\n";
+            return;
+        }
+
+        // Sort by filename (timestamp-based job_id gives chronological order)
+        std::sort(entries.begin(), entries.end());
+
+        std::cout << "\n";
+        for (const auto& [job_id, path] : entries) {
+            // Extract job name from job_id (format: timestamp__name)
+            std::string job_name = job_id;
+            auto pos = job_id.find("__");
+            if (pos != std::string::npos && pos + 2 < job_id.size()) {
+                job_name = job_id.substr(pos + 2);
+            }
+
+            // Read first and last line for timestamp summary
+            std::ifstream f(path);
+            std::string first_line, last_line, line;
+            if (f) {
+                if (std::getline(f, first_line)) {
+                    last_line = first_line;
+                    while (std::getline(f, line)) {
+                        last_line = line;
+                    }
+                }
+            }
+
+            // Determine status from last line
+            std::string status = "in progress";
+            if (last_line.find("Job completed (exit 0)") != std::string::npos) {
+                status = "completed";
+            } else if (last_line.find("Job completed") != std::string::npos) {
+                status = "failed";
+            } else if (last_line.find("Job canceled") != std::string::npos) {
+                status = "canceled";
+            } else if (last_line.find("Init failed") != std::string::npos) {
+                status = "init failed";
+            }
+
+            std::cout << fmt::format("  {:<16} {:<14} {}\n", job_name, status, first_line);
+        }
+        std::cout << "\n";
+    } else {
+        // Find matching job log — try exact job_id first, then match by name
+        std::string match_path;
+
+        // Check exact job_id match
+        std::string exact = logs_dir + "/" + arg + ".log";
+        if (fs::exists(exact)) {
+            match_path = exact;
+        } else {
+            // Find most recent log matching job name (suffix after __)
+            std::string best_id;
+            for (const auto& entry : fs::directory_iterator(logs_dir)) {
+                if (entry.path().extension() != ".log") continue;
+                std::string job_id = entry.path().stem().string();
+                auto pos = job_id.find("__");
+                if (pos != std::string::npos && pos + 2 < job_id.size()) {
+                    std::string name = job_id.substr(pos + 2);
+                    if (name == arg && (best_id.empty() || job_id > best_id)) {
+                        best_id = job_id;
+                        match_path = entry.path().string();
+                    }
+                }
+            }
+        }
+
+        if (match_path.empty()) {
+            std::cout << theme::error(fmt::format("No log found for '{}'", arg));
+            return;
+        }
+
+        // Print the full log
+        std::ifstream f(match_path);
+        if (!f) {
+            std::cout << theme::error("Could not open log file");
+            return;
+        }
+        std::cout << "\n";
+        std::string line;
+        while (std::getline(f, line)) {
+            std::cout << line << "\n";
+        }
+        std::cout << "\n";
+    }
+}
+
 void register_jobs_commands(BaseCLI& cli) {
     cli.add_command("run", do_run, "Submit and attach to a job");
     cli.add_command("view", do_view, "Re-attach to a running job");
     cli.add_command("jobs", do_jobs, "List running jobs");
     cli.add_command("cancel", do_cancel, "Cancel a job");
     cli.add_command("return", do_return, "Download job output");
+    cli.add_command("logs", do_logs, "View job lifecycle logs");
     cli.add_command("clean", do_clean, "Remove old output (keeps latest)");
 }
