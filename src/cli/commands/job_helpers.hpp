@@ -24,5 +24,6 @@ void do_view(BaseCLI& cli, const std::string& arg);
 void do_restart(BaseCLI& cli, const std::string& arg);
 void do_tail(BaseCLI& cli, const std::string& arg);
 void do_ssh(BaseCLI& cli, const std::string& arg);
+void do_open(BaseCLI& cli, const std::string& arg);
 void do_logs(BaseCLI& cli, const std::string& arg);
 void do_clean(BaseCLI& cli, const std::string& arg);

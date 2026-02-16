@@ -100,16 +100,14 @@ std::string BaseCLI::get_prompt_string() const {
         return rl_esc(theme::color::BROWN) + "tccp"
              + rl_esc(theme::color::RESET) + "> ";
     } else if (service.is_connected()) {
-        return rl_esc(theme::color::BROWN) + "tccp"
-             + rl_esc(theme::color::RESET) + ":"
-             + rl_esc(theme::color::BLUE) + service.config().project().name
+        return rl_esc(theme::color::BLUE) + service.config().project().name
              + rl_esc(theme::color::RESET) + "@"
-             + rl_esc(theme::color::GREEN) + "cluster"
+             + rl_esc(theme::color::BROWN) + "tccp"
              + rl_esc(theme::color::RESET) + "> ";
     } else {
-        return rl_esc(theme::color::BROWN) + "tccp"
-             + rl_esc(theme::color::RESET) + ":"
-             + rl_esc(theme::color::BLUE) + service.config().project().name
+        return rl_esc(theme::color::BLUE) + service.config().project().name
+             + rl_esc(theme::color::RESET) + "@"
+             + rl_esc(theme::color::BROWN) + "tccp"
              + rl_esc(theme::color::RESET) + "> ";
     }
 }

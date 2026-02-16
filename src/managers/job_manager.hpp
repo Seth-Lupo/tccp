@@ -55,6 +55,10 @@ public:
     static std::string job_name_from_id(const std::string& job_id);
     static std::string timestamp_from_id(const std::string& job_id);
 
+    // Returns true for job names that are always available without being in tccp.yaml
+    // (e.g. "bash"). Add new implicit job types here.
+    static bool is_implicit_job(const std::string& job_name);
+
     Result<TrackedJob> run(const std::string& job_name, StatusCallback cb = nullptr);
     SSHResult list(StatusCallback cb = nullptr);
     Result<void> cancel_job(const std::string& job_name, StatusCallback cb = nullptr);
@@ -63,6 +67,10 @@ public:
     void poll(std::function<void(const TrackedJob&)> on_complete);
     const std::vector<TrackedJob>& tracked_jobs() const;
     TrackedJob* find_by_name(const std::string& job_name);
+
+    // Build a shell command that enters the job's environment (singularity + binds + env vars).
+    // If inner_cmd is empty, launches an interactive bash shell.
+    std::string shell_command(const TrackedJob& tj, const std::string& inner_cmd = "") const;
 
     // Release allocation when job completes
     void on_job_complete(TrackedJob& tj);
@@ -95,6 +103,29 @@ private:
     void ensure_environment(const std::string& compute_node, StatusCallback cb);
     void ensure_dtach(StatusCallback cb);
     void ensure_dirs(const std::string& job_id, StatusCallback cb);
+
+    // Resolved environment paths used for run scripts and shell commands.
+    // Computed once via resolve_env_paths(), shared across launch/shell methods.
+    struct JobEnvPaths {
+        std::string image;          // full path to .sif container
+        std::string venv;           // venv directory
+        std::string binds;          // singularity --bind flags (including --nv)
+        std::string runtime_cache;  // temp dir for HOME/XDG/TMPDIR
+        std::string req_filter;     // bash snippet to filter requirements.txt
+        std::string log;            // log file path
+        bool has_python;            // environment has python
+    };
+    JobEnvPaths resolve_env_paths(const std::string& job_id,
+                                  const std::string& scratch) const;
+
+    // Common environment preamble for run scripts (module load, cd, env vars, pip install).
+    std::string build_run_preamble(const JobEnvPaths& paths,
+                                   const std::string& scratch) const;
+
+    // Job-type-specific payload: the command(s) appended after the preamble.
+    // Override this pattern for new implicit job types.
+    std::string build_job_payload(const std::string& job_name,
+                                  const JobEnvPaths& paths) const;
 
     // Launch the job on the compute node via SSH + dtach
     Result<void> launch_on_node(const std::string& job_id,

@@ -238,93 +238,15 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
                                          const std::string& scratch,
                                          StatusCallback cb) {
     const auto& proj = config_.project();
-    auto it = proj.jobs.find(job_name);
-    std::string script = (it != proj.jobs.end()) ? it->second.script : "main.py";
-    std::string args = (it != proj.jobs.end()) ? it->second.args : "";
-
-    const auto& env = get_environment(config_.project().type);
-    std::string cc = container_cache();
-    std::string image = cc + "/images/" + env.sif_filename;
-    std::string venv = env_dir() + "/default/venv";
     std::string out_dir = job_output_dir(job_id);
     std::string sock = "/tmp/tccp_" + job_id + ".sock";
-    std::string log = "/tmp/tccp_" + job_id + ".log";
-    bool gpu = env.gpu;
-    std::string nv_flag = gpu ? "--nv " : "";
 
     if (cb) cb("Launching job on compute node...");
 
-    // Build bind mount flags (--nv for GPU types enables NVIDIA driver access)
-    std::string binds = fmt::format("{}--bind {}:{} --bind {}:{}",
-                                    nv_flag, scratch, scratch, venv, venv);
-    if (!proj.cache.empty()) {
-        std::string shared_cache = fmt::format("/tmp/{}/{}/.tccp-cache",
-                                               username_, proj.name);
-        binds += fmt::format(" --bind {}:{}/cache", shared_cache, scratch);
-    }
-
-    // For GPU environments, filter out container-provided packages from
-    // requirements.txt so pip doesn't re-download torch (~2GB) and break
-    // the CUDA-linked version already in the container.
-    std::string req_filter;
-    if (gpu) {
-        req_filter =
-            "        TCCP_REQ_FILE=$(mktemp /tmp/tccp_req_XXXXXX.txt)\n"
-            "        grep -ivE '^(torch|torchvision|torchaudio|pytorch|nvidia-|triton)(\\s|[=><!~\\[]|$)' "
-            "requirements.txt > $TCCP_REQ_FILE\n";
-    } else {
-        req_filter =
-            "        TCCP_REQ_FILE=requirements.txt\n";
-    }
-
-    // Build cache/temp dir path — use shared cache if configured, else per-job temp
-    std::string runtime_cache;
-    if (!proj.cache.empty()) {
-        runtime_cache = fmt::format("/tmp/{}/{}/.tccp-cache", username_, proj.name);
-    } else {
-        runtime_cache = scratch + "/.tccp-tmp";
-    }
-
-    // Create the run script on the compute node
-    std::string run_script = fmt::format(
-        "#!/bin/bash\n"
-        "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true\n"
-        "export SINGULARITY_CACHEDIR={}/cache\n"
-        "export SINGULARITY_TMPDIR={}/tmp\n"
-        "cd {}\n"
-        "# Redirect all writes to /tmp (avoid NFS home quota)\n"
-        "# HOME is set after module load so the module system can find its config\n"
-        "mkdir -p {}\n"
-        "export HOME={}\n"
-        "export XDG_CACHE_HOME={}/xdg-cache\n"
-        "export TMPDIR={}/tmp\n"
-        "export PIP_CACHE_DIR={}/pip-cache\n"
-        "export HF_HOME={}/huggingface\n"
-        "export TORCH_HOME={}/torch\n"
-        "mkdir -p $XDG_CACHE_HOME $TMPDIR $PIP_CACHE_DIR $HF_HOME $TORCH_HOME\n"
-        "if [ -f requirements.txt ]; then\n"
-        "    REQ_HASH=$(md5sum requirements.txt 2>/dev/null | cut -d' ' -f1)\n"
-        "    mkdir -p {}/env\n"
-        "    STAMP={}/env/.req_installed\n"
-        "    if [ ! -f \"$STAMP\" ] || [ \"$(cat $STAMP 2>/dev/null)\" != \"$REQ_HASH\" ]; then\n"
-        "{}"
-        "        singularity exec {} {} {}/bin/pip install -q -r $TCCP_REQ_FILE\n"
-        "        if [ \"$TCCP_REQ_FILE\" != \"requirements.txt\" ]; then rm -f $TCCP_REQ_FILE; fi\n"
-        "        echo \"$REQ_HASH\" > \"$STAMP\"\n"
-        "    fi\n"
-        "fi\n"
-        "printf '\\n__TCCP_JOB_START__\\n'\n"
-        "CMD=\"singularity exec {} {} {}/bin/python {} {}\"\n"
-        "script -fq -c \"$CMD\" {}\n"
-        "EC=$?\n"
-        "printf '\\033[J'\n"
-        "exit $EC\n",
-        cc, cc,
-        scratch,
-        runtime_cache, runtime_cache, runtime_cache, runtime_cache, runtime_cache, runtime_cache, runtime_cache,
-        scratch, scratch, req_filter, binds, image, venv,
-        binds, image, venv, script, args,
-        log);
+    // Resolve all environment paths and build the run script
+    auto paths = resolve_env_paths(job_id, scratch);
+    std::string run_script = build_run_preamble(paths, scratch)
+                           + build_job_payload(job_name, paths);
 
     // Write to DTN first, then scp to compute node
     std::string dtn_script = fmt::format("/tmp/tccp_run_{}.sh", job_id);

@@ -109,6 +109,156 @@ std::string JobManager::scratch_dir(const std::string& job_id) const {
     return fmt::format(REMOTE_SCRATCH_DIR, username_, config_.project().name, job_id);
 }
 
+bool JobManager::is_implicit_job(const std::string& job_name) {
+    // Add new implicit job types here (e.g. "jupyter", "tensorboard")
+    return job_name == "bash";
+}
+
+JobManager::JobEnvPaths JobManager::resolve_env_paths(const std::string& job_id,
+                                                       const std::string& scratch) const {
+    const auto& env = get_environment(config_.project().type);
+    std::string cc = container_cache();
+    std::string nv_flag = env.gpu ? "--nv " : "";
+    std::string venv = env_dir() + "/default/venv";
+
+    JobEnvPaths p;
+    p.image = cc + "/images/" + env.sif_filename;
+    p.venv = venv;
+    p.log = "/tmp/tccp_" + job_id + ".log";
+    p.has_python = (env.type_name.find("python") != std::string::npos);
+
+    // Bind mounts
+    p.binds = fmt::format("{}--bind {}:{} --bind {}:{}",
+                           nv_flag, scratch, scratch, venv, venv);
+    if (!config_.project().cache.empty()) {
+        std::string shared_cache = fmt::format("/tmp/{}/{}/.tccp-cache",
+                                               username_, config_.project().name);
+        p.binds += fmt::format(" --bind {}:{}/cache", shared_cache, scratch);
+    }
+
+    // Runtime cache
+    if (!config_.project().cache.empty()) {
+        p.runtime_cache = fmt::format("/tmp/{}/{}/.tccp-cache", username_, config_.project().name);
+    } else {
+        p.runtime_cache = scratch + "/.tccp-tmp";
+    }
+
+    // GPU-aware requirements filter
+    if (env.gpu) {
+        p.req_filter =
+            "        TCCP_REQ_FILE=$(mktemp /tmp/tccp_req_XXXXXX.txt)\n"
+            "        grep -ivE '^(torch|torchvision|torchaudio|pytorch|nvidia-|triton)(\\s|[=><!~\\[]|$)' "
+            "requirements.txt > $TCCP_REQ_FILE\n";
+    } else {
+        p.req_filter = "        TCCP_REQ_FILE=requirements.txt\n";
+    }
+
+    return p;
+}
+
+std::string JobManager::build_run_preamble(const JobEnvPaths& paths,
+                                            const std::string& scratch) const {
+    return fmt::format(
+        "#!/bin/bash\n"
+        "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true\n"
+        "export SINGULARITY_CACHEDIR={rc}/cache\n"
+        "export SINGULARITY_TMPDIR={rc}/tmp\n"
+        "cd {scratch}\n"
+        "mkdir -p {rc}\n"
+        "export HOME={rc}\n"
+        "export XDG_CACHE_HOME={rc}/xdg-cache\n"
+        "export TMPDIR={rc}/tmp\n"
+        "export PIP_CACHE_DIR={rc}/pip-cache\n"
+        "export HF_HOME={rc}/huggingface\n"
+        "export TORCH_HOME={rc}/torch\n"
+        "mkdir -p $XDG_CACHE_HOME $TMPDIR $PIP_CACHE_DIR $HF_HOME $TORCH_HOME\n"
+        "if [ -f requirements.txt ]; then\n"
+        "    REQ_HASH=$(md5sum requirements.txt 2>/dev/null | cut -d' ' -f1)\n"
+        "    mkdir -p {scratch}/env\n"
+        "    STAMP={scratch}/env/.req_installed\n"
+        "    if [ ! -f \"$STAMP\" ] || [ \"$(cat $STAMP 2>/dev/null)\" != \"$REQ_HASH\" ]; then\n"
+        "{req_filter}"
+        "        singularity exec {binds} {image} {venv}/bin/pip install -q -r $TCCP_REQ_FILE\n"
+        "        if [ \"$TCCP_REQ_FILE\" != \"requirements.txt\" ]; then rm -f $TCCP_REQ_FILE; fi\n"
+        "        echo \"$REQ_HASH\" > \"$STAMP\"\n"
+        "    fi\n"
+        "fi\n"
+        "printf '\\n__TCCP_JOB_START__\\n'\n",
+        fmt::arg("rc", paths.runtime_cache),
+        fmt::arg("scratch", scratch),
+        fmt::arg("req_filter", paths.req_filter),
+        fmt::arg("binds", paths.binds),
+        fmt::arg("image", paths.image),
+        fmt::arg("venv", paths.venv));
+}
+
+std::string JobManager::build_job_payload(const std::string& job_name,
+                                           const JobEnvPaths& paths) const {
+    // ── Implicit job types ──────────────────────────────────
+    // Add new cases here for future implicit jobs (e.g. "jupyter", "tensorboard")
+    if (job_name == "bash") {
+        return fmt::format(
+            "echo 'Interactive session ready. Use ssh bash to connect.'\n"
+            "singularity exec {} {} sleep infinity\n",
+            paths.binds, paths.image);
+    }
+
+    // ── Normal script jobs ──────────────────────────────────
+    const auto& proj = config_.project();
+    auto it = proj.jobs.find(job_name);
+    std::string script = (it != proj.jobs.end()) ? it->second.script : "main.py";
+    std::string args = (it != proj.jobs.end()) ? it->second.args : "";
+
+    return fmt::format(
+        "CMD=\"singularity exec {} {} {}/bin/python {} {}\"\n"
+        "script -fq -c \"$CMD\" {}\n"
+        "EC=$?\n"
+        "printf '\\033[J'\n"
+        "exit $EC\n",
+        paths.binds, paths.image, paths.venv, script, args, paths.log);
+}
+
+std::string JobManager::shell_command(const TrackedJob& tj, const std::string& inner_cmd) const {
+    auto paths = resolve_env_paths(tj.job_id, tj.scratch_path);
+
+    // All env vars go before singularity exec — they propagate into the
+    // container, avoiding single-quote nesting issues across SSH hops.
+    std::string env_setup = fmt::format(
+        "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
+        "cd {}; "
+        "export HOME={}; "
+        "export XDG_CACHE_HOME={}/xdg-cache; "
+        "export TMPDIR={}/tmp; "
+        "export PIP_CACHE_DIR={}/pip-cache; "
+        "export HF_HOME={}/huggingface; "
+        "export TORCH_HOME={}/torch; ",
+        tj.scratch_path,
+        paths.runtime_cache,
+        paths.runtime_cache, paths.runtime_cache, paths.runtime_cache,
+        paths.runtime_cache, paths.runtime_cache);
+
+    // Activate venv for python environments so bare `python` and `pip` work
+    if (paths.has_python) {
+        env_setup += fmt::format("export PATH={}/bin:$PATH; "
+                                 "export VIRTUAL_ENV={}; ",
+                                 paths.venv, paths.venv);
+    }
+
+    if (inner_cmd.empty()) {
+        // Interactive shell: use SINGULARITYENV_PS1 so Singularity injects it
+        // into the container (overriding its default "Singularity>" prompt).
+        // bash --norc prevents .bashrc from overriding it.
+        env_setup += fmt::format("export SINGULARITYENV_PS1=\"{}@{}> \"; ", tj.job_name, tj.compute_node);
+        return env_setup + fmt::format("singularity exec {} {} bash --norc",
+                                        paths.binds, paths.image);
+    } else {
+        // One-off command: run inside bash -c (single quotes around inner_cmd are safe
+        // here since inner_cmd comes from user input, not our generated code)
+        return env_setup + fmt::format("singularity exec {} {} bash -c '{}'",
+                                        paths.binds, paths.image, inner_cmd);
+    }
+}
+
 std::string JobManager::job_name_from_id(const std::string& job_id) {
     auto pos = job_id.find("__");
     if (pos != std::string::npos && pos + 2 < job_id.size()) {
@@ -153,9 +303,9 @@ Result<TrackedJob> JobManager::run(const std::string& job_name, StatusCallback c
     tccp_log("========================================");
     tccp_log(fmt::format("=== run job_name={} ===", job_name));
 
-    // Validate job exists in config
+    // Validate job exists in config (implicit jobs like "bash" are always available)
     const auto& proj = config_.project();
-    if (proj.jobs.find(job_name) == proj.jobs.end()) {
+    if (!is_implicit_job(job_name) && proj.jobs.find(job_name) == proj.jobs.end()) {
         return Result<TrackedJob>::Err("No job named '" + job_name + "' in tccp.yaml");
     }
 
