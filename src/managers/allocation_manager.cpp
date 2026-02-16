@@ -318,6 +318,7 @@ SlurmDefaults AllocationManager::resolve_profile(const std::string& job_name) co
         if (!ps.memory.empty()) profile.memory = ps.memory;
         if (!ps.gpu_type.empty()) profile.gpu_type = ps.gpu_type;
         if (ps.gpu_count > 0) profile.gpu_count = ps.gpu_count;
+        if (!ps.exclude_nodes.empty()) profile.exclude_nodes = ps.exclude_nodes;
     }
 
     // Override with job-specific settings if present
@@ -331,6 +332,7 @@ SlurmDefaults AllocationManager::resolve_profile(const std::string& job_name) co
         if (!js.memory.empty()) profile.memory = js.memory;
         if (!js.gpu_type.empty()) profile.gpu_type = js.gpu_type;
         if (js.gpu_count > 0) profile.gpu_count = js.gpu_count;
+        if (!js.exclude_nodes.empty()) profile.exclude_nodes = js.exclude_nodes;
     }
 
     if (profile.time.empty()) {

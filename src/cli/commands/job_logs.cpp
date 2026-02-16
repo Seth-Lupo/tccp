@@ -144,9 +144,14 @@ void do_clean(BaseCLI& cli, const std::string& arg) {
         }
     }
 
+    // Prune old terminated jobs (keep only latest per job name)
+    if (cli.service.job_manager()) {
+        cli.service.prune_old_jobs();
+    }
+
     if (removed > 0) {
-        std::cout << fmt::format("Cleaned {} old output run(s). Latest kept.\n", removed);
+        std::cout << fmt::format("Cleaned {} old output run(s). Pruned old job state.\n", removed);
     } else {
-        std::cout << "Nothing to clean.\n";
+        std::cout << "Pruned old job state.\n";
     }
 }

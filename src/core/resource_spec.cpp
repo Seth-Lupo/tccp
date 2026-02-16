@@ -37,6 +37,10 @@ std::string generate_sbatch_resources(const SlurmDefaults& profile) {
         s += fmt::format("#SBATCH -w {}[001-999]\n", profile.node_constraint);
     }
 
+    if (!profile.exclude_nodes.empty()) {
+        s += fmt::format("#SBATCH --exclude={}\n", profile.exclude_nodes);
+    }
+
     if (!profile.mail_type.empty() && profile.mail_type != "NONE") {
         s += fmt::format("#SBATCH --mail-type={}\n", profile.mail_type);
     }

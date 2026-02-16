@@ -85,6 +85,9 @@ static void overlay_inline_resources(const YAML::Node& node, SlurmDefaults& s,
     if (node["partition"] && node["partition"].IsScalar()) {
         s.partition = node["partition"].as<std::string>();
     }
+    if (node["exclude_nodes"] && node["exclude_nodes"].IsScalar()) {
+        s.exclude_nodes = node["exclude_nodes"].as<std::string>();
+    }
 }
 
 bool global_config_exists() {
@@ -207,6 +210,7 @@ static SlurmDefaults parse_slurm_config(const YAML::Node& node) {
     slurm.gpu_type = node["gpu_type"].as<std::string>("");
     slurm.gpu_count = node["gpu_count"].as<int>(0);
     slurm.mail_type = node["mail_type"].as<std::string>("NONE");
+    slurm.exclude_nodes = node["exclude_nodes"].as<std::string>("");
 
     return slurm;
 }

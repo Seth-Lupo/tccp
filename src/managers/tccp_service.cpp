@@ -162,6 +162,12 @@ void TccpService::poll_jobs(std::function<void(const TrackedJob&)> on_complete) 
     }
 }
 
+void TccpService::prune_old_jobs() {
+    if (jobs_) {
+        jobs_->prune_completed_jobs();
+    }
+}
+
 // ── Allocation operations ─────────────────────────────────────
 
 std::vector<AllocationSummary> TccpService::list_allocations() {

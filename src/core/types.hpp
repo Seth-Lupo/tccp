@@ -87,6 +87,7 @@ struct SlurmDefaults {
     int gpu_count;
     std::string mail_type;
     std::string node_constraint;  // node prefix for --nodelist (e.g. "cc1gpu")
+    std::string exclude_nodes;    // nodes to exclude (e.g. "s1cmp003,s1cmp004")
 };
 
 struct JobConfig {

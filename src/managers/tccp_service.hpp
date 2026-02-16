@@ -82,6 +82,9 @@ public:
     // Poll for completed jobs (calls on_complete for each newly finished job).
     void poll_jobs(std::function<void(const TrackedJob&)> on_complete);
 
+    // Prune old terminated jobs, keeping only the latest per job name.
+    void prune_old_jobs();
+
     // ── Allocation operations ─────────────────────────────────
 
     // Get a snapshot of all allocations as UI-ready summaries.

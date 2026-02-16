@@ -77,6 +77,9 @@ public:
     // Release allocation when job completes
     void on_job_complete(TrackedJob& tj);
 
+    // Cleanup: keep only latest completed/canceled/failed job per name
+    void prune_completed_jobs();
+
 private:
     const Config& config_;
     SSHConnection& dtn_;
@@ -159,9 +162,6 @@ private:
 
     // Shared: persist tracked job fields to state store
     void persist_job_state(const TrackedJob& tj);
-
-    // Cleanup: keep only latest completed/canceled/failed job per name
-    void prune_completed_jobs();
 
     // Auto-return output and clean remote
     void try_return_output(TrackedJob& tj);

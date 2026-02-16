@@ -32,7 +32,7 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
     }
 
     // Check REMOTE state (don't trust local completed flag)
-    std::string dtach_socket = fmt::format("/tmp/tccp_{}.sock", tj->job_id);
+    std::string dtach_socket = tj->scratch_path + "/tccp.sock";
 
     std::string check_cmd = fmt::format(
         "ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
@@ -159,7 +159,7 @@ void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
             if (!tj.init_complete) continue;
 
             if (!tj.compute_node.empty()) {
-                std::string sock = "/tmp/tccp_" + tj.job_id + ".sock";
+                std::string sock = tj.scratch_path + "/tccp.sock";
                 auto check = dtn_.run(fmt::format("ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
                                                   SSH_OPTS_FAST, tj.compute_node, sock));
 
@@ -231,7 +231,7 @@ void JobManager::kill_job_processes(const TrackedJob& tj) {
     //   1. fuser on dtach socket → walk /proc descendants → SIGKILL tree
     //   2. pkill -f matching the job_id (catches orphaned singularity/python)
     //   3. Remove the dtach socket
-    std::string sock = fmt::format("/tmp/tccp_{}.sock", tj.job_id);
+    std::string sock = tj.scratch_path + "/tccp.sock";
     std::string cmd = fmt::format(
         "ssh {} {} '"
         // Strategy 1: fuser + process tree walk
@@ -251,7 +251,7 @@ void JobManager::kill_job_processes(const TrackedJob& tj) {
         "  kill -9 $PIDS 2>/dev/null; "
         "fi; "
         // Strategy 2: pkill anything referencing this job_id
-        "pkill -9 -f \"tccp_{}\" 2>/dev/null; "
+        "pkill -9 -f \"{}\" 2>/dev/null; "
         // Clean up socket
         "rm -f {}'",
         SSH_OPTS_FAST, tj.compute_node, sock, tj.job_id, sock);
