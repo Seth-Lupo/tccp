@@ -2,7 +2,6 @@
 #include "terminal_output.hpp"
 #include "terminal_ui.hpp"
 #include <iostream>
-#include <vector>
 #include <libssh2.h>
 #include <fmt/format.h>
 #include <unistd.h>
@@ -12,15 +11,12 @@
 #include <sys/ioctl.h>
 #include <cstdio>
 
-// JobView: Interactive terminal UI for viewing remote job execution
+// JobView: Simple interactive relay for remote job execution.
 //
-// Architecture:
-//   - SSH channel on DTN → compute node → dtach session
-//   - Bidirectional relay: stdin → remote, remote → stdout
-//   - Line buffering + local editing on stdin
-//   - Output filtering + scrollback buffer for viewport control
-//   - Header shows status (Loading/RUNNING/TERMINATED)
-//   - Scroll region protects header from remote output
+// Data flow:
+//   Remote SSH bytes → strip_ansi() → plain text → terminal + capture file
+//   Local input      → line-buffered editing → send on Enter
+//   Status bar       → separate UI chrome at bottom
 
 // ── SIGWINCH handler ────────────────────────────────────────────
 
@@ -47,12 +43,10 @@ void JobView::draw_header(bool terminated, int exit_code, bool canceled) {
 
     if (terminated && canceled) {
         bar.status = "CANCELED";
-        bar.controls = "↑↓ scroll  Ctrl+T top  Ctrl+\\ exit ";
         bar.l2_bg = "\033[48;2;60;60;60m";
         bar.l2_fg = "\033[38;2;120;120;120m";
     } else if (terminated) {
         bar.status = exit_code == 0 ? "TERMINATED" : fmt::format("TERMINATED (exit {})", exit_code);
-        bar.controls = "↑↓ scroll  Ctrl+T top  Ctrl+\\ exit ";
         bar.l2_bg = "\033[48;2;60;60;60m";
         bar.l2_fg = "\033[38;2;120;120;120m";
     } else if (!got_first_output_) {
@@ -61,7 +55,7 @@ void JobView::draw_header(bool terminated, int exit_code, bool canceled) {
         bar.l2_fg = "\033[38;2;120;120;120m";
     } else {
         bar.status = "RUNNING";
-        bar.controls = "↑↓ scroll  Ctrl+T top  Ctrl+C cancel  Ctrl+\\ detach ";
+        bar.controls = "Ctrl+C cancel  Ctrl+\\ detach ";
         bar.l2_bg = "\033[48;2;85;72;62m";
         bar.l2_fg = "\033[38;2;150;150;150m";
     }
@@ -70,7 +64,6 @@ void JobView::draw_header(bool terminated, int exit_code, bool canceled) {
 }
 
 Result<int> JobView::attach(bool skip_remote_replay) {
-    // Check if job was canceled during init (no compute node assigned)
     if (compute_node_.empty()) {
         return Result<int>::Err("Job was canceled during initialization (no compute node assigned)");
     }
@@ -97,7 +90,7 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     std::string sr = fmt::format("\0337\033[1;{}r\0338", pty_rows);
     write(STDOUT_FILENO, sr.data(), sr.size());
     draw_header();
-    write(STDOUT_FILENO, "\033[H", 3);  // Move cursor to top-left
+    write(STDOUT_FILENO, "\033[H", 3);
 
     // ── Open SSH channel ────────────────────────────────────────
 
@@ -132,15 +125,13 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     if (dot != std::string::npos)
         log_path = log_path.substr(0, dot) + ".log";
 
-    // Wait for log file (with timeout), tail it, then attach to dtach if alive
     std::string cmd = fmt::format(
         "ssh -t -o StrictHostKeyChecking=no -o LogLevel=ERROR {} "
         "\"TRIES=0; while [ ! -e {} ] && [ \\$TRIES -lt 100 ]; do sleep 0.1; TRIES=\\$((TRIES+1)); done; "
-        "tail -c 65536 {} 2>/dev/null | perl -pe 's/\\e\\[[\\d;]*[HJK]//g'; "
+        "cat {} 2>/dev/null | perl -pe 's/\\e\\[[\\d;]*[HJK]//g'; "
         "if [ -e {} ]; then \\$HOME/tccp/bin/dtach -a {} -r none; fi\"",
         compute_node_, log_path, log_path, dtach_socket_, dtach_socket_);
 
-    // Execute command
     while ((rc = libssh2_channel_exec(channel, cmd.c_str())) == LIBSSH2_ERROR_EAGAIN)
         usleep(100000);
 
@@ -166,23 +157,19 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     cfmakeraw(&raw_term);
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_term);
 
-    // ── Relay loop ──────────────────────────────────────────────
+    // ── Relay state ─────────────────────────────────────────────
 
     char buf[16384];
     std::string input_buffer;
     int cursor_pos = 0;
     std::string pending_suppress;
-
-    std::vector<std::string> output_lines;
-    int scroll_offset = 0;
-    bool in_scroll_mode = false;
-    bool should_clear_on_start = skip_remote_replay;
     bool job_started = false;
-    int consecutive_newlines = 0;
 
     bool remote_eof = false;
     bool user_detached = false;
     bool write_error = false;
+
+    // ── Relay loop ──────────────────────────────────────────────
 
     while (!write_error && !user_detached) {
         struct pollfd fds[2];
@@ -195,7 +182,9 @@ Result<int> JobView::attach(bool skip_remote_replay) {
             g_need_resize = 0;
             struct winsize rws;
             if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &rws) == 0) {
+                cols = rws.ws_col;
                 int new_pty = std::max(1, static_cast<int>(rws.ws_row) - TerminalUI::HEADER_ROWS);
+                pty_rows = new_pty;
                 std::string sr2 = fmt::format("\033[1;{}r", new_pty);
                 write(STDOUT_FILENO, sr2.data(), sr2.size());
                 draw_header();
@@ -203,7 +192,8 @@ Result<int> JobView::attach(bool skip_remote_replay) {
             }
         }
 
-        // stdin → remote (line buffering + local editing)
+        // ── stdin → remote (line buffering + local editing) ─────
+
         if (fds[0].revents & POLLIN) {
             int n = read(STDIN_FILENO, buf, sizeof(buf));
             if (n <= 0) break;
@@ -225,98 +215,27 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                     write(STDOUT_FILENO, "\033[r", 3);
                     tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                     sigaction(SIGWINCH, &old_sa, nullptr);
-                    return Result<int>::Ok(-2);  // Signal: cancel requested
+                    return Result<int>::Ok(-2);
                 }
 
-                // Ctrl+T → scroll to top (show full screen)
-                if (c == 0x14) {
-                    in_scroll_mode = true;
-                    scroll_offset = TerminalUI::compute_top_scroll(output_lines.size());
-                    TerminalUI::redraw_viewport(output_lines, scroll_offset);
-                    draw_header();
-                    continue;
-                }
-
-                // Escape sequences (arrow keys)
+                // Escape sequences (arrow keys for cursor editing)
                 if (c == 0x1b && i + 2 < n && buf[i+1] == '[') {
                     char seq = buf[i+2];
                     i += 2;
 
-                    if (seq == 'A') {  // Up arrow - scroll back
-                        in_scroll_mode = true;
-                        if (scroll_offset < TerminalUI::compute_max_scroll(output_lines.size())) {
-                            scroll_offset++;
-                            TerminalUI::redraw_viewport(output_lines, scroll_offset);
-                            draw_header();
-                        }
-                        continue;
-                    } else if (seq == 'B') {  // Down arrow - scroll forward
-                        if (scroll_offset > 0) {
-                            scroll_offset--;
-                            TerminalUI::redraw_viewport(output_lines, scroll_offset);
-                            draw_header();
-                            if (scroll_offset == 0) {
-                                in_scroll_mode = false;
-                                // Reprint input buffer at bottom
-                                if (!input_buffer.empty()) {
-                                    write(STDOUT_FILENO, input_buffer.c_str(), input_buffer.size());
-                                    int moves_back = input_buffer.size() - cursor_pos;
-                                    for (int j = 0; j < moves_back; j++)
-                                        write(STDOUT_FILENO, "\033[D", 3);
-                                }
-                            }
-                        }
-                        continue;
-                    } else if (seq == 'D') {  // Left arrow
-                        if (in_scroll_mode) {
-                            scroll_offset = 0;
-                            in_scroll_mode = false;
-                            TerminalUI::redraw_viewport(output_lines, 0);
-                            draw_header();
-                            if (!input_buffer.empty()) {
-                                write(STDOUT_FILENO, input_buffer.c_str(), input_buffer.size());
-                                int moves_back = input_buffer.size() - cursor_pos;
-                                for (int j = 0; j < moves_back; j++)
-                                    write(STDOUT_FILENO, "\033[D", 3);
-                            }
-                        }
+                    if (seq == 'D') {  // Left arrow
                         if (cursor_pos > 0) {
                             cursor_pos--;
                             write(STDOUT_FILENO, "\033[D", 3);
                         }
                     } else if (seq == 'C') {  // Right arrow
-                        if (in_scroll_mode) {
-                            scroll_offset = 0;
-                            in_scroll_mode = false;
-                            TerminalUI::redraw_viewport(output_lines, 0);
-                            draw_header();
-                            if (!input_buffer.empty()) {
-                                write(STDOUT_FILENO, input_buffer.c_str(), input_buffer.size());
-                                int moves_back = input_buffer.size() - cursor_pos;
-                                for (int j = 0; j < moves_back; j++)
-                                    write(STDOUT_FILENO, "\033[D", 3);
-                            }
-                        }
                         if (cursor_pos < (int)input_buffer.size()) {
                             cursor_pos++;
                             write(STDOUT_FILENO, "\033[C", 3);
                         }
                     }
+                    // Up/Down arrows: ignored (no scroll, no history)
                     continue;
-                }
-
-                // Exit scroll mode on any non-scroll input
-                if (in_scroll_mode) {
-                    scroll_offset = 0;
-                    in_scroll_mode = false;
-                    TerminalUI::redraw_viewport(output_lines, 0);
-                    draw_header();
-                    if (!input_buffer.empty()) {
-                        write(STDOUT_FILENO, input_buffer.c_str(), input_buffer.size());
-                        int moves_back = input_buffer.size() - cursor_pos;
-                        for (int j = 0; j < moves_back; j++)
-                            write(STDOUT_FILENO, "\033[D", 3);
-                    }
                 }
 
                 // Backspace
@@ -335,17 +254,14 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                     continue;
                 }
 
-                // Enter - send buffered line
+                // Enter — send buffered line
                 if (c == '\r' || c == '\n') {
                     write(STDOUT_FILENO, "\r\n", 2);
-                    // Add user input to scrollback (must use \r\n in raw mode)
-                    output_lines.push_back(input_buffer + "\r\n");
                     pending_suppress = input_buffer + "\r\n";
                     input_buffer += '\n';
 
-                    // Send to remote
                     const char* send_buf = input_buffer.c_str();
-                    int send_len = input_buffer.size();
+                    int send_len = static_cast<int>(input_buffer.size());
                     int sent = 0;
                     while (sent < send_len) {
                         int w = libssh2_channel_write(channel, send_buf + sent, send_len - sent);
@@ -359,7 +275,7 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                     continue;
                 }
 
-                // Regular character - insert at cursor
+                // Regular character — insert at cursor
                 if (c >= 32 || c == '\t') {
                     input_buffer.insert(cursor_pos, 1, c);
                     cursor_pos++;
@@ -371,22 +287,66 @@ Result<int> JobView::attach(bool skip_remote_replay) {
             }
         }
 
-        // remote → stdout + capture
+        // ── remote → display + capture ──────────────────────────
+
         if (fds[1].revents & POLLIN) {
             bool got_output = false;
             for (;;) {
                 int n = libssh2_channel_read(channel, buf, sizeof(buf));
                 if (n <= 0) break;
 
-                TerminalOutput::process_channel_output(buf, n, output_lines, job_started,
-                                       should_clear_on_start, consecutive_newlines,
-                                       capture, !in_scroll_mode, &pending_suppress);
-                got_output = true;
+                // Strip ANSI for clean text
+                std::string plain = TerminalOutput::strip_ansi(buf, n);
+                TerminalOutput::suppress_noise(plain);
+
+                // Echo suppression
+                if (!pending_suppress.empty() && !plain.empty()) {
+                    if (plain.find(pending_suppress) == 0) {
+                        plain = plain.substr(pending_suppress.size());
+                        pending_suppress.clear();
+                    } else if (pending_suppress.find(plain) == 0 &&
+                               pending_suppress.substr(0, plain.size()) == plain) {
+                        pending_suppress = pending_suppress.substr(plain.size());
+                        plain.clear();
+                    } else {
+                        pending_suppress.clear();
+                    }
+                }
+
+                // Detect job start marker
+                if (!job_started) {
+                    auto marker = plain.find("__TCCP_JOB_START__");
+                    if (marker != std::string::npos) {
+                        job_started = true;
+
+                        if (skip_remote_replay)
+                            write(STDOUT_FILENO, "\033[H\033[J", 6);
+
+                        size_t start = marker;
+                        size_t end = marker + 18;
+                        if (start > 0 && plain[start - 1] == '\n') start--;
+                        if (end < plain.size() && plain[end] == '\n') end++;
+                        plain.erase(start, end - start);
+                    }
+                }
+
+                if (!plain.empty()) {
+                    // Write to terminal
+                    write(STDOUT_FILENO, plain.data(), plain.size());
+
+                    // Write to capture file
+                    if (capture) {
+                        fwrite(plain.data(), 1, plain.size(), capture);
+                        fflush(capture);
+                    }
+
+                    got_output = true;
+                }
             }
 
-            if (got_output && !in_scroll_mode) {
+            if (got_output) {
                 got_first_output_ = true;
-                // Re-assert scroll region (remote output may reset it)
+                // Re-assert scroll region + redraw header
                 std::string sr2 = fmt::format("\0337\033[1;{}r\0338", pty_rows);
                 write(STDOUT_FILENO, sr2.data(), sr2.size());
                 draw_header();
@@ -405,18 +365,20 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     bool job_finished = remote_eof && !user_detached;
 
     if (job_finished) {
-        // Drain remaining buffered output
+        // Drain remaining output
         for (;;) {
             int n = libssh2_channel_read(channel, buf, sizeof(buf));
             if (n <= 0) break;
-            TerminalOutput::process_channel_output(buf, n, output_lines, job_started,
-                                   should_clear_on_start, consecutive_newlines,
-                                   capture, false, nullptr);
+            std::string plain = TerminalOutput::strip_ansi(buf, n);
+            TerminalOutput::suppress_noise(plain);
+            if (!plain.empty()) {
+                write(STDOUT_FILENO, plain.data(), plain.size());
+                if (capture) {
+                    fwrite(plain.data(), 1, plain.size(), capture);
+                    fflush(capture);
+                }
+            }
         }
-
-        TerminalUI::wait_for_exit_with_scroll(output_lines, exit_status, [this, exit_status]() {
-            draw_header(true, exit_status, canceled_);
-        });
     }
 
     // ── Cleanup ─────────────────────────────────────────────────

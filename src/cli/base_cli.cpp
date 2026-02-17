@@ -51,7 +51,7 @@ void BaseCLI::print_help() const {
     // Group commands by category
     std::vector<std::pair<std::string, std::vector<std::string>>> categories = {
         {"Connection",   {"status", "disconnect"}},
-        {"Jobs",         {"run", "view", "jobs", "cancel", "return"}},
+        {"Jobs",         {"run", "view", "jobs", "cancel", "return", "output"}},
         {"Allocations",  {"allocs", "dealloc", "gpus"}},
         {"Shell",        {"shell", "exec"}},
         {"Setup",        {"init", "register", "credentials"}},

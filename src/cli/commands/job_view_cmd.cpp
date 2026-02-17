@@ -171,7 +171,7 @@ void do_view(BaseCLI& cli, const std::string& arg) {
         std::string output_path = output_path_for(tracked->job_id);
         tracked->output_file = output_path;
 
-        attach_to_job(cli, tracked, job_name, false);
+        attach_to_job(cli, tracked, job_name, true);
         return;
     }
 
@@ -181,17 +181,23 @@ void do_view(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
-    // Attach to job (live or completed) - always use JobView for consistent scrollback
+    // Completed jobs: dump local capture file (no SSH needed)
+    if (tracked->completed) {
+        std::string path = output_path_for(tracked->job_id);
+        std::ifstream f(path);
+        if (!f) {
+            std::cout << theme::dim("No captured output for this job.") << "\n";
+        } else {
+            std::cout << f.rdbuf();
+            std::cout.flush();
+        }
+        return;
+    }
+
+    // Running job: attach via SSH relay
     TerminalUI::enter_alt_screen();
 
-    std::string status;
-    if (tracked->completed && tracked->canceled) {
-        status = "CANCELED";
-    } else if (tracked->completed) {
-        status = tracked->exit_code == 0 ? "COMPLETED" : fmt::format("FAILED (exit {})", tracked->exit_code);
-    } else {
-        status = "RUNNING on " + tracked->compute_node;
-    }
+    std::string status = "RUNNING on " + tracked->compute_node;
 
     draw_job_header(job_name, status, tracked->slurm_id, tracked->compute_node);
     TerminalUI::setup_content_area();
@@ -357,4 +363,29 @@ void do_tail(BaseCLI& cli, const std::string& arg) {
     if (!result.stdout_data.empty() && result.stdout_data.back() != '\n') {
         std::cout << "\n";
     }
+}
+
+void do_output(BaseCLI& cli, const std::string& arg) {
+    if (!cli.service.job_manager()) return;
+
+    std::string job_name = resolve_job_name(cli, arg);
+    if (job_name.empty()) return;
+
+    auto* tracked = cli.service.find_job_by_name(job_name);
+    if (!tracked) {
+        std::cout << theme::error(fmt::format("No tracked job named '{}'", job_name));
+        return;
+    }
+
+    std::string path = output_path_for(tracked->job_id);
+    std::ifstream f(path);
+    if (!f) {
+        std::cout << theme::dim("No captured output yet.") << "\n";
+        return;
+    }
+
+    // Dump the entire capture file to stdout
+    std::cout << f.rdbuf();
+    if (std::cout.tellp() != 0)
+        std::cout.flush();
 }

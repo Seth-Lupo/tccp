@@ -219,6 +219,8 @@ void register_jobs_commands(BaseCLI& cli) {
     cli.add_command("view", do_view, "Re-attach to a running job");
     cli.add_command("restart", do_restart, "Cancel and re-run a job");
     cli.add_command("tail", do_tail, "Show last N lines of job output");
+    cli.add_command("output", do_output, "Print full job output");
+    cli.add_command("out", do_output, "Print full job output");
     cli.add_command("ssh", do_ssh, "Run command on job's compute node");
     cli.add_command("jobs", do_jobs, "List running jobs");
     cli.add_command("cancel", do_cancel, "Cancel a job");
