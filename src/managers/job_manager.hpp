@@ -80,6 +80,9 @@ public:
     // Cleanup: keep only latest completed/canceled/failed job per name
     void prune_completed_jobs();
 
+    // NFS output directory for a job (accessible from DTN after job ends)
+    std::string job_output_dir(const std::string& job_id) const;
+
 private:
     const Config& config_;
     SSHConnection& dtn_;
@@ -99,7 +102,6 @@ private:
 
     // Path helpers (new directory structure)
     std::string persistent_base() const;
-    std::string job_output_dir(const std::string& job_id) const;
     std::string env_dir() const;
     std::string container_cache() const;
     std::string scratch_dir(const std::string& job_id) const;

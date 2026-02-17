@@ -229,8 +229,10 @@ std::string JobManager::build_job_payload(const std::string& job_name,
         "script -fq -c \"$CMD\" {}\n"
         "EC=$?\n"
         "printf '\\033[J'\n"
+        "cp {} output/tccp.log 2>/dev/null\n"
         "exit $EC\n",
-        paths.binds, paths.image, python_cmd, paths.log);
+        paths.binds, paths.image, python_cmd, paths.log,
+        paths.log);
 }
 
 std::string JobManager::shell_command(const TrackedJob& tj, const std::string& inner_cmd) const {

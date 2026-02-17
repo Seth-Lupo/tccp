@@ -9,14 +9,15 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/ioctl.h>
-#include <cstdio>
+#include <cstdlib>
 
 // JobView: Simple interactive relay for remote job execution.
 //
 // Data flow:
-//   Remote SSH bytes → strip_ansi() → plain text → terminal + capture file
+//   Remote SSH bytes → strip_ansi() → plain text → terminal
 //   Local input      → line-buffered editing → send on Enter
 //   Status bar       → separate UI chrome at bottom
+//   Output stored remotely in tccp.log by `script` on compute node.
 
 // ── SIGWINCH handler ────────────────────────────────────────────
 
@@ -28,12 +29,13 @@ static void handle_sigwinch(int) { g_need_resize = 1; }
 JobView::JobView(SessionManager& session, const std::string& compute_node,
                  const std::string& username, const std::string& dtach_socket,
                  const std::string& job_name, const std::string& slurm_id,
-                 const std::string& output_file, const std::string& job_id,
-                 bool canceled)
+                 const std::string& job_id, const std::string& dtn_host,
+                 const std::string& scratch_path, bool canceled)
     : session_(session), compute_node_(compute_node),
       username_(username), dtach_socket_(dtach_socket),
       job_name_(job_name), slurm_id_(slurm_id),
-      output_file_(output_file), job_id_(job_id), canceled_(canceled) {}
+      job_id_(job_id), dtn_host_(dtn_host),
+      scratch_path_(scratch_path), canceled_(canceled) {}
 
 void JobView::draw_header(bool terminated, int exit_code, bool canceled) {
     TerminalUI::StatusBar bar;
@@ -55,7 +57,7 @@ void JobView::draw_header(bool terminated, int exit_code, bool canceled) {
         bar.l2_fg = "\033[38;2;120;120;120m";
     } else {
         bar.status = "RUNNING";
-        bar.controls = "Ctrl+C cancel  Ctrl+\\ detach ";
+        bar.controls = "Ctrl+C cancel  Ctrl+\\ detach  Ctrl+V output ";
         bar.l2_bg = "\033[48;2;85;72;62m";
         bar.l2_fg = "\033[38;2;150;150;150m";
     }
@@ -70,10 +72,6 @@ Result<int> JobView::attach(bool skip_remote_replay) {
 
     LIBSSH2_SESSION* ssh = session_.get_raw_session();
     int sock = session_.get_socket();
-
-    FILE* capture = nullptr;
-    if (!output_file_.empty())
-        capture = fopen(output_file_.c_str(), "a");
 
     // Get terminal dimensions
     struct winsize ws;
@@ -97,7 +95,6 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     LIBSSH2_CHANNEL* channel = nullptr;
     while (!(channel = libssh2_channel_open_session(ssh))) {
         if (libssh2_session_last_errno(ssh) != LIBSSH2_ERROR_EAGAIN) {
-            if (capture) fclose(capture);
             write(STDOUT_FILENO, "\033[r", 3);
             return Result<int>::Err("Failed to open channel on DTN");
         }
@@ -113,7 +110,6 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     if (rc != 0) {
         libssh2_channel_close(channel);
         libssh2_channel_free(channel);
-        if (capture) fclose(capture);
         write(STDOUT_FILENO, "\033[r", 3);
         return Result<int>::Err("Failed to request PTY on DTN channel");
     }
@@ -128,7 +124,7 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     std::string cmd = fmt::format(
         "ssh -t -o StrictHostKeyChecking=no -o LogLevel=ERROR {} "
         "\"TRIES=0; while [ ! -e {} ] && [ \\$TRIES -lt 100 ]; do sleep 0.1; TRIES=\\$((TRIES+1)); done; "
-        "cat {} 2>/dev/null | perl -pe 's/\\e\\[[\\d;]*[HJK]//g'; "
+        "cat {} 2>/dev/null; "
         "if [ -e {} ]; then \\$HOME/tccp/bin/dtach -a {} -r none; fi\"",
         compute_node_, log_path, log_path, dtach_socket_, dtach_socket_);
 
@@ -138,7 +134,6 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     if (rc != 0) {
         libssh2_channel_close(channel);
         libssh2_channel_free(channel);
-        if (capture) fclose(capture);
         write(STDOUT_FILENO, "\033[r", 3);
         return Result<int>::Err("Failed to exec SSH command");
     }
@@ -211,11 +206,20 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                 if (c == 0x03) {
                     libssh2_channel_close(channel);
                     libssh2_channel_free(channel);
-                    if (capture) fclose(capture);
                     write(STDOUT_FILENO, "\033[r", 3);
                     tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                     sigaction(SIGWINCH, &old_sa, nullptr);
                     return Result<int>::Ok(-2);
+                }
+
+                // Ctrl+V → view output (detach, open vim, reattach)
+                if (c == 0x16) {
+                    libssh2_channel_close(channel);
+                    libssh2_channel_free(channel);
+                    write(STDOUT_FILENO, "\033[r", 3);
+                    tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
+                    sigaction(SIGWINCH, &old_sa, nullptr);
+                    return Result<int>::Ok(-3);
                 }
 
                 // Escape sequences (arrow keys for cursor editing)
@@ -287,7 +291,7 @@ Result<int> JobView::attach(bool skip_remote_replay) {
             }
         }
 
-        // ── remote → display + capture ──────────────────────────
+        // ── remote → display ────────────────────────────────────
 
         if (fds[1].revents & POLLIN) {
             bool got_output = false;
@@ -295,7 +299,7 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                 int n = libssh2_channel_read(channel, buf, sizeof(buf));
                 if (n <= 0) break;
 
-                // Strip ANSI for clean text
+                // Strip ANSI for display
                 std::string plain = TerminalOutput::strip_ansi(buf, n);
                 TerminalOutput::suppress_noise(plain);
 
@@ -331,15 +335,7 @@ Result<int> JobView::attach(bool skip_remote_replay) {
                 }
 
                 if (!plain.empty()) {
-                    // Write to terminal
                     write(STDOUT_FILENO, plain.data(), plain.size());
-
-                    // Write to capture file
-                    if (capture) {
-                        fwrite(plain.data(), 1, plain.size(), capture);
-                        fflush(capture);
-                    }
-
                     got_output = true;
                 }
             }
@@ -371,19 +367,13 @@ Result<int> JobView::attach(bool skip_remote_replay) {
             if (n <= 0) break;
             std::string plain = TerminalOutput::strip_ansi(buf, n);
             TerminalOutput::suppress_noise(plain);
-            if (!plain.empty()) {
+            if (!plain.empty())
                 write(STDOUT_FILENO, plain.data(), plain.size());
-                if (capture) {
-                    fwrite(plain.data(), 1, plain.size(), capture);
-                    fflush(capture);
-                }
-            }
         }
     }
 
     // ── Cleanup ─────────────────────────────────────────────────
 
-    if (capture) fclose(capture);
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
     sigaction(SIGWINCH, &old_sa, nullptr);
 

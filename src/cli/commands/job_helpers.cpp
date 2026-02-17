@@ -11,10 +11,6 @@
 #include <poll.h>
 #include <fmt/format.h>
 
-std::string output_path_for(const std::string& job_id) {
-    return "/tmp/tccp_output_" + job_id + ".log";
-}
-
 std::string dtach_sock_for(const TrackedJob& tj) {
     return tj.scratch_path + "/tccp.sock";
 }
@@ -81,47 +77,65 @@ bool wait_or_detach(int ms) {
 bool attach_to_job(BaseCLI& cli, TrackedJob* tracked,
                    const std::string& job_name, bool replay,
                    bool in_alt_screen) {
-    std::string output_path = output_path_for(tracked->job_id);
-    tracked->output_file = output_path;
+    for (;;) {
+        JobView view(*cli.service.cluster()->get_session(),
+                     tracked->compute_node,
+                     get_cluster_username(),
+                     dtach_sock_for(*tracked),
+                     job_name,
+                     tracked->slurm_id,
+                     tracked->job_id,
+                     cli.service.config().dtn().host,
+                     tracked->scratch_path,
+                     tracked->canceled);
+        auto result = view.attach(replay);
 
-    JobView view(*cli.service.cluster()->get_session(),
-                 tracked->compute_node,
-                 get_cluster_username(),
-                 dtach_sock_for(*tracked),
-                 job_name,
-                 tracked->slurm_id,
-                 output_path,
-                 tracked->job_id,
-                 tracked->canceled);
-    auto result = view.attach(replay);
-    if (in_alt_screen) TerminalUI::leave_alt_screen();
-
-    if (result.is_err()) {
-        std::cout << theme::error("Attach failed: " + result.error);
-        return false;
-    }
-
-    if (result.value == -2) {
-        std::cout << "Canceling job...\n";
-        auto cancel_result = cli.service.cancel_job_by_id(tracked->job_id, nullptr);
-        if (cancel_result.is_ok()) {
-            std::cout << theme::dim(fmt::format("Job '{}' canceled", job_name)) << "\n";
-        } else {
-            std::cout << theme::error(cancel_result.error);
+        if (result.is_err()) {
+            if (in_alt_screen) TerminalUI::leave_alt_screen();
+            std::cout << theme::error("Attach failed: " + result.error);
+            return false;
         }
+
+        // Ctrl+V: view output in vim, then reattach
+        if (result.value == -3) {
+            if (in_alt_screen) TerminalUI::leave_alt_screen();
+            do_output(cli, job_name);
+            // Re-enter alt screen and reattach
+            if (in_alt_screen) {
+                TerminalUI::enter_alt_screen();
+                std::string status = "RUNNING on " + tracked->compute_node;
+                draw_job_header(job_name, status, tracked->slurm_id, tracked->compute_node);
+                TerminalUI::setup_content_area();
+                std::cout.flush();
+            }
+            replay = true;  // skip remote replay on reattach
+            continue;
+        }
+
+        if (in_alt_screen) TerminalUI::leave_alt_screen();
+
+        if (result.value == -2) {
+            std::cout << "Canceling job...\n";
+            auto cancel_result = cli.service.cancel_job_by_id(tracked->job_id, nullptr);
+            if (cancel_result.is_ok()) {
+                std::cout << theme::dim(fmt::format("Job '{}' canceled", job_name)) << "\n";
+            } else {
+                std::cout << theme::error(cancel_result.error);
+            }
+            return false;
+        }
+
+        if (result.value >= 0) {
+            tracked->exit_code = result.value;
+            tracked->completed = true;
+            if (cli.service.job_manager()) cli.service.job_manager()->on_job_complete(*tracked);
+            std::cout << "Session ended.\n";
+            return true;
+        }
+
+        std::cout << "Detached. Use 'view " + job_name + "' to re-attach.\n";
         return false;
     }
-
-    if (result.value >= 0) {
-        tracked->exit_code = result.value;
-        tracked->completed = true;
-        if (cli.service.job_manager()) cli.service.job_manager()->on_job_complete(*tracked);
-        std::cout << "Session ended.\n";
-        return true;
-    }
-
-    std::cout << "Detached. Use 'view " + job_name + "' to re-attach.\n";
-    return false;
 }
 
 std::string resolve_job_name(BaseCLI& cli, const std::string& arg) {

@@ -9,13 +9,12 @@ public:
     JobView(SessionManager& session, const std::string& compute_node,
             const std::string& username, const std::string& dtach_socket,
             const std::string& job_name, const std::string& slurm_id,
-            const std::string& output_file, const std::string& job_id,
-            bool canceled = false);
+            const std::string& job_id, const std::string& dtn_host,
+            const std::string& scratch_path, bool canceled = false);
 
     // Relay stdin/stdout through DTN → compute node → dtach.
-    // Draws a bottom status bar, captures filtered output to file.
-    // Returns exit code (>= 0) if job finished, -1 if user detached, -2 if canceled.
-    // skip_remote_replay: caller already replayed local capture, skip remote tail.
+    // Returns exit code (>= 0) if job finished, -1 if detached, -2 if canceled, -3 if view output.
+    // skip_remote_replay: clear screen after job start marker (for fresh starts).
     Result<int> attach(bool skip_remote_replay = false);
 
     void draw_header(bool terminated = false, int exit_code = 0, bool canceled = false);
@@ -27,8 +26,9 @@ private:
     std::string dtach_socket_;
     std::string job_name_;
     std::string slurm_id_;
-    std::string output_file_;
     std::string job_id_;
+    std::string dtn_host_;
+    std::string scratch_path_;
     bool got_first_output_ = false;
     bool canceled_ = false;
 };

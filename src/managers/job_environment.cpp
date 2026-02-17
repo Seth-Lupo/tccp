@@ -278,8 +278,9 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
         tccp_log_ssh("launch:cache-dir", "mkdir cache", r);
     }
 
-    // Remove stale socket from previous run (if any)
-    dtn_.run(fmt::format("ssh {} {} 'rm -f {}'", SSH_OPTS, compute_node, sock));
+    // Remove stale socket and log from previous run (if scratch was reused)
+    dtn_.run(fmt::format("ssh {} {} 'rm -f {} {}'",
+                         SSH_OPTS, compute_node, sock, paths.log));
 
     // Launch dtach
     std::string launch_cmd = fmt::format(

@@ -7,7 +7,6 @@
 // Shared helpers used by job command files (jobs.cpp, job_view_cmd.cpp, job_logs.cpp)
 
 std::string resolve_job_name(BaseCLI& cli, const std::string& arg);
-std::string output_path_for(const std::string& job_id);
 std::string dtach_sock_for(const TrackedJob& tj);
 bool wait_or_detach(int ms);
 bool attach_to_job(BaseCLI& cli, TrackedJob* tracked,

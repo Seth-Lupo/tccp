@@ -1,5 +1,6 @@
 #include "job_helpers.hpp"
 #include "../terminal_ui.hpp"
+#include "../terminal_output.hpp"
 #include "../theme.hpp"
 #include <managers/job_log.hpp>
 #include <core/constants.hpp>
@@ -12,6 +13,7 @@
 #include <poll.h>
 #include <fmt/format.h>
 #include <fstream>
+#include <cstdlib>
 
 void do_view(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
@@ -168,9 +170,6 @@ void do_view(BaseCLI& cli, const std::string& arg) {
                     tracked->slurm_id, tracked->compute_node);
         std::cout.flush();
 
-        std::string output_path = output_path_for(tracked->job_id);
-        tracked->output_file = output_path;
-
         attach_to_job(cli, tracked, job_name, true);
         return;
     }
@@ -181,15 +180,22 @@ void do_view(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
-    // Completed jobs: dump local capture file (no SSH needed)
+    // Completed jobs: read log from NFS output dir (compute node may be inaccessible)
     if (tracked->completed) {
-        std::string path = output_path_for(tracked->job_id);
-        std::ifstream f(path);
-        if (!f) {
-            std::cout << theme::dim("No captured output for this job.") << "\n";
+        auto* jm = cli.service.job_manager();
+        std::string nfs_log = jm->job_output_dir(tracked->job_id) + "/tccp.log";
+        std::string cat_cmd = fmt::format("cat {} 2>/dev/null", nfs_log);
+        auto result = cli.service.cluster()->dtn().run(cat_cmd);
+        if (result.stdout_data.empty()) {
+            std::cout << theme::dim("No output available.") << "\n";
         } else {
-            std::cout << f.rdbuf();
-            std::cout.flush();
+            std::string clean = TerminalOutput::strip_ansi(
+                result.stdout_data.data(),
+                static_cast<int>(result.stdout_data.size()));
+            if (!clean.empty())
+                write(STDOUT_FILENO, clean.data(), clean.size());
+            if (!clean.empty() && clean.back() != '\n')
+                write(STDOUT_FILENO, "\n", 1);
         }
         return;
     }
@@ -366,6 +372,7 @@ void do_tail(BaseCLI& cli, const std::string& arg) {
 }
 
 void do_output(BaseCLI& cli, const std::string& arg) {
+    if (!cli.require_connection()) return;
     if (!cli.service.job_manager()) return;
 
     std::string job_name = resolve_job_name(cli, arg);
@@ -377,15 +384,36 @@ void do_output(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
-    std::string path = output_path_for(tracked->job_id);
-    std::ifstream f(path);
-    if (!f) {
-        std::cout << theme::dim("No captured output yet.") << "\n";
+    // Determine log source: NFS for completed jobs, compute node for running
+    std::string cat_cmd;
+    auto* jm = cli.service.job_manager();
+    if (tracked->completed) {
+        std::string nfs_log = jm->job_output_dir(tracked->job_id) + "/tccp.log";
+        cat_cmd = fmt::format("cat {} 2>/dev/null", nfs_log);
+    } else {
+        if (tracked->compute_node.empty() || tracked->scratch_path.empty()) {
+            std::cout << theme::dim("No output available.") << "\n";
+            return;
+        }
+        std::string remote_log = tracked->scratch_path + "/tccp.log";
+        cat_cmd = fmt::format(
+            "ssh {} {} 'cat {} 2>/dev/null'",
+            SSH_OPTS_FAST, tracked->compute_node, remote_log);
+    }
+
+    auto result = cli.service.cluster()->dtn().run(cat_cmd);
+
+    if (result.stdout_data.empty()) {
+        std::cout << theme::dim("No output available.") << "\n";
         return;
     }
 
-    // Dump the entire capture file to stdout
-    std::cout << f.rdbuf();
-    if (std::cout.tellp() != 0)
-        std::cout.flush();
+    // Write to local temp file and open in vim
+    std::string local_tmp = "/tmp/tccp_view_" + tracked->job_id + ".log";
+    std::ofstream out(local_tmp, std::ios::binary);
+    out.write(result.stdout_data.data(), result.stdout_data.size());
+    out.close();
+
+    std::string vim_cmd = "vim -R " + local_tmp;
+    std::system(vim_cmd.c_str());
 }
