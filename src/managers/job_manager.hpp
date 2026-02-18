@@ -13,6 +13,7 @@
 #include "sync_manager.hpp"
 #include "cache_manager.hpp"
 #include "port_forwarder.hpp"
+#include "job_watcher.hpp"
 
 struct TrackedJob {
     std::string job_id;       // YYYY-MM-DDTHH-MM-SS-mmm__<job-name>
@@ -68,6 +69,7 @@ public:
     Result<void> return_output(const std::string& job_id, StatusCallback cb = nullptr);
     void poll(std::function<void(const TrackedJob&)> on_complete);
     const std::vector<TrackedJob>& tracked_jobs() const;
+    std::vector<TrackedJob> tracked_jobs_copy() const;
     TrackedJob* find_by_name(const std::string& job_name);
 
     // Build a shell command that enters the job's environment (singularity + binds + env vars).
@@ -83,6 +85,9 @@ public:
     // NFS output directory for a job (accessible from DTN after job ends)
     std::string job_output_dir(const std::string& job_id) const;
 
+    // Returns true (and clears) if a watcher detected job completion since last check.
+    bool consume_watcher_event();
+
 private:
     const Config& config_;
     SSHConnection& dtn_;
@@ -92,13 +97,15 @@ private:
     CacheManager& cache_;
     std::string username_;
     std::vector<TrackedJob> tracked_;
-    std::mutex tracked_mutex_;
+    mutable std::mutex tracked_mutex_;
     std::vector<std::thread> init_threads_;
     std::set<std::string> cancel_requested_;  // job_ids marked for cancellation during init
     std::mutex cancel_mutex_;
     std::atomic<bool> shutdown_{false};        // signals init threads to exit
     bool environment_checked_ = false;  // Cache: only check environment once per session
     PortForwarder port_fwd_;
+    JobWatcher watcher_;
+    std::atomic<bool> watcher_fired_{false};  // signals monitor to run poll()
 
     // Path helpers (new directory structure)
     std::string persistent_base() const;

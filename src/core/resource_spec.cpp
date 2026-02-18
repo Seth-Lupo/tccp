@@ -16,7 +16,12 @@ std::string format_gpu_gres(const std::string& gpu_type, int gpu_count) {
 std::string generate_sbatch_resources(const SlurmDefaults& profile) {
     std::string s;
 
-    std::string partition = profile.partition.empty() ? "batch" : profile.partition;
+    // Default partition: "gpu" if GPUs requested, "batch" otherwise
+    std::string partition = profile.partition;
+    if (partition.empty()) {
+        bool has_gpu = profile.gpu_count > 0 || !profile.gpu_type.empty();
+        partition = has_gpu ? "gpu" : "batch";
+    }
     s += fmt::format("#SBATCH --partition={}\n", partition);
 
     int nodes = profile.nodes > 0 ? profile.nodes : 1;
@@ -76,10 +81,11 @@ int parse_memory_mb(const std::string& mem_str) {
 
 bool resources_compatible(const SlurmDefaults& alloc_resources,
                           const SlurmDefaults& job_requirements) {
-    // Partition must match
-    std::string alloc_part = alloc_resources.partition.empty() ? "batch" : alloc_resources.partition;
-    std::string job_part = job_requirements.partition.empty() ? "batch" : job_requirements.partition;
-    if (alloc_part != job_part) return false;
+    // Partition must match (if job specifies one)
+    if (!job_requirements.partition.empty()) {
+        std::string alloc_part = alloc_resources.partition.empty() ? "" : alloc_resources.partition;
+        if (alloc_part != job_requirements.partition) return false;
+    }
 
     // CPUs: allocation must have >= job requirement
     int alloc_cpus = alloc_resources.cpus_per_task > 0 ? alloc_resources.cpus_per_task : 1;

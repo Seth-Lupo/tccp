@@ -8,6 +8,12 @@
 #include <map>
 #include <filesystem>
 
+// ── Watcher support ────────────────────────────────────────
+
+bool JobManager::consume_watcher_event() {
+    return watcher_fired_.exchange(false);
+}
+
 // ── Cancel ─────────────────────────────────────────────────
 
 Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) {
@@ -53,6 +59,9 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
             return Result<void>::Err(fmt::format("Job '{}' already completed (exit {})", job_name, tj->exit_code));
         }
     }
+
+    // Stop watcher before cleanup
+    watcher_.unwatch(tj->job_id);
 
     // Mark as canceled and finalize
     tj->canceled = true;

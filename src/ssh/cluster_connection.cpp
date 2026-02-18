@@ -96,6 +96,8 @@ SSHResult ClusterConnection::connect_dtn(StatusCallback callback) {
     dtn_target.use_duo = true;
     dtn_target.auto_duo = config_.duo_auto().has_value();
 
+    cluster_password_ = pass_result.value;
+
     session_ = std::make_unique<SessionManager>(dtn_target);
 
     auto result = session_->establish(callback);
@@ -126,8 +128,20 @@ SSHResult ClusterConnection::open_login_tunnel(StatusCallback callback) {
         return SSHResult{-1, "", "Failed to open channel for login tunnel"};
     }
 
-    // Send SSH command on channel 2 to tunnel to login node
-    // DTN -> Login is passwordless (same user, internal network)
+    // The second channel gets its own DTN shell — may require Duo again
+    {
+        ShellNegotiator dtn_negotiator;
+        dtn_negotiator.set_duo_response("1");
+        if (!cluster_password_.empty()) {
+            dtn_negotiator.set_password(cluster_password_);
+        }
+        auto dtn_result = dtn_negotiator.negotiate(login_channel_, callback);
+        if (dtn_result.failed()) {
+            return SSHResult{-1, "", "DTN shell on login channel failed: " + dtn_result.stderr_data};
+        }
+    }
+
+    // Now we have a DTN shell — SSH to login node (passwordless internal hop)
     std::string ssh_cmd = "ssh " + config_.login().host + "\n";
     int written = libssh2_channel_write(login_channel_, ssh_cmd.c_str(), ssh_cmd.length());
     if (written < 0) {
@@ -138,19 +152,12 @@ SSHResult ClusterConnection::open_login_tunnel(StatusCallback callback) {
         callback("[cluster] Waiting for login shell...");
     }
 
-    // No auth needed - just wait for a shell prompt
-    ExpectMatcher matcher;
-    std::vector<Pattern> shell_prompts{
-        Pattern("\\[.+@.+ ~\\]\\$ "),
-        Pattern("\\[.+@.+ .*\\]\\$ "),
-        Pattern("\\$ "),
-        Pattern("# "),
-        Pattern("> "),
-    };
-
-    auto match = matcher.expect(login_channel_, shell_prompts, std::chrono::seconds(30));
-    if (!match.matched) {
-        return SSHResult{-1, "", "Login node shell prompt not received: " + matcher.get_buffer()};
+    // Internal hop — just wait for shell prompt
+    ShellNegotiator login_negotiator;
+    login_negotiator.set_timeout(std::chrono::seconds(30));
+    auto shell_result = login_negotiator.negotiate(login_channel_, callback);
+    if (shell_result.failed()) {
+        return shell_result;
     }
 
     login_conn_ = std::make_unique<SSHConnection>(login_channel_, session_->get_raw_session());

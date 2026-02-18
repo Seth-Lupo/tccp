@@ -28,7 +28,7 @@ constexpr int JOBVIEW_READ_BUF_SIZE      = 16384;
 // ── Default resource values ─────────────────────────────────
 constexpr int DEFAULT_ALLOC_MINUTES      = 240;   // 4 hours
 constexpr const char* DEFAULT_MEMORY     = "4G";
-constexpr const char* DEFAULT_PARTITION  = "batch";
+constexpr const char* DEFAULT_PARTITION  = "";  // empty = let SLURM pick
 constexpr const char* DEFAULT_ALLOC_TIME = "4:00:00";
 constexpr const char* DEFAULT_JOB_TIME   = "0:05:00";
 

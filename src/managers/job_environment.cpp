@@ -39,11 +39,6 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
         return fmt::format("{:.1f}s", ms / 1000.0);
     };
 
-    // Evict stale cache items if storage exceeds soft cap
-    const auto& env_info = get_environment(config_.project().type);
-    if (cb) cb(fmt::format("[{}] Checking cluster storage usage...", elapsed()));
-    cache_.ensure_within_cap(config_.project().name, env_info.sif_filename, cb);
-
     if (cb) cb(fmt::format("[{}] Checking environment components...", elapsed()));
 
     const auto& env = get_environment(config_.project().type);
@@ -79,7 +74,7 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
         else cb(fmt::format("[{}] dtach binary: MISSING — will build", elapsed()));
     }
 
-    // Only load modules if we need to create something
+    // Only load modules if we need to install something
     if (need_image || need_venv) {
         if (cb) cb(fmt::format("[{}] Loading Singularity/Apptainer module...", elapsed()));
         dtn_.run("module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true");

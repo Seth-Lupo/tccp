@@ -21,7 +21,8 @@ JobManager::JobManager(const Config& config, SSHConnection& dtn, SSHConnection& 
     : config_(config), dtn_(dtn), login_(login),
       allocs_(allocs), sync_(sync), cache_(cache),
       username_(get_cluster_username()),
-      port_fwd_(config.dtn()) {
+      port_fwd_(config.dtn()),
+      watcher_(config.dtn()) {
 
     // Restore tracked jobs from persistent state
     auto& state = allocs_.state();
@@ -58,11 +59,27 @@ JobManager::JobManager(const Config& config, SSHConnection& dtn, SSHConnection& 
             tj.tunnel_pids = port_fwd_.start(tj.compute_node, tj.forwarded_ports);
         }
     }
+
+    // Start watchers for running jobs (instant completion detection).
+    // Requires SSH keys — reuse the keys_ensured result from tunnel restoration.
+    if (keys_ensured) {
+        for (auto& tj : tracked_) {
+            if (tj.init_complete && !tj.completed && !tj.canceled
+                && !tj.compute_node.empty()) {
+                watcher_.watch(tj.job_id, tj.compute_node,
+                    tj.scratch_path + "/tccp.sock",
+                    [this] { watcher_fired_.store(true); });
+            }
+        }
+    }
 }
 
 JobManager::~JobManager() {
     // Signal all background init threads to stop
     shutdown_.store(true);
+
+    // Stop all job watchers
+    watcher_.stop_all();
 
     // Stop all tunnel processes
     for (auto& tj : tracked_) {
@@ -219,7 +236,8 @@ std::string JobManager::build_job_payload(const std::string& job_name,
         python_cmd = fmt::format("{}/bin/python -m {} {}",
                                   paths.venv, it->second.package, args);
     } else {
-        std::string script = (it != proj.jobs.end()) ? it->second.script : "main.py";
+        std::string script = (it != proj.jobs.end() && !it->second.script.empty())
+                                 ? it->second.script : "main.py";
         python_cmd = fmt::format("{}/bin/python {} {}",
                                   paths.venv, script, args);
     }
@@ -403,10 +421,14 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
         int job_minutes = AllocationManager::parse_time_minutes(job_time);
 
         // Resolve GPU partition early
-        if (profile.gpu_count > 0 || !profile.gpu_type.empty()) {
-            log_to_file("Resolving GPU partition...");
+        bool needs_gpu = profile.gpu_count > 0 || !profile.gpu_type.empty();
+        if (needs_gpu) {
+            log_to_file("Resolving GPU partition");
+            // Pass empty partition to force discovery unless already a GPU partition
+            std::string resolve_part = (profile.partition == "gpu" || profile.partition == "preempt")
+                                        ? profile.partition : "";
             auto match = resolve_gpu_partition(login_, username_,
-                                               profile.partition,
+                                               resolve_part,
                                                profile.gpu_type,
                                                profile.gpu_count);
             if (match.found) {
@@ -430,7 +452,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
             // Check for pending allocation with compatible resources
             AllocationState* pending = allocs_.find_pending(profile);
             if (pending) {
-                log_to_file(fmt::format("Found pending allocation {}, waiting for node...", pending->slurm_id));
+                log_to_file(fmt::format("Found pending allocation {}, waiting for node", pending->slurm_id));
                 auto wait_result = allocs_.wait_for_allocation(pending->slurm_id, log_to_file);
                 if (wait_result.is_ok()) {
                     alloc = allocs_.find_by_id(wait_result.value.slurm_id);
@@ -438,7 +460,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
             }
 
             if (!alloc) {
-                log_to_file("No free allocation, requesting new one...");
+                log_to_file("No free allocation, requesting new one");
                 auto alloc_result = allocs_.allocate(profile, log_to_file);
                 if (alloc_result.is_err()) {
                     throw std::runtime_error(alloc_result.error);
@@ -457,28 +479,22 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
             throw std::runtime_error("Canceled during initialization");
         }
 
-        // Ensure directories and environment
-        log_to_file("Setting up directories...");
+        // Ensure directories, environment, and SSH keys
+        log_to_file("Creating remote directories");
         ensure_dirs(job_id, nullptr);
+        if (check_canceled()) throw std::runtime_error("Canceled during initialization");
 
-        if (check_canceled()) {
-            log_to_file("Canceled during setup");
-            throw std::runtime_error("Canceled during initialization");
-        }
-
+        log_to_file("Checking environment");
         ensure_environment(alloc->node, log_to_file);
+        if (check_canceled()) throw std::runtime_error("Canceled during initialization");
 
-        if (check_canceled()) {
-            log_to_file("Canceled during environment setup");
-            throw std::runtime_error("Canceled during initialization");
-        }
-
-        // Ensure SSH keys (needed for sync pipe + port forwarding)
+        log_to_file("Checking SSH keys");
         port_fwd_.ensure_keys(dtn_, log_to_file);
+        if (check_canceled()) throw std::runtime_error("Canceled during initialization");
 
         // Sync code to compute node
         std::string scratch = scratch_dir(job_id);
-        log_to_file(fmt::format("Syncing code to {}...", alloc->node));
+        log_to_file(fmt::format("Syncing code to {}", alloc->node));
         sync_.sync_to_scratch(alloc->node, scratch, allocs_.state(), log_to_file);
 
         if (check_canceled()) {
@@ -487,7 +503,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
         }
 
         // Launch job on compute node
-        log_to_file("Launching job on compute node...");
+        log_to_file("Launching job on compute node");
         auto launch_result = launch_on_node(job_id, job_name, alloc->node, scratch, extra_args, nullptr);
         if (launch_result.is_err()) {
             throw std::runtime_error(launch_result.error);
@@ -542,6 +558,10 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
             allocs_.persist();
         }
 
+        // Start watcher for instant completion detection (after init_complete is set)
+        watcher_.watch(job_id, alloc->node, scratch + "/tccp.sock",
+            [this] { watcher_fired_.store(true); });
+
         tccp_log(fmt::format("INIT THREAD COMPLETE: job_id={}", job_id));
 
         {
@@ -589,6 +609,11 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
 // ── Accessors ──────────────────────────────────────────────
 
 const std::vector<TrackedJob>& JobManager::tracked_jobs() const {
+    return tracked_;
+}
+
+std::vector<TrackedJob> JobManager::tracked_jobs_copy() const {
+    std::lock_guard<std::mutex> lock(tracked_mutex_);
     return tracked_;
 }
 

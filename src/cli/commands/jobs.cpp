@@ -104,6 +104,22 @@ static void do_return(BaseCLI& cli, const std::string& arg) {
 
 void do_ssh(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
+
+    std::string dtn_host = cli.service.config().dtn().host;
+    std::string user = get_cluster_username();
+
+    // Special case: "ssh login" — interactive shell on login node via DTN
+    if (arg == "login" || arg.empty()) {
+        std::string login_host = cli.service.config().login().host;
+        // Hop: local -> DTN -> login node (uses DTN's internal auth)
+        std::string sys_cmd = fmt::format(
+            "ssh -t -o StrictHostKeyChecking=no {}@{} "
+            "'ssh -t -o StrictHostKeyChecking=no {}'",
+            user, dtn_host, login_host);
+        std::system(sys_cmd.c_str());
+        return;
+    }
+
     if (!cli.service.job_manager()) return;
 
     // Parse: "job_name [command...]"
@@ -137,19 +153,8 @@ void do_ssh(BaseCLI& cli, const std::string& arg) {
     auto* jm = cli.service.job_manager();
     std::string shell_cmd = jm->shell_command(*tracked, remote_cmd);
 
-    // Build the nested SSH command: local -> DTN -> compute node
-    std::string dtn_host = cli.service.config().dtn().host;
-    std::string user = get_cluster_username();
-
     if (remote_cmd.empty()) {
-        // Interactive: use system ssh for a real terminal.
-        // Don't use SSH_OPTS (BatchMode=yes kills interactive sessions).
-        // Both hops need -t for PTY allocation so the container shell works.
-        //
-        // Quoting: the entire DTN command is single-quoted so the local shell
-        // doesn't touch $vars or "quotes" inside shell_cmd.  The inner
-        // single-quotes around shell_cmd use the '\'' trick (end quote,
-        // escaped literal quote, reopen quote).
+        // Interactive: local -> DTN -> compute node
         std::string sys_cmd = fmt::format(
             "ssh -t -o StrictHostKeyChecking=no {}@{} "
             "'ssh -t -o StrictHostKeyChecking=no {} '\\''{}'\\'",
@@ -262,7 +267,7 @@ void do_config(BaseCLI& cli, const std::string& arg) {
     }
 
     for (const auto& [name, job] : proj.jobs) {
-        std::cout << "\n" << theme::dim(fmt::format("  Job: {}", name)) << "\n";
+        std::cout << "\n" << theme::dim(fmt::format("    Job: {}", name)) << "\n";
         if (!job.script.empty())
             std::cout << theme::kv("Script", job.script);
         if (!job.package.empty())
@@ -290,7 +295,7 @@ void do_config(BaseCLI& cli, const std::string& arg) {
 
     if (proj.slurm) {
         const auto& s = *proj.slurm;
-        std::cout << "\n" << theme::dim("  SLURM defaults") << "\n";
+        std::cout << "\n" << theme::dim("    SLURM defaults") << "\n";
         if (!s.partition.empty())
             std::cout << theme::kv("Partition", s.partition);
         if (!s.gpu_type.empty())
@@ -321,8 +326,8 @@ void do_info(BaseCLI& cli, const std::string& arg) {
 
     // Derive status string
     std::string status;
-    if (!tj->init_error.empty())
-        status = "INIT FAILED";
+    if (!tj->init_error.empty() || (tj->canceled && !tj->init_complete))
+        status = "ABORTED";
     else if (tj->canceled)
         status = "CANCELED";
     else if (tj->completed)
@@ -383,7 +388,7 @@ void register_jobs_commands(BaseCLI& cli) {
     cli.add_command("out", do_output, "View full job output (vim)");
     cli.add_command("logs", do_logs, "Print job output to terminal");
     cli.add_command("initlogs", do_initlogs, "Print job initialization logs");
-    cli.add_command("ssh", do_ssh, "Run command on job's compute node");
+    cli.add_command("ssh", do_ssh, "SSH to login node or job's compute node");
     cli.add_command("jobs", do_jobs, "List running jobs");
     cli.add_command("cancel", do_cancel, "Cancel a job");
     cli.add_command("return", do_return, "Download job output");

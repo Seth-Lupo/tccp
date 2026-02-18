@@ -108,7 +108,7 @@ AllocationState* AllocationManager::find_free_unlocked(int required_minutes,
 
     if (cb) cb(fmt::format("Checking {} allocation(s) (need {}min, partition={}, gpu={}:{})",
                            state_.allocations.size(), required_minutes,
-                           required_resources.partition.empty() ? DEFAULT_PARTITION : required_resources.partition,
+                           required_resources.partition.empty() ? "any" : required_resources.partition,
                            required_resources.gpu_type, required_resources.gpu_count));
 
     // First pass: clear stale active_job_ids
@@ -363,11 +363,11 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
 
     // Auto-resolve GPU partition if needed
     SlurmDefaults resolved = profile;
-    if ((resolved.gpu_count > 0 || !resolved.gpu_type.empty()) &&
-        (resolved.partition.empty() || resolved.partition == DEFAULT_PARTITION)) {
+    bool has_gpu = resolved.gpu_count > 0 || !resolved.gpu_type.empty();
+    if (has_gpu && resolved.partition != "gpu" && resolved.partition != "preempt") {
         if (cb) cb("Discovering GPU resources...");
         auto match = resolve_gpu_partition(login_, username_,
-                                            resolved.partition,
+                                            "",  // force discovery (current partition is not a GPU partition)
                                             resolved.gpu_type,
                                             resolved.gpu_count);
         if (!match.found) {
@@ -418,7 +418,13 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
     AllocationState alloc;
     alloc.slurm_id = slurm_id;
     alloc.duration_minutes = parse_time_minutes(resolved.time);
-    alloc.partition = resolved.partition.empty() ? DEFAULT_PARTITION : resolved.partition;
+    // Store the effective partition (matches what sbatch received)
+    if (resolved.partition.empty()) {
+        bool has_gpu = resolved.gpu_count > 0 || !resolved.gpu_type.empty();
+        alloc.partition = has_gpu ? "gpu" : "batch";
+    } else {
+        alloc.partition = resolved.partition;
+    }
     alloc.nodes = resolved.nodes > 0 ? resolved.nodes : 1;
     alloc.cpus = resolved.cpus_per_task > 0 ? resolved.cpus_per_task : 1;
     alloc.memory = resolved.memory.empty() ? DEFAULT_MEMORY : resolved.memory;

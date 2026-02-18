@@ -96,7 +96,10 @@ Result<void> JobManager::return_output(const std::string& job_id, StatusCallback
 
     std::string jname = JobManager::job_name_from_id(job_id);
     std::string tstamp = JobManager::timestamp_from_id(job_id);
-    if (cb) cb(fmt::format("Downloaded {} files to output/{}/{}/", count, jname, tstamp));
+    if (cb) {
+        std::string file_word = (count == 1) ? "file" : "files";
+        cb(fmt::format("Output saved to output/{}/{}/  ({} {})", jname, tstamp, count, file_word));
+    }
 
     dtn_.run("rm -rf " + job_output_dir(job_id));
     mark_output_returned(job_id);

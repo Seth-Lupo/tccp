@@ -30,6 +30,7 @@ private:
     LIBSSH2_CHANNEL* login_channel_;
     std::unique_ptr<SSHConnection> dtn_conn_;
     std::unique_ptr<SSHConnection> login_conn_;
+    std::string cluster_password_;
 
     SSHResult connect_dtn(StatusCallback callback);
     SSHResult open_login_tunnel(StatusCallback callback);

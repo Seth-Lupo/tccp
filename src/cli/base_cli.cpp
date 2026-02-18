@@ -53,8 +53,8 @@ void BaseCLI::print_help() const {
         {"Jobs",         {"run", "view", "jobs", "cancel", "return", "restart"}},
         {"Output",       {"logs", "tail", "output", "initlogs"}},
         {"Info",         {"status", "info", "config", "allocs", "gpus"}},
-        {"Remote",       {"ssh", "open", "shell", "exec", "dealloc"}},
-        {"General",      {"help", "clear", "quit"}},
+        {"Remote",       {"ssh", "open", "exec", "dealloc"}},
+        {"General",      {"help", "refresh", "creds", "pwd", "clear", "quit"}},
 #ifdef TCCP_DEV
         {"Dev",          {"debug"}},
 #endif

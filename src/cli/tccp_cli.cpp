@@ -5,6 +5,7 @@
 #include <sstream>
 #include <chrono>
 #include <fmt/format.h>
+#include <filesystem>
 #include <replxx.hxx>
 
 TCCPCLI::TCCPCLI() : BaseCLI() {
@@ -28,14 +29,22 @@ void TCCPCLI::register_all_commands() {
         std::cout << "\033[2J\033[H" << std::flush;
     }, "Clear the screen");
 
+    add_command("pwd", [](BaseCLI& cli, const std::string& arg) {
+        std::cout << std::filesystem::current_path().string() << "\n";
+    }, "Print working directory");
+
     add_command("refresh", [](BaseCLI& cli, const std::string& arg) {
         cli.service.reload_config();
         if (cli.service.has_config()) {
-            std::cout << theme::check("Reloaded tccp.yaml");
+            std::cout << theme::ok("Reloaded tccp.yaml");
         } else {
             std::cout << theme::fail("Failed to reload tccp.yaml");
         }
     }, "Reload tccp.yaml config");
+
+    add_command("creds", [this](BaseCLI& cli, const std::string& arg) {
+        this->run_setup();
+    }, "Update cluster credentials");
 
     register_connection_commands(*this);
     register_jobs_commands(*this);
@@ -131,48 +140,19 @@ void TCCPCLI::run_connected_repl() {
 
     // REPL loop — lifetime is bound to the DTN connection
     replxx::Replxx rx;
+    start_monitor(rx);
+
     std::string line;
     while (true) {
-        if (!service.check_alive()) {
-            std::cout << "\n" << theme::divider();
-            std::cout << theme::fail("Connection to cluster lost.");
-            std::cout << theme::dim("    The SSH session to the DTN has ended.") << "\n";
-            std::cout << theme::dim("    This can happen due to network changes, VPN disconnects,") << "\n";
-            std::cout << theme::dim("    or server-side timeouts.") << "\n\n";
-            std::cout << theme::step("Run 'tccp' to reconnect.");
-            std::cout << "\n";
-            break;
-        }
+        if (connection_lost_) break;
 
-        if (!service.check_slurm_health()) {
-            std::cout << "\n" << theme::divider();
-            std::cout << theme::fail("SLURM is not responding.");
-            std::cout << theme::dim("    The cluster has become unavailable.") << "\n";
-            std::cout << theme::dim("    Run 'exec sinfo' to test connectivity.") << "\n\n";
-            std::cout << theme::dim("    Exiting. Run 'tccp' when the cluster is healthy.") << "\n\n";
-            break;
-        }
-
-        // Poll for completed jobs (throttled to every 30s)
-        auto now = std::chrono::steady_clock::now();
-        if (service.job_manager() && (now - last_poll_time_) >= std::chrono::seconds(30)) {
-            last_poll_time_ = now;
-            service.poll_jobs([this](const TrackedJob& tj) {
-                std::cout << "\n" << theme::dim(
-                    "Job '" + tj.job_name + "' (" + tj.slurm_id + ") completed.") << "\n";
-
-                auto cb = [](const std::string& msg) {
-                    std::cout << theme::dim(msg) << "\n";
-                };
-                service.return_output(tj.job_id, cb);
-            });
-        }
-
-        std::string prompt = get_prompt_string();
-        const char* raw = rx.input(prompt);
+        current_prompt_ = get_prompt_string();
+        const char* raw = rx.input(current_prompt_);
         if (!raw) {
             break;
         }
+
+        if (connection_lost_) break;
 
         line = raw;
 
@@ -192,7 +172,13 @@ void TCCPCLI::run_connected_repl() {
             args = args.substr(1);
         }
 
+        // Pause monitor during command execution to avoid interleaved output
+        stop_monitor();
         execute_command(command, args);
+
+        // Sync snapshots so we don't re-notify on state changes
+        // the user just caused (run, cancel, view+detach, etc.)
+        sync_snapshots();
 
         if (quit_requested_) {
             int init_count = service.initializing_job_count();
@@ -210,6 +196,7 @@ void TCCPCLI::run_connected_repl() {
                 if (answer.empty() || (answer[0] != 'y' && answer[0] != 'Y')) {
                     quit_requested_ = false;
                     std::cout << theme::dim("    Exit canceled.") << "\n\n";
+                    start_monitor(rx);
                     continue;
                 }
 
@@ -218,6 +205,7 @@ void TCCPCLI::run_connected_repl() {
                 };
                 std::cout << "\n";
                 service.graceful_shutdown(cb);
+                std::cout << "\n";
             } else {
                 if (service.alloc_manager()) {
                     service.alloc_manager()->deallocate_all_idle(nullptr);
@@ -228,26 +216,11 @@ void TCCPCLI::run_connected_repl() {
             break;
         }
 
-        if (service.is_connected() && !service.check_alive()) {
-            std::cout << "\n" << theme::divider();
-            std::cout << theme::fail("Connection to cluster lost.");
-            std::cout << theme::dim("    The SSH session to the DTN has ended.") << "\n";
-            std::cout << theme::dim("    This can happen due to network changes, VPN disconnects,") << "\n";
-            std::cout << theme::dim("    or server-side timeouts.") << "\n\n";
-            std::cout << theme::step("Run 'tccp' to reconnect.");
-            std::cout << "\n";
-            break;
-        }
-
-        if (service.is_connected() && !service.check_slurm_health()) {
-            std::cout << "\n" << theme::divider();
-            std::cout << theme::fail("SLURM stopped responding.");
-            std::cout << theme::dim("    The cluster has become unavailable.") << "\n";
-            std::cout << theme::dim("    Run 'exec sinfo' to test connectivity.") << "\n\n";
-            std::cout << theme::dim("    Exiting. Run 'tccp' when the cluster is healthy.") << "\n\n";
-            break;
-        }
+        // Resume monitor for next input wait
+        start_monitor(rx);
     }
+
+    stop_monitor();
 
     if (!quit_requested_) {
         int init_count = service.initializing_job_count();
@@ -269,4 +242,208 @@ void TCCPCLI::run_command(const std::string& command, const std::vector<std::str
         args_str += args[i];
     }
     execute_command(command, args_str);
+}
+
+// ── Job monitor ────────────────────────────────────────────
+
+void TCCPCLI::start_monitor(replxx::Replxx& rx) {
+    if (monitor_running_) return;
+    rx_ptr_ = &rx;
+    monitor_running_ = true;
+    monitor_thread_ = std::thread(&TCCPCLI::monitor_loop, this);
+}
+
+void TCCPCLI::stop_monitor() {
+    if (!monitor_running_) return;
+    monitor_running_ = false;
+    if (monitor_thread_.joinable()) {
+        monitor_thread_.join();
+    }
+    rx_ptr_ = nullptr;
+}
+
+void TCCPCLI::monitor_loop() {
+    auto last_ssh_poll = std::chrono::steady_clock::now();
+    auto last_health_check = std::chrono::steady_clock::now();
+
+    while (monitor_running_) {
+        auto now = std::chrono::steady_clock::now();
+
+        // Health check every 10s
+        if ((now - last_health_check) >= std::chrono::seconds(10)) {
+            last_health_check = now;
+
+            if (!service.check_alive() || !service.check_slurm_health()) {
+                connection_lost_ = true;
+                if (rx_ptr_) {
+                    std::string output = "\r\033[2K";
+                    output += theme::fail("Connection lost. Press Enter to exit.");
+                    rx_ptr_->write(output.c_str(), static_cast<int>(output.size()));
+                }
+                return;
+            }
+        }
+
+        // Watcher fired — a job's dtach socket disappeared.
+        // Run full poll (SSH confirm + cleanup) before collecting events
+        // so collect_job_events() sees the completed state in the same cycle.
+        std::vector<std::string> output_msgs;
+        if (service.job_manager() && service.job_manager()->consume_watcher_event()) {
+            poll_and_return_output(&output_msgs);
+            last_ssh_poll = now;  // reset fallback timer
+        }
+
+        // Local state diff to detect init-thread and completion transitions
+        auto msgs = collect_job_events();
+
+        // Print notifications + output messages as a grouped block
+        if ((!msgs.empty() || !output_msgs.empty()) && rx_ptr_) {
+            std::string output = "\r\033[2K";
+            for (const auto& m : msgs)
+                output += theme::info(m);
+            for (const auto& m : output_msgs)
+                output += theme::step(m);
+            rx_ptr_->write(output.c_str(), static_cast<int>(output.size()));
+            rx_ptr_->set_prompt(current_prompt_);
+        }
+
+        // Fallback SSH poll every 60s (watcher died, stale state, etc.)
+        if ((now - last_ssh_poll) >= std::chrono::seconds(60)) {
+            last_ssh_poll = now;
+            poll_and_return_output();
+        }
+
+        // Sleep in small increments so stop_monitor() returns quickly
+        for (int i = 0; i < 20 && monitor_running_; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+}
+
+// Collect notification strings from job state transitions.
+// Thread-safe: uses tracked_jobs_copy() and snapshot_mutex_.
+std::vector<std::string> TCCPCLI::collect_job_events() {
+    std::vector<std::string> notifications;
+    if (!service.job_manager()) return notifications;
+
+    auto jobs = service.job_manager()->tracked_jobs_copy();
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+
+    for (const auto& tj : jobs) {
+        auto prev_it = job_snapshots_.find(tj.job_id);
+        if (prev_it == job_snapshots_.end()) {
+            // First time seeing this job — seed baseline, no notification
+            job_snapshots_[tj.job_id] = {
+                tj.init_complete, tj.completed, tj.canceled,
+                !tj.init_error.empty(), tj.output_returned
+            };
+            continue;
+        }
+
+        const JobSnapshot& prev = prev_it->second;
+
+        // Detect: init just completed (job started running)
+        if (tj.init_complete && !prev.init_complete && tj.init_error.empty() && !tj.canceled) {
+            notifications.push_back(fmt::format(
+                "Job '{}' is now running on {}", tj.job_name, tj.compute_node));
+        }
+
+        // Detect: init failed (aborted)
+        if (!tj.init_error.empty() && !prev.has_init_error) {
+            notifications.push_back(fmt::format(
+                "Job '{}' aborted: {}", tj.job_name, tj.init_error));
+        }
+
+        // Detect: canceled during init (aborted)
+        if (tj.canceled && !prev.canceled && !tj.init_complete) {
+            notifications.push_back(fmt::format(
+                "Job '{}' aborted (canceled during init)", tj.job_name));
+        }
+
+        // Detect: canceled while running
+        if (tj.canceled && !prev.canceled && tj.init_complete && tj.init_error.empty()) {
+            notifications.push_back(fmt::format(
+                "Job '{}' canceled", tj.job_name));
+        }
+
+        // Detect: completed (set by poll or by attach_to_job)
+        if (tj.completed && !prev.completed && !tj.canceled) {
+            if (tj.exit_code == 0) {
+                notifications.push_back(fmt::format(
+                    "Job '{}' completed", tj.job_name));
+            } else {
+                notifications.push_back(fmt::format(
+                    "Job '{}' failed (exit {})", tj.job_name, tj.exit_code));
+            }
+        }
+
+        // Update snapshot
+        job_snapshots_[tj.job_id] = {
+            tj.init_complete, tj.completed, tj.canceled,
+            !tj.init_error.empty(), tj.output_returned
+        };
+    }
+
+    // Clean up snapshots for pruned jobs
+    for (auto it = job_snapshots_.begin(); it != job_snapshots_.end(); ) {
+        bool found = false;
+        for (const auto& tj : jobs) {
+            if (tj.job_id == it->first) { found = true; break; }
+        }
+        if (!found) {
+            it = job_snapshots_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    return notifications;
+}
+
+// Sync snapshots to current state without generating notifications.
+void TCCPCLI::sync_snapshots() {
+    if (!service.job_manager()) return;
+
+    auto jobs = service.job_manager()->tracked_jobs_copy();
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+
+    for (const auto& tj : jobs) {
+        job_snapshots_[tj.job_id] = {
+            tj.init_complete, tj.completed, tj.canceled,
+            !tj.init_error.empty(), tj.output_returned
+        };
+    }
+}
+
+// Full SSH poll + auto-return output for newly completed jobs.
+// If out_msgs is provided, collect output messages instead of printing directly.
+void TCCPCLI::poll_and_return_output(std::vector<std::string>* out_msgs) {
+    if (!service.job_manager()) return;
+
+    service.poll_jobs(nullptr);
+
+    // Return output for newly completed jobs
+    auto jobs = service.job_manager()->tracked_jobs_copy();
+    {
+        std::lock_guard<std::mutex> lock(snapshot_mutex_);
+        for (const auto& tj : jobs) {
+            if (tj.completed && !tj.canceled && !tj.output_returned) {
+                auto it = job_snapshots_.find(tj.job_id);
+                if (it != job_snapshots_.end() && !it->second.output_returned) {
+                    if (out_msgs) {
+                        auto cb = [out_msgs](const std::string& msg) {
+                            out_msgs->push_back(msg);
+                        };
+                        service.return_output(tj.job_id, cb);
+                    } else {
+                        auto cb = [](const std::string& msg) {
+                            std::cout << theme::dim(msg) << "\n";
+                        };
+                        service.return_output(tj.job_id, cb);
+                    }
+                    it->second.output_returned = true;
+                }
+            }
+        }
+    }
 }

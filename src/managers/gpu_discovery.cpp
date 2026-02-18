@@ -464,8 +464,8 @@ PartitionMatch resolve_gpu_partition(SSHConnection& login,
         return m;
     }
 
-    // If user explicitly set a non-default partition, trust it
-    if (!current_partition.empty() && current_partition != "batch") {
+    // If user explicitly set a partition, trust it
+    if (!current_partition.empty()) {
         PartitionMatch m;
         m.found = true;
         m.partition = current_partition;

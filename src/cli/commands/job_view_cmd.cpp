@@ -17,6 +17,9 @@
 #include <cstdio>
 #include <filesystem>
 
+// Forward declarations
+static std::string fetch_job_output(BaseCLI& cli, const TrackedJob* tracked);
+
 // Read new lines from init log since last position, print them, return updated position.
 static std::streampos flush_init_log(const std::string& path, std::streampos pos) {
     std::ifstream f(path);
@@ -28,6 +31,107 @@ static std::streampos flush_init_log(const std::string& path, std::streampos pos
     }
     if (f.eof()) f.clear();
     return f.tellg();
+}
+
+// Did the job abort (canceled during init or init failure)?
+static bool is_aborted(const TrackedJob* tj) {
+    return !tj->init_error.empty() ||
+           (tj->canceled && !tj->init_complete);
+}
+
+// Derive a human-readable status string for a finished job.
+static std::string finished_status(const TrackedJob* tj) {
+    if (is_aborted(tj))
+        return "ABORTED";
+    if (tj->canceled)
+        return "CANCELED";
+    if (tj->completed && tj->exit_code == 0)
+        return "COMPLETED";
+    if (tj->completed)
+        return fmt::format("FAILED (exit {})", tj->exit_code);
+    return "FINISHED";
+}
+
+// Show output of a finished job in the alt-screen viewer with status bar.
+static void view_finished_job(BaseCLI& cli, TrackedJob* tracked,
+                               const std::string& job_name) {
+    bool aborted = is_aborted(tracked);
+
+    // Aborted jobs: show init logs. Otherwise show job output.
+    std::string clean;
+    if (aborted) {
+        std::string log_path = job_log_path(tracked->job_id);
+        std::ifstream f(log_path);
+        if (f) {
+            std::string line;
+            while (std::getline(f, line)) {
+                clean += line;
+                clean += '\n';
+            }
+        }
+        // Append the init error if present
+        if (!tracked->init_error.empty()) {
+            clean += "\nInit error: " + tracked->init_error + "\n";
+        }
+    } else {
+        std::string raw = fetch_job_output(cli, tracked);
+        if (!raw.empty()) {
+            clean = TerminalOutput::strip_ansi(raw.data(), static_cast<int>(raw.size()));
+            TerminalOutput::suppress_noise(clean);
+        }
+    }
+
+    std::string status = finished_status(tracked);
+
+    // Enter alt screen and draw header
+    TerminalUI::enter_alt_screen();
+
+    int rows = platform::term_height();
+    int pty_rows = std::max(1, rows - TerminalUI::HEADER_ROWS);
+
+    // Set scroll region and draw header
+    std::string sr = fmt::format("\0337\033[1;{}r\0338", pty_rows);
+    write(STDOUT_FILENO, sr.data(), sr.size());
+
+    TerminalUI::StatusBar bar;
+    bar.job_name = job_name;
+    bar.slurm_id = tracked->slurm_id;
+    bar.node = tracked->compute_node;
+    bar.status = status;
+    bar.controls = "q to exit ";
+    bar.l2_bg = "\033[48;2;60;60;60m";
+    bar.l2_fg = "\033[38;2;120;120;120m";
+    TerminalUI::draw_status_bar(bar);
+
+    // Position cursor at top of content area and print output
+    write(STDOUT_FILENO, "\033[H", 3);
+
+    if (clean.empty()) {
+        std::string msg = "No output available.\n";
+        write(STDOUT_FILENO, msg.data(), msg.size());
+    } else {
+        write(STDOUT_FILENO, clean.data(), clean.size());
+        if (clean.back() != '\n')
+            write(STDOUT_FILENO, "\n", 1);
+    }
+
+    // Wait for user to press q, Ctrl+C, or Ctrl+backslash to exit
+    {
+        platform::RawModeGuard raw_guard(platform::RawModeGuard::kFullRaw);
+        for (;;) {
+            if (platform::poll_stdin(200)) {
+                char c;
+                if (read(STDIN_FILENO, &c, 1) == 1) {
+                    if (c == 'q' || c == 'Q' || c == 0x03 || c == 0x1c)
+                        break;
+                }
+            }
+        }
+    }
+
+    // Reset scroll region and leave alt screen
+    write(STDOUT_FILENO, "\033[r", 3);
+    TerminalUI::leave_alt_screen();
 }
 
 void do_view(BaseCLI& cli, const std::string& arg) {
@@ -43,15 +147,11 @@ void do_view(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
-    // Check if canceled during initialization
-    if (tracked->canceled && !tracked->init_complete) {
-        std::cout << fmt::format("Job '{}' was canceled during initialization", job_name) << "\n";
-        return;
-    }
-
-    // Check if init failed
-    if (!tracked->init_error.empty()) {
-        std::cout << theme::error(fmt::format("Job '{}' init failed: {}", job_name, tracked->init_error)) << "\n";
+    // Finished jobs (completed, canceled, init-failed): show output in scrollable viewer
+    bool is_finished = tracked->completed || tracked->canceled ||
+                       !tracked->init_error.empty();
+    if (is_finished) {
+        view_finished_job(cli, tracked, job_name);
         return;
     }
 
@@ -144,32 +244,6 @@ void do_view(BaseCLI& cli, const std::string& arg) {
         std::cout.flush();
 
         attach_to_job(cli, tracked, job_name, true);
-        return;
-    }
-
-    // Check if canceled during init (compute_node will be empty)
-    if (tracked->canceled && tracked->compute_node.empty()) {
-        std::cout << fmt::format("Job '{}' was canceled during initialization", job_name) << "\n";
-        return;
-    }
-
-    // Completed jobs: read log from NFS output dir (compute node may be inaccessible)
-    if (tracked->completed) {
-        auto* jm = cli.service.job_manager();
-        std::string nfs_log = jm->job_output_dir(tracked->job_id) + "/tccp.log";
-        std::string cat_cmd = fmt::format("cat {} 2>/dev/null", nfs_log);
-        auto result = cli.service.cluster()->dtn().run(cat_cmd);
-        if (result.stdout_data.empty()) {
-            std::cout << theme::dim("No output available.") << "\n";
-        } else {
-            std::string clean = TerminalOutput::strip_ansi(
-                result.stdout_data.data(),
-                static_cast<int>(result.stdout_data.size()));
-            if (!clean.empty())
-                write(STDOUT_FILENO, clean.data(), clean.size());
-            if (!clean.empty() && clean.back() != '\n')
-                write(STDOUT_FILENO, "\n", 1);
-        }
         return;
     }
 
@@ -273,8 +347,8 @@ void do_initlogs(BaseCLI& cli, const std::string& arg) {
     }
 
     std::string status;
-    if (!tracked->init_error.empty())
-        status = "init failed";
+    if (!tracked->init_error.empty() || (tracked->canceled && !tracked->init_complete))
+        status = "aborted";
     else if (tracked->canceled)
         status = "canceled";
     else if (tracked->completed)
@@ -358,7 +432,9 @@ void do_logs(BaseCLI& cli, const std::string& arg) {
     if (raw.empty()) return;
 
     std::string status;
-    if (tracked->completed && tracked->canceled)
+    if (!tracked->init_error.empty() || (tracked->canceled && !tracked->init_complete))
+        status = "aborted";
+    else if (tracked->canceled)
         status = "canceled";
     else if (tracked->completed)
         status = tracked->exit_code == 0 ? "completed" : fmt::format("failed, exit {}", tracked->exit_code);
@@ -480,7 +556,9 @@ void do_tail(BaseCLI& cli, const std::string& arg) {
     }
 
     std::string status;
-    if (tracked->completed && tracked->canceled)
+    if (!tracked->init_error.empty() || (tracked->canceled && !tracked->init_complete))
+        status = "aborted";
+    else if (tracked->canceled)
         status = "canceled";
     else if (tracked->completed)
         status = tracked->exit_code == 0 ? "completed" : fmt::format("failed, exit {}", tracked->exit_code);

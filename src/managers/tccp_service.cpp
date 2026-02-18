@@ -107,11 +107,11 @@ std::vector<JobSummary> TccpService::list_jobs() {
 
         // Derive status, wait, and duration from raw TrackedJob fields
         if (!tj.init_error.empty()) {
-            s.status = "INIT FAILED";
+            s.status = "ABORTED";
             s.wait = tj.submit_time.empty() ? "-" : format_duration(tj.submit_time);
             s.duration = "-";
-        } else if (tj.canceled && tj.compute_node.empty()) {
-            s.status = "CANCELED (init)";
+        } else if (tj.canceled && !tj.init_complete) {
+            s.status = "ABORTED";
             s.wait = tj.submit_time.empty() ? "-" : format_duration(tj.submit_time);
             s.duration = "-";
         } else if (!tj.init_complete) {
@@ -258,12 +258,12 @@ void TccpService::cancel_initializing_jobs(StatusCallback cb) {
     }
 
     for (const auto& [job_id, slurm_id] : to_cancel) {
-        if (cb) cb(fmt::format("Canceling initializing job '{}'...", job_id));
+        if (cb) cb(fmt::format("Canceling initializing job '{}'", job_id));
         jobs_->cancel_job_by_id(job_id, nullptr);
 
         // Deallocate the allocation this job was using
         if (!slurm_id.empty() && allocs_) {
-            if (cb) cb(fmt::format("Releasing allocation {}...", slurm_id));
+            if (cb) cb(fmt::format("Releasing allocation {}", slurm_id));
             allocs_->deallocate(slurm_id, nullptr);
         }
     }

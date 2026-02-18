@@ -88,10 +88,14 @@ TEST(ResourceSpec, Incompatible_NotEnoughGPUs) {
 }
 
 TEST(ResourceSpec, Compatible_DefaultPartition) {
-    // Empty partition should match "batch"
-    auto alloc = make_defaults("", 4, "16G", "a100", 1);
-    auto job = make_defaults("batch", 4, "16G", "a100", 1);
+    // Empty partition on job = any partition matches
+    auto alloc = make_defaults("batch", 4, "16G", "a100", 1);
+    auto job = make_defaults("", 4, "16G", "a100", 1);
     EXPECT_TRUE(resources_compatible(alloc, job));
+
+    // Also works with preempt allocation
+    auto alloc2 = make_defaults("preempt", 4, "16G", "a100", 1);
+    EXPECT_TRUE(resources_compatible(alloc2, job));
 }
 
 TEST(ResourceSpec, Compatible_NoGPURequirement) {

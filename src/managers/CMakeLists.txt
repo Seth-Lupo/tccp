@@ -10,6 +10,7 @@ add_library(tccp_managers
     gpu_discovery.cpp
     cache_manager.cpp
     port_forwarder.cpp
+    job_watcher.cpp
     tccp_service.cpp
 )
 

@@ -37,22 +37,26 @@ private:
                                std::vector<std::string>& changed,
                                std::vector<std::string>& deleted);
 
-    // Pipe a local tar archive through DTN to compute node via system SSH
-    void pipe_tar_to_node(const std::filesystem::path& tar_path,
+    // Pipe a local tar through DTN to compute node, extract, and verify probe.
+    // Returns true if probe_file was found on remote after extraction.
+    bool pipe_tar_to_node(const std::filesystem::path& tar_path,
                           const std::string& compute_node,
-                          const std::string& scratch_path);
+                          const std::string& scratch_path,
+                          const std::string& probe_file);
 
-    // Send all local files to compute node
-    void full_sync(const std::string& compute_node,
+    // Send all local files to compute node. Returns true if verified.
+    bool full_sync(const std::string& compute_node,
                    const std::string& scratch_path,
                    const std::vector<SyncManifestEntry>& manifest,
+                   const std::string& probe_file,
                    StatusCallback cb);
 
-    // Send only changed files and delete removed files
-    void incremental_sync(const std::string& compute_node,
+    // Send only changed files and delete removed files. Returns true if verified.
+    bool incremental_sync(const std::string& compute_node,
                           const std::string& scratch_path,
                           const std::vector<std::string>& changed_files,
                           const std::vector<std::string>& deleted_files,
+                          const std::string& probe_file,
                           StatusCallback cb);
 
     // Try to reuse a previous scratch dir on the same node (mv or cp)
@@ -62,13 +66,8 @@ private:
                                 const std::set<std::string>& active_scratches,
                                 StatusCallback cb);
 
-    // Remove scratch dirs not owned by any active job
+    // Remove scratch dirs not owned by any active job (single SSH command)
     void cleanup_stale_scratches(const std::string& compute_node,
                                  const std::string& scratch_path,
                                  const std::set<std::string>& active_scratches);
-
-    // Verify a specific file exists on the remote scratch dir via libssh2
-    bool verify_remote_file(const std::string& compute_node,
-                            const std::string& scratch_path,
-                            const std::string& rel_path);
 };

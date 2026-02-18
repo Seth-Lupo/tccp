@@ -18,15 +18,6 @@
 #include <memory>
 #include <chrono>
 
-// Shell prompts to detect a ready shell
-static const std::vector<Pattern> SHELL_PROMPTS{
-    Pattern("\\[.+@.+ ~\\]\\$ "),
-    Pattern("\\[.+@.+ .*\\]\\$ "),
-    Pattern("\\$ "),
-    Pattern("# "),
-    Pattern("> "),
-};
-
 // Data passed to keyboard-interactive callback via session abstract pointer
 struct KbdAuthData {
     std::string password;
@@ -324,13 +315,19 @@ SSHResult SessionManager::ssh_userauth(StatusCallback callback) {
 SSHResult SessionManager::wait_for_prompt(LIBSSH2_CHANNEL* chan, StatusCallback callback) {
     if (callback) callback("Waiting for shell...");
 
-    ExpectMatcher matcher;
-    auto result = matcher.expect(chan, SHELL_PROMPTS, std::chrono::seconds(15));
-    if (!result.matched) {
-        return SSHResult{-1, "", "Shell prompt not detected"};
+    ShellNegotiator negotiator;
+
+    // Configure based on what this session might encounter
+    if (target_.use_duo) {
+        negotiator.set_duo_response("1");
     }
 
-    return SSHResult{0, matcher.get_buffer(), ""};
+    // Password might be re-prompted in the shell (e.g. post-auth Duo flow)
+    if (!target_.password.empty()) {
+        negotiator.set_password(target_.password);
+    }
+
+    return negotiator.negotiate(chan, callback);
 }
 
 LIBSSH2_CHANNEL* SessionManager::open_extra_channel(StatusCallback callback) {

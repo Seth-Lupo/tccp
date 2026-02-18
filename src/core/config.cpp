@@ -223,7 +223,7 @@ static LoginConfig parse_login_config(const YAML::Node& node) {
 
 static SlurmDefaults parse_slurm_config(const YAML::Node& node) {
     SlurmDefaults slurm;
-    slurm.partition = node["partition"].as<std::string>("batch");
+    slurm.partition = node["partition"].as<std::string>("");
     slurm.time = node["time"].as<std::string>("00:30:00");
     slurm.nodes = node["nodes"].as<int>(1);
     slurm.cpus_per_task = node["cpus_per_task"].as<int>(1);
@@ -258,7 +258,7 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
     if (has_inline_resources(node)) {
         if (!project.slurm.has_value()) {
             SlurmDefaults slurm;
-            slurm.partition = "batch";
+            slurm.partition = "";
             slurm.time = "00:30:00";
             slurm.nodes = 1;
             slurm.cpus_per_task = 1;
@@ -337,7 +337,7 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
     // Top-level `script` shorthand: if no jobs defined, create a "main" job
     if (project.jobs.empty()) {
         JobConfig jc;
-        jc.script = node["script"].as<std::string>("main.py");
+        jc.script = node["script"].as<std::string>("");
         jc.args = node["args"].as<std::string>("");
         project.jobs["main"] = jc;
     }
@@ -388,7 +388,7 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
         if (!gpu_explicitly_set && !slurm_has_gpu) {
             if (!project.slurm.has_value()) {
                 project.slurm = SlurmDefaults{};
-                project.slurm->partition = "batch";
+                project.slurm->partition = "preempt";
                 project.slurm->time = "00:30:00";
                 project.slurm->nodes = 1;
                 project.slurm->cpus_per_task = 1;
