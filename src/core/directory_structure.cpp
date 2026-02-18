@@ -1,10 +1,8 @@
 #include "directory_structure.hpp"
-#include <cstdlib>
+#include <platform/platform.hpp>
 
 fs::path get_tccp_root() {
-    const char* home = std::getenv("HOME");
-    if (!home) home = "/tmp";
-    return fs::path(home) / ".tccp";
+    return platform::home_dir() / ".tccp";
 }
 
 void ensure_tccp_directory_structure() {

@@ -1,17 +1,22 @@
 #include "session.hpp"
+#include <platform/platform.hpp>
+#include <platform/socket_util.hpp>
 #include <libssh2.h>
-#include <sys/socket.h>
-#include <sys/fcntl.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <unistd.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <sys/socket.h>
+#  include <netinet/in.h>
+#  include <arpa/inet.h>
+#  include <netdb.h>
+#  include <unistd.h>
+#  include <netinet/tcp.h>
+#endif
 #include <cstring>
 #include <cerrno>
 #include <memory>
-#include <poll.h>
 #include <chrono>
-#include <netinet/tcp.h>
 
 // Shell prompts to detect a ready shell
 static const std::vector<Pattern> SHELL_PROMPTS{
@@ -95,8 +100,7 @@ SSHResult SessionManager::establish_connection(StatusCallback callback) {
     }
 
     // Set socket to non-blocking for libssh2
-    int flags = fcntl(sock_, F_GETFL, 0);
-    fcntl(sock_, F_SETFL, flags | O_NONBLOCK);
+    platform::set_nonblocking(sock_);
 
     // Resolve and connect
     struct sockaddr_in addr;
@@ -104,7 +108,7 @@ SSHResult SessionManager::establish_connection(StatusCallback callback) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(22);
 
-    if (inet_aton(target_.host.c_str(), &addr.sin_addr) == 0) {
+    if (inet_pton(AF_INET, target_.host.c_str(), &addr.sin_addr) != 1) {
         struct hostent* host_info = gethostbyname(target_.host.c_str());
         if (!host_info) {
             close();
@@ -115,27 +119,24 @@ SSHResult SessionManager::establish_connection(StatusCallback callback) {
 
     int ret = connect(sock_, (struct sockaddr*)&addr, sizeof(addr));
     if (ret < 0 && errno != EINPROGRESS) {
-        ::close(sock_);
+        platform::close_socket(sock_);
         sock_ = -1;
         return SSHResult{-1, "", "Failed to connect: " + std::string(strerror(errno))};
     }
 
     // Wait for non-blocking connect to complete
     if (ret < 0) {
-        struct pollfd pfd;
-        pfd.fd = sock_;
-        pfd.events = POLLOUT;
-        int poll_ret = poll(&pfd, 1, target_.timeout * 1000);
-        if (poll_ret <= 0) {
-            ::close(sock_);
+        int revents = platform::poll_socket(sock_, POLLOUT, target_.timeout * 1000);
+        if (revents == 0) {
+            platform::close_socket(sock_);
             sock_ = -1;
             return SSHResult{-1, "", "Connection timed out: " + target_.host};
         }
         int sock_err = 0;
         socklen_t err_len = sizeof(sock_err);
-        getsockopt(sock_, SOL_SOCKET, SO_ERROR, &sock_err, &err_len);
+        getsockopt(sock_, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&sock_err), &err_len);
         if (sock_err != 0) {
-            ::close(sock_);
+            platform::close_socket(sock_);
             sock_ = -1;
             return SSHResult{-1, "", "Connection failed: " + std::string(strerror(sock_err))};
         }
@@ -146,7 +147,7 @@ SSHResult SessionManager::establish_connection(StatusCallback callback) {
     // Create SSH session
     session_ = libssh2_session_init_ex(nullptr, nullptr, nullptr, nullptr);
     if (!session_) {
-        ::close(sock_);
+        platform::close_socket(sock_);
         sock_ = -1;
         return SSHResult{-1, "", "Failed to create SSH session"};
     }
@@ -155,14 +156,14 @@ SSHResult SessionManager::establish_connection(StatusCallback callback) {
 
     // SSH handshake (key exchange)
     while ((ret = libssh2_session_handshake(session_, sock_)) == LIBSSH2_ERROR_EAGAIN) {
-        usleep(100000);
+        platform::sleep_ms(100);
     }
 
     if (ret != 0) {
         libssh2_session_disconnect(session_, "Handshake failed");
         libssh2_session_free(session_);
         session_ = nullptr;
-        ::close(sock_);
+        platform::close_socket(sock_);
         sock_ = -1;
         return SSHResult{-1, "", "SSH handshake failed"};
     }
@@ -194,7 +195,7 @@ SSHResult SessionManager::establish_connection(StatusCallback callback) {
         libssh2_session_disconnect(session_, "Authentication failed");
         libssh2_session_free(session_);
         session_ = nullptr;
-        ::close(sock_);
+        platform::close_socket(sock_);
         sock_ = -1;
         return auth_result;
     }
@@ -205,21 +206,21 @@ SSHResult SessionManager::establish_connection(StatusCallback callback) {
             libssh2_session_disconnect(session_, "Failed to open channel");
             libssh2_session_free(session_);
             session_ = nullptr;
-            ::close(sock_);
+            platform::close_socket(sock_);
             sock_ = -1;
             return SSHResult{-1, "", "Failed to open SSH channel"};
         }
-        usleep(100000);
+        platform::sleep_ms(100);
     }
 
     // Request PTY
     while ((ret = libssh2_channel_request_pty(channel_, "xterm")) == LIBSSH2_ERROR_EAGAIN) {
-        usleep(100000);
+        platform::sleep_ms(100);
     }
 
     // Request shell
     while ((ret = libssh2_channel_shell(channel_)) == LIBSSH2_ERROR_EAGAIN) {
-        usleep(100000);
+        platform::sleep_ms(100);
     }
     if (ret != 0) {
         libssh2_channel_close(channel_);
@@ -228,7 +229,7 @@ SSHResult SessionManager::establish_connection(StatusCallback callback) {
         libssh2_session_disconnect(session_, "Failed to request shell");
         libssh2_session_free(session_);
         session_ = nullptr;
-        ::close(sock_);
+        platform::close_socket(sock_);
         sock_ = -1;
         return SSHResult{-1, "", "Failed to request shell"};
     }
@@ -242,7 +243,7 @@ SSHResult SessionManager::establish_connection(StatusCallback callback) {
         libssh2_session_disconnect(session_, "Shell not ready");
         libssh2_session_free(session_);
         session_ = nullptr;
-        ::close(sock_);
+        platform::close_socket(sock_);
         sock_ = -1;
         return prompt_result;
     }
@@ -266,7 +267,7 @@ SSHResult SessionManager::ssh_userauth(StatusCallback callback) {
         if (libssh2_session_last_errno(session_) != LIBSSH2_ERROR_EAGAIN) {
             break;
         }
-        usleep(100000);
+        platform::sleep_ms(100);
     }
 
     std::string methods = auth_list ? auth_list : "";
@@ -290,7 +291,7 @@ SSHResult SessionManager::ssh_userauth(StatusCallback callback) {
 
         while ((ret = libssh2_userauth_keyboard_interactive(session_,
                 target_.user.c_str(), kbd_callback)) == LIBSSH2_ERROR_EAGAIN) {
-            usleep(100000);
+            platform::sleep_ms(100);
         }
 
         if (ret == 0) {
@@ -308,7 +309,7 @@ SSHResult SessionManager::ssh_userauth(StatusCallback callback) {
 
         while ((ret = libssh2_userauth_password(session_,
                 target_.user.c_str(), target_.password.c_str())) == LIBSSH2_ERROR_EAGAIN) {
-            usleep(100000);
+            platform::sleep_ms(100);
         }
 
         if (ret == 0) {
@@ -347,16 +348,16 @@ LIBSSH2_CHANNEL* SessionManager::open_extra_channel(StatusCallback callback) {
             if (callback) callback("Failed to open extra channel");
             return nullptr;
         }
-        usleep(100000);
+        platform::sleep_ms(100);
     }
 
     int ret;
     while ((ret = libssh2_channel_request_pty(extra, "xterm")) == LIBSSH2_ERROR_EAGAIN) {
-        usleep(100000);
+        platform::sleep_ms(100);
     }
 
     while ((ret = libssh2_channel_shell(extra)) == LIBSSH2_ERROR_EAGAIN) {
-        usleep(100000);
+        platform::sleep_ms(100);
     }
     if (ret != 0) {
         libssh2_channel_close(extra);
@@ -386,7 +387,7 @@ void SessionManager::close() {
     }
 
     if (sock_ >= 0) {
-        ::close(sock_);
+        platform::close_socket(sock_);
         sock_ = -1;
     }
 
@@ -409,11 +410,8 @@ bool SessionManager::check_alive() {
     }
 
     // Also check if the socket is still valid
-    struct pollfd pfd;
-    pfd.fd = sock_;
-    pfd.events = POLLIN;
-    int poll_ret = poll(&pfd, 1, 0);
-    if (poll_ret > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+    int revents = platform::poll_socket(sock_, POLLIN, 0);
+    if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
         active_ = false;
         return false;
     }

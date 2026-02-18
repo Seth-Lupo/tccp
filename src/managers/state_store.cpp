@@ -1,12 +1,10 @@
 #include "state_store.hpp"
+#include <platform/platform.hpp>
 #include <yaml-cpp/yaml.h>
 #include <fstream>
-#include <cstdlib>
 
 StateStore::StateStore(const std::string& project_name) {
-    const char* home = std::getenv("HOME");
-    if (!home) home = "/tmp";
-    state_path_ = fs::path(home) / ".tccp" / "state" / (project_name + ".yaml");
+    state_path_ = platform::home_dir() / ".tccp" / "state" / (project_name + ".yaml");
 }
 
 ProjectState StateStore::load() {
@@ -78,7 +76,7 @@ ProjectState StateStore::load() {
 
     } catch (const std::exception& e) {
         // Corrupted state file — log and start fresh
-        std::ofstream log("/tmp/tccp_debug.log", std::ios::app);
+        std::ofstream log((platform::temp_dir() / "tccp_debug.log").string(), std::ios::app);
         if (log) log << "[StateStore] Corrupt state file " << state_path_.string()
                      << ": " << e.what() << " — starting fresh\n";
         return ProjectState{};

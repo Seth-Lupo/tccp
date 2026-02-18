@@ -1,4 +1,5 @@
 #include "gpu_discovery.hpp"
+#include <platform/platform.hpp>
 #include <sstream>
 #include <algorithm>
 #include <set>
@@ -8,7 +9,8 @@
 // ── Debug logging ────────────────────────────────────────────
 
 static void gpu_log(const std::string& msg) {
-    std::ofstream out("/tmp/tccp_debug.log", std::ios::app);
+    static std::string log_path = (platform::temp_dir() / "tccp_debug.log").string();
+    std::ofstream out(log_path, std::ios::app);
     if (out) out << "[gpu] " << msg << "\n";
 }
 

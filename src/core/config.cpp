@@ -1,5 +1,6 @@
 #include "config.hpp"
 #include <managers/gpu_discovery.hpp>
+#include <platform/platform.hpp>
 #include <yaml-cpp/yaml.h>
 #include <iostream>
 #include <fstream>
@@ -99,11 +100,7 @@ bool project_config_exists(const fs::path& dir) {
 }
 
 fs::path get_global_config_dir() {
-    const char* home = std::getenv("HOME");
-    if (!home) {
-        home = "/tmp";
-    }
-    return fs::path(home) / ".tccp";
+    return platform::home_dir() / ".tccp";
 }
 
 fs::path get_global_config_path() {

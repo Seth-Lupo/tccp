@@ -9,6 +9,11 @@
     "yaml-cpp",
     "cli11",
     "fmt",
-    "gtest"
+    "gtest",
+    "replxx",
+    {
+      "name": "libarchive",
+      "default-features": false
+    }
   ]
 }

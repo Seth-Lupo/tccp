@@ -27,6 +27,7 @@ find_package(libssh2 CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
+find_package(replxx CONFIG REQUIRED)
 
 # Platform-specific libraries
 if(APPLE AND NOT TCCP_DEV)
@@ -43,6 +44,7 @@ endif()
 option(TCCP_BUILD_TESTS "Build unit tests" OFF)
 
 # Source subdirectories
+add_subdirectory(src/platform)
 add_subdirectory(src/core)
 add_subdirectory(src/ssh)
 add_subdirectory(src/environments)
@@ -52,6 +54,7 @@ add_subdirectory(src/cli)
 # libtccp: interface library bundling all core libraries (for tests and future frontends)
 add_library(libtccp INTERFACE)
 target_link_libraries(libtccp INTERFACE
+    tccp_platform
     tccp_core
     tccp_ssh
     tccp_environments
@@ -62,6 +65,7 @@ target_link_libraries(libtccp INTERFACE
 add_executable(tccp src/main.cpp)
 
 target_link_libraries(tccp PRIVATE
+    tccp_platform
     tccp_core
     tccp_ssh
     tccp_environments

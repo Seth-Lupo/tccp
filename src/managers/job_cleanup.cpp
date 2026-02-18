@@ -259,7 +259,7 @@ void JobManager::kill_job_processes(const TrackedJob& tj) {
     tccp_log_ssh("cleanup:kill", cmd, result);
 }
 
-void JobManager::cleanup_compute_node(const TrackedJob& tj) {
+void JobManager::cleanup_compute_node(TrackedJob& tj) {
     if (!tj.tunnel_pids.empty()) {
         PortForwarder::stop(tj.tunnel_pids);
     }

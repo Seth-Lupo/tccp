@@ -3,6 +3,8 @@
 #include <core/config.hpp>
 #include <core/constants.hpp>
 #include <core/utils.hpp>
+#include <platform/platform.hpp>
+#include <platform/archive.hpp>
 #include <fmt/format.h>
 #include <filesystem>
 #include <fstream>
@@ -107,52 +109,36 @@ void SyncManager::diff_manifests(const std::vector<SyncManifestEntry>& current,
 
 static fs::path create_local_tar(const fs::path& project_dir,
                                   const std::vector<std::string>& rel_paths) {
-    fs::path tar_path = fs::temp_directory_path() / fmt::format("tccp_sync_{}.tar", std::time(nullptr));
-    fs::path list_path = fs::temp_directory_path() / fmt::format("tccp_sync_{}.list", std::time(nullptr));
-
-    {
-        std::ofstream list(list_path);
-        for (const auto& rel : rel_paths) {
-            list << rel << "\n";
-        }
-    }
-
-    std::string cmd = fmt::format("tar cf {} -C {} -T {}",
-                                  tar_path.string(), project_dir.string(), list_path.string());
-    std::system(cmd.c_str());
-    fs::remove(list_path);
+    fs::path tar_path = platform::temp_dir() / fmt::format("tccp_sync_{}.tar", std::time(nullptr));
+    platform::create_tar(tar_path, project_dir, rel_paths);
     return tar_path;
 }
 
 void SyncManager::pipe_tar_to_node(const fs::path& tar_path,
                                     const std::string& compute_node,
                                     const std::string& scratch_path) {
-    const char* home = std::getenv("HOME");
-    std::string key_path = home ? std::string(home) + "/.ssh/id_ed25519" : "";
-
-    if (key_path.empty() || !fs::exists(key_path)) {
-        throw std::runtime_error(
-            "SSH key not found at ~/.ssh/id_ed25519 — run a job first to generate keys, "
-            "or run ssh-keygen -t ed25519");
+    // Read the tar file into memory
+    std::ifstream tar_file(tar_path, std::ios::binary | std::ios::ate);
+    if (!tar_file) {
+        throw std::runtime_error("Cannot open tar file: " + tar_path.string());
     }
+    auto file_size = tar_file.tellg();
+    tar_file.seekg(0);
+    std::string tar_data(static_cast<size_t>(file_size), '\0');
+    tar_file.read(tar_data.data(), file_size);
+    tar_file.close();
 
-    // Nested SSH: local → DTN → compute node.
-    // The second hop uses the DTN's cluster-internal auth (GSSAPI/hostbased),
-    // which compute nodes accept. ProxyJump doesn't work because compute nodes
-    // reject direct pubkey auth from external keys.
-    // -T: disable PTY on outer hop (binary-clean pipe)
-    // exec: replace DTN shell immediately so .bashrc can't consume stdin
-    std::string dtn_host = fmt::format("{}@{}", username_, config_.dtn().host);
+    // Pipe tar data through a new exec channel on the DTN session.
+    // The command does nested SSH: DTN → compute node, then extracts the tar.
+    // Uses DTN's cluster-internal auth (GSSAPI/hostbased) which compute nodes accept.
     std::string cmd = fmt::format(
-        "cat {} | ssh -T -i {} "
-        "-o StrictHostKeyChecking=no -o BatchMode=yes "
-        "{} 'exec ssh {} {} \"mkdir -p {} && cd {} && tar xf - 2>/dev/null\"'",
-        tar_path.string(), key_path,
-        dtn_host, SSH_OPTS, compute_node, scratch_path, scratch_path);
-    int rc = std::system(cmd.c_str());
-    if (rc != 0) {
+        "ssh {} {} 'mkdir -p {} && cd {} && tar xf - 2>/dev/null'",
+        SSH_OPTS, compute_node, scratch_path, scratch_path);
+
+    auto result = dtn_.run_with_input(cmd, tar_data.data(), tar_data.size());
+    if (result.failed()) {
         throw std::runtime_error(fmt::format(
-            "File sync failed (ssh exit code {}). Check SSH connectivity to DTN.", rc));
+            "File sync failed: {}. Check SSH connectivity to DTN.", result.stderr_data));
     }
 }
 

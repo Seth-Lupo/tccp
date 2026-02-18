@@ -20,14 +20,4 @@ add_library(tccp_cli
 
 target_include_directories(tccp_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(tccp_cli PUBLIC CLI11::CLI11 fmt::fmt)
-target_link_libraries(tccp_cli PRIVATE tccp_core tccp_ssh tccp_managers tccp_environments)
-
-# Readline (libedit on macOS, GNU readline on Linux)
-if(APPLE)
-    target_link_libraries(tccp_cli PRIVATE "-ledit")
-else()
-    find_library(READLINE_LIB readline)
-    if(READLINE_LIB)
-        target_link_libraries(tccp_cli PRIVATE ${READLINE_LIB})
-    endif()
-endif()
+target_link_libraries(tccp_cli PRIVATE tccp_core tccp_ssh tccp_managers tccp_environments tccp_platform replxx::replxx)

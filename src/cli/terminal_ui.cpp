@@ -1,26 +1,22 @@
 #include "terminal_ui.hpp"
-#include <sys/ioctl.h>
-#include <unistd.h>
+#include <platform/terminal.hpp>
 #include <iostream>
 #include <fmt/format.h>
 #include <algorithm>
+#ifndef _WIN32
+#  include <unistd.h>
+#endif
 
 namespace TerminalUI {
 
 // ── Terminal dimensions ──────────────────────────────────────────
 
 int term_width() {
-    struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
-        return ws.ws_col;
-    return 80;
+    return platform::term_width();
 }
 
 int term_rows() {
-    struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
-        return ws.ws_row;
-    return 24;
+    return platform::term_height();
 }
 
 // ── Alternate screen management ──────────────────────────────────

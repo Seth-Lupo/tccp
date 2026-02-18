@@ -496,7 +496,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
         log_to_file(fmt::format("Job launched successfully on {}", alloc->node));
 
         // Start port forwarding tunnels if configured
-        std::vector<pid_t> tunnel_pids;
+        std::vector<std::shared_ptr<platform::ProcessHandle>> tunnel_pids;
         std::vector<int> fwd_ports;
         auto job_it = config_.project().jobs.find(job_name);
         if (job_it != config_.project().jobs.end() && !job_it->second.ports.empty()) {
@@ -517,7 +517,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
                     tj.scratch_path = scratch;
                     tj.init_complete = true;
                     tj.start_time = start;
-                    tj.tunnel_pids = tunnel_pids;
+                    tj.tunnel_pids = std::move(tunnel_pids);
                     tj.forwarded_ports = fwd_ports;
                     break;
                 }

@@ -9,6 +9,7 @@ add_library(tccp_core
 
 target_include_directories(tccp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(tccp_core PUBLIC yaml-cpp::yaml-cpp fmt::fmt)
+target_link_libraries(tccp_core PRIVATE tccp_platform)
 
 if(TCCP_DEV)
     # Dev: file-based credentials (no keychain prompts on recompile)

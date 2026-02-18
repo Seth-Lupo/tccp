@@ -4,11 +4,12 @@
 #include "../theme.hpp"
 #include <core/utils.hpp>
 #include <core/time_utils.hpp>
+#include <platform/terminal.hpp>
 #include <iostream>
 #include <chrono>
-#include <termios.h>
-#include <unistd.h>
-#include <poll.h>
+#ifndef _WIN32
+#  include <unistd.h>
+#endif
 #include <fmt/format.h>
 
 std::string dtach_sock_for(const TrackedJob& tj) {
@@ -31,14 +32,8 @@ void draw_job_header(const std::string& job_name,
 }
 
 bool wait_or_detach(int ms) {
-    struct termios old_term, new_term;
-    tcgetattr(STDIN_FILENO, &old_term);
-    new_term = old_term;
-    new_term.c_lflag &= ~(ICANON | ECHO);
-    new_term.c_cc[VMIN] = 0;
-    new_term.c_cc[VTIME] = 0;
-    tcflush(STDIN_FILENO, TCIFLUSH);
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &new_term);
+    platform::flush_stdin();
+    platform::RawModeGuard raw_guard(platform::RawModeGuard::kNoEcho);
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
     bool first_esc = false;
@@ -49,16 +44,12 @@ bool wait_or_detach(int ms) {
             deadline - std::chrono::steady_clock::now()).count();
         if (remaining <= 0) break;
 
-        struct pollfd pfd = {STDIN_FILENO, POLLIN, 0};
-        int ret = poll(&pfd, 1, static_cast<int>(std::min(remaining, (long long)100)));
-
-        if (ret > 0 && (pfd.revents & POLLIN)) {
+        if (platform::poll_stdin(static_cast<int>(std::min(remaining, (long long)100)))) {
             char c;
             if (read(STDIN_FILENO, &c, 1) == 1) {
                 if (c == 27) {
                     auto now = std::chrono::steady_clock::now();
                     if (first_esc && (now - first_esc_time) < std::chrono::milliseconds(500)) {
-                        tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                         return true;
                     }
                     first_esc = true;
@@ -70,7 +61,6 @@ bool wait_or_detach(int ms) {
         }
     }
 
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
     return false;
 }
 

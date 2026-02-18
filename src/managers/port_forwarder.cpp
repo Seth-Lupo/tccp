@@ -1,24 +1,23 @@
 #include "port_forwarder.hpp"
 #include "job_log.hpp"
 #include <core/utils.hpp>
+#include <platform/platform.hpp>
+#include <platform/process.hpp>
 #include <fmt/format.h>
 #include <fstream>
-#include <cstdlib>
 #include <filesystem>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
+#ifndef _WIN32
+#  include <unistd.h>
+#  include <sys/socket.h>
+#  include <netinet/in.h>
+#  include <arpa/inet.h>
+#endif
 
 namespace fs = std::filesystem;
 
 PortForwarder::PortForwarder(const DTNConfig& dtn)
     : dtn_(dtn), username_(get_cluster_username()) {
-    const char* home = std::getenv("HOME");
-    if (home) key_path_ = std::string(home) + "/.ssh/id_ed25519";
+    key_path_ = (platform::home_dir() / ".ssh" / "id_ed25519").string();
 }
 
 // ── Key setup ─────────────────────────────────────────────
@@ -82,6 +81,20 @@ bool PortForwarder::ensure_keys(SSHConnection& dtn, StatusCallback log) {
 // ── Port checking ─────────────────────────────────────────
 
 bool PortForwarder::is_port_open(int port) {
+#ifdef _WIN32
+    platform::init_networking();
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET) return false;
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    int rc = connect(sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+    closesocket(sock);
+    return rc == 0;
+#else
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return false;
 
@@ -93,56 +106,36 @@ bool PortForwarder::is_port_open(int port) {
     int rc = connect(sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
     close(sock);
     return rc == 0;
+#endif
 }
 
 // ── Tunnel lifecycle ──────────────────────────────────────
 
-pid_t PortForwarder::spawn_tunnel(int port,
-                                   const std::string& compute_node,
-                                   const std::string& dtn_host) {
-    pid_t pid = fork();
-    if (pid != 0) return pid;  // parent or error
-
-    // Child: set up and exec SSH
-    close(STDIN_FILENO);
-
-    // Capture SSH errors to log file
-    int fd = open("/tmp/tccp_tunnel.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd >= 0) { dup2(fd, STDERR_FILENO); close(fd); }
-
-    // Two-hop tunnel so we reach localhost on the compute node.
-    // Servers inside Singularity containers often bind to 127.0.0.1, which
-    // is not reachable via the node's external IP.
-    //
-    // Hop 1 (local → DTN):  ssh -L port:localhost:port user@DTN
-    //   Binds local:port, forwards to DTN:localhost:port
-    // Hop 2 (DTN → compute): ssh -N -L localhost:port:localhost:port compute
-    //   Binds DTN:localhost:port, forwards to compute:localhost:port
-    //
-    // Chain: local:port → DTN:port → compute:localhost:port
-    // DTN→compute uses cluster-internal auth (GSSAPI/hostbased).
+platform::ProcessHandle PortForwarder::spawn_tunnel(int port,
+                                                     const std::string& compute_node,
+                                                     const std::string& dtn_host) {
+    std::string tunnel_log = (platform::temp_dir() / "tccp_tunnel.log").string();
     std::string local_fwd = fmt::format("{}:localhost:{}", port, port);
     std::string inner_cmd = fmt::format(
         "exec ssh -N -o StrictHostKeyChecking=no -o BatchMode=yes "
         "-L localhost:{}:localhost:{} {}", port, port, compute_node);
 
-    execlp("ssh", "ssh",
-           "-T",
-           "-L", local_fwd.c_str(),
-           "-o", "StrictHostKeyChecking=no",
-           "-o", "BatchMode=yes",
-           "-o", "ExitOnForwardFailure=yes",
-           "-o", "ServerAliveInterval=60",
-           "-o", "ServerAliveCountMax=3",
-           "-i", key_path_.c_str(),
-           dtn_host.c_str(),
-           inner_cmd.c_str(),
-           nullptr);
-    _exit(127);
+    return platform::spawn("ssh", {
+        "-T",
+        "-L", local_fwd,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ServerAliveInterval=60",
+        "-o", "ServerAliveCountMax=3",
+        "-i", key_path_,
+        dtn_host,
+        inner_cmd
+    }, tunnel_log);
 }
 
-bool PortForwarder::wait_for_tunnel(pid_t pid, int port, int timeout_ms,
-                                     StatusCallback log) {
+bool PortForwarder::wait_for_tunnel(platform::ProcessHandle& handle, int port,
+                                     int timeout_ms, StatusCallback log) {
     auto emit = [&](const std::string& msg) {
         tccp_log(fmt::format("PortForwarder: {}", msg));
         if (log) log(msg);
@@ -150,39 +143,38 @@ bool PortForwarder::wait_for_tunnel(pid_t pid, int port, int timeout_ms,
 
     int elapsed = 0;
     while (elapsed < timeout_ms) {
-        usleep(200000);
+        platform::sleep_ms(200);
         elapsed += 200;
 
         // Check if process died
-        int status;
-        if (waitpid(pid, &status, WNOHANG) == pid) {
-            emit(fmt::format("Tunnel died (exit {}) — see /tmp/tccp_tunnel.log",
-                             WEXITSTATUS(status)));
+        if (!handle.running()) {
+            emit(fmt::format("Tunnel died — see {}",
+                             (platform::temp_dir() / "tccp_tunnel.log").string()));
             return false;
         }
 
         if (is_port_open(port)) return true;
     }
 
-    // Timed out — kill the zombie process
+    // Timed out — kill the process
     emit(fmt::format("Tunnel timeout ({}s) — port {} never opened",
                      timeout_ms / 1000, port));
-    kill(pid, SIGKILL);
-    waitpid(pid, nullptr, 0);
+    handle.terminate();
     return false;
 }
 
-std::vector<pid_t> PortForwarder::start(const std::string& compute_node,
-                                         const std::vector<int>& ports,
-                                         StatusCallback log) {
+std::vector<std::shared_ptr<platform::ProcessHandle>> PortForwarder::start(
+    const std::string& compute_node,
+    const std::vector<int>& ports,
+    StatusCallback log) {
     auto emit = [&](const std::string& msg) {
         tccp_log(fmt::format("PortForwarder: {}", msg));
         if (log) log(msg);
     };
 
-    std::vector<pid_t> pids;
-    if (!keys_ready_) { emit("Skipping — SSH keys not ready"); return pids; }
-    if (ports.empty()) return pids;
+    std::vector<std::shared_ptr<platform::ProcessHandle>> handles;
+    if (!keys_ready_) { emit("Skipping — SSH keys not ready"); return handles; }
+    if (ports.empty()) return handles;
 
     std::string dtn_host = fmt::format("{}@{}", username_, dtn_.host);
 
@@ -194,34 +186,26 @@ std::vector<pid_t> PortForwarder::start(const std::string& compute_node,
 
         emit(fmt::format("Forwarding localhost:{} → {}:{}...", port, compute_node, port));
 
-        pid_t pid = spawn_tunnel(port, compute_node, dtn_host);
-        if (pid < 0) {
-            emit(fmt::format("fork failed for port {}", port));
+        auto handle = std::make_shared<platform::ProcessHandle>(
+            spawn_tunnel(port, compute_node, dtn_host));
+        if (!handle->valid()) {
+            emit(fmt::format("spawn failed for port {}", port));
             continue;
         }
 
-        if (wait_for_tunnel(pid, port, 10000, log)) {
-            pids.push_back(pid);
+        if (wait_for_tunnel(*handle, port, 10000, log)) {
             emit(fmt::format("localhost:{} → {}:{} ready", port, compute_node, port));
+            handles.push_back(std::move(handle));
         }
     }
 
-    return pids;
+    return handles;
 }
 
-void PortForwarder::stop(const std::vector<pid_t>& pids) {
-    for (pid_t pid : pids) {
-        if (pid <= 0) continue;
-        if (kill(pid, SIGTERM) != 0) continue;
-
-        // Wait up to 2s for graceful exit
-        for (int i = 0; i < 20; i++) {
-            int status;
-            if (waitpid(pid, &status, WNOHANG) == pid) return;
-            usleep(100000);
+void PortForwarder::stop(std::vector<std::shared_ptr<platform::ProcessHandle>>& handles) {
+    for (auto& handle : handles) {
+        if (handle && handle->valid()) {
+            handle->terminate();
         }
-
-        kill(pid, SIGKILL);
-        waitpid(pid, nullptr, 0);
     }
 }

@@ -34,7 +34,7 @@ struct TrackedJob {
     bool output_returned = false;    // true if output was downloaded and remote cleaned
 
     // Port forwarding
-    std::vector<pid_t> tunnel_pids;
+    std::vector<std::shared_ptr<platform::ProcessHandle>> tunnel_pids;
     std::vector<int> forwarded_ports;
 
     // Timing
@@ -160,7 +160,7 @@ private:
     void kill_job_processes(const TrackedJob& tj);
 
     // Shared cleanup: kill job processes + remove socket from compute node
-    void cleanup_compute_node(const TrackedJob& tj);
+    void cleanup_compute_node(TrackedJob& tj);
 
     // Shared: persist tracked job fields to state store
     void persist_job_state(const TrackedJob& tj);

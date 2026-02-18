@@ -15,4 +15,4 @@ add_library(tccp_managers
 
 target_include_directories(tccp_managers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(tccp_managers PUBLIC fmt::fmt yaml-cpp::yaml-cpp)
-target_link_libraries(tccp_managers PRIVATE tccp_core tccp_ssh tccp_environments)
+target_link_libraries(tccp_managers PRIVATE tccp_core tccp_ssh tccp_environments tccp_platform)

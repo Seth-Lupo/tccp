@@ -1,11 +1,13 @@
 #include "tccp_cli.hpp"
 #include "theme.hpp"
+#include <platform/terminal.hpp>
+#ifndef _WIN32
+#  include <unistd.h>
+#endif
 #include <iostream>
 #include <sstream>
 #include <fstream>
 #include <filesystem>
-#include <termios.h>
-#include <unistd.h>
 #include <algorithm>
 #include <core/config.hpp>
 #include <core/credentials.hpp>
@@ -80,16 +82,22 @@ static std::string read_password(const std::string& prompt) {
     std::cout << prompt;
     std::cout.flush();
 
-    struct termios oldt, newt;
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    newt.c_lflag &= ~ECHO;
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    platform::RawModeGuard guard(platform::RawModeGuard::kNoEcho);
 
     std::string password;
-    std::getline(std::cin, password);
+    // Read character by character (no echo, no canonical)
+    while (true) {
+        if (!platform::poll_stdin(30000)) break;  // 30s timeout
+        char c;
+        if (read(STDIN_FILENO, &c, 1) != 1) break;
+        if (c == '\n' || c == '\r') break;
+        if (c == 127 || c == 8) {  // backspace
+            if (!password.empty()) password.pop_back();
+            continue;
+        }
+        if (c >= 32) password += c;
+    }
 
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     std::cout << "\n";
     return password;
 }

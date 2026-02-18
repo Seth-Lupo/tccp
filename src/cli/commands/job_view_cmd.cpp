@@ -4,12 +4,13 @@
 #include "../theme.hpp"
 #include <managers/job_log.hpp>
 #include <core/constants.hpp>
+#include <platform/terminal.hpp>
 #include <iostream>
 #include <thread>
 #include <chrono>
-#include <termios.h>
-#include <unistd.h>
-#include <poll.h>
+#ifndef _WIN32
+#  include <unistd.h>
+#endif
 #include <fmt/format.h>
 #include <fstream>
 #include <cstdlib>
@@ -62,14 +63,8 @@ void do_view(BaseCLI& cli, const std::string& arg) {
 
         std::string init_log = job_log_path(tracked->job_id);
 
-        // Raw terminal for Ctrl+\ detection
-        struct termios old_term, raw_term;
-        tcgetattr(STDIN_FILENO, &old_term);
-        raw_term = old_term;
-        raw_term.c_lflag &= ~(ICANON | ECHO | ISIG);
-        raw_term.c_cc[VMIN] = 0;
-        raw_term.c_cc[VTIME] = 0;
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_term);
+        { // Scope for RawModeGuard — terminal restored when block exits
+        platform::RawModeGuard raw_guard(platform::RawModeGuard::kNoEcho);
 
         std::streampos log_pos = 0;
 
@@ -79,8 +74,7 @@ void do_view(BaseCLI& cli, const std::string& arg) {
             // Poll for Ctrl+\ or Ctrl+C (500ms intervals)
             bool user_detached = false;
             bool user_canceled = false;
-            struct pollfd pfd = {STDIN_FILENO, POLLIN, 0};
-            if (poll(&pfd, 1, 500) > 0 && (pfd.revents & POLLIN)) {
+            if (platform::poll_stdin(500)) {
                 char c;
                 if (read(STDIN_FILENO, &c, 1) == 1) {
                     if (c == 0x1c) {
@@ -92,7 +86,6 @@ void do_view(BaseCLI& cli, const std::string& arg) {
             }
 
             if (user_detached) {
-                tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                 TerminalUI::leave_alt_screen();
                 std::cout << fmt::format(
                     "Detached. Init continues in background. 'view {}' to check.", job_name) << "\n";
@@ -100,7 +93,6 @@ void do_view(BaseCLI& cli, const std::string& arg) {
             }
 
             if (user_canceled) {
-                tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                 TerminalUI::leave_alt_screen();
                 std::cout << "Canceling job during initialization...\n";
                 auto cancel_result = cli.service.cancel_job_by_id(tracked->job_id, nullptr);
@@ -115,7 +107,6 @@ void do_view(BaseCLI& cli, const std::string& arg) {
             // Refresh tracked job state
             tracked = cli.service.find_job_by_name(job_name);
             if (!tracked) {
-                tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                 TerminalUI::leave_alt_screen();
                 return;
             }
@@ -124,7 +115,6 @@ void do_view(BaseCLI& cli, const std::string& arg) {
                 flush_init_log(init_log, log_pos);
                 std::cout << "\n" << theme::error(tracked->init_error) << std::flush;
                 std::this_thread::sleep_for(std::chrono::seconds(2));
-                tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                 TerminalUI::leave_alt_screen();
                 return;
             }
@@ -136,7 +126,6 @@ void do_view(BaseCLI& cli, const std::string& arg) {
                 if (tracked->canceled) {
                     std::cout << "\nJob canceled during initialization\n" << std::flush;
                     std::this_thread::sleep_for(std::chrono::seconds(2));
-                    tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
                     TerminalUI::leave_alt_screen();
                     return;
                 }
@@ -144,9 +133,7 @@ void do_view(BaseCLI& cli, const std::string& arg) {
                 break;
             }
         }
-
-        // Restore terminal before attaching (JobView sets its own raw mode)
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
+        } // raw_guard scope end — terminal restored
 
         // Clear init output from screen
         std::cout << "\033[H\033[J" << std::flush;
@@ -407,7 +394,7 @@ void do_output(BaseCLI& cli, const std::string& arg) {
     if (raw.empty()) return;
 
     // Write to local temp file and open in vim
-    std::string local_tmp = "/tmp/tccp_view_" + tracked->job_id + ".log";
+    std::string local_tmp = (platform::temp_dir() / ("tccp_view_" + tracked->job_id + ".log")).string();
     std::ofstream out(local_tmp, std::ios::binary);
     if (!out) {
         std::cout << theme::error("Failed to create temp file: " + local_tmp);

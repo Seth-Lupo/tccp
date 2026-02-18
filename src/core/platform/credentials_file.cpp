@@ -1,4 +1,5 @@
 #include "../credentials.hpp"
+#include <platform/platform.hpp>
 #include <fstream>
 #include <sstream>
 #include <filesystem>
@@ -10,9 +11,7 @@ namespace fs = std::filesystem;
 // File is chmod 600.
 
 static fs::path creds_path() {
-    const char* home = getenv("HOME");
-    if (!home) home = "/tmp";
-    return fs::path(home) / ".tccp" / "credentials";
+    return platform::home_dir() / ".tccp" / "credentials";
 }
 
 // Read all key=value pairs from the credentials file

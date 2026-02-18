@@ -7,17 +7,19 @@
 #include <filesystem>
 #include <ssh/connection.hpp>
 #include <core/utils.hpp>
+#include <platform/platform.hpp>
 #include <fmt/format.h>
 
-static const char* TCCP_LOG_PATH = "/tmp/tccp_debug.log";
+inline std::string tccp_log_path() {
+    static std::string path = (platform::temp_dir() / "tccp_debug.log").string();
+    return path;
+}
 
 // now_iso() is provided by core/utils.hpp — no duplicate here.
 
 // Persistent job log path: ~/.tccp/logs/{job_id}.log
 inline std::string job_log_path(const std::string& job_id) {
-    const char* home = std::getenv("HOME");
-    if (!home) home = "/tmp";
-    return std::string(home) + "/.tccp/logs/" + job_id + ".log";
+    return (platform::home_dir() / ".tccp" / "logs" / (job_id + ".log")).string();
 }
 
 // Append a timestamped line to a job's persistent log file.
@@ -31,7 +33,7 @@ inline void append_job_log(const std::string& job_id, const std::string& msg) {
 }
 
 inline void tccp_log(const std::string& msg) {
-    std::ofstream out(TCCP_LOG_PATH, std::ios::app);
+    std::ofstream out(tccp_log_path(), std::ios::app);
     if (!out) return;
 
     auto now = std::chrono::system_clock::now();
@@ -39,7 +41,11 @@ inline void tccp_log(const std::string& msg) {
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         now.time_since_epoch()) % 1000;
     struct tm tm_buf;
+#ifdef _WIN32
+    localtime_s(&tm_buf, &t);
+#else
     localtime_r(&t, &tm_buf);
+#endif
 
     char ts[32];
     std::snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03d",

@@ -7,8 +7,8 @@
 #include <chrono>
 #include <thread>
 
-SSHConnection::SSHConnection(LIBSSH2_CHANNEL* channel)
-    : channel_(channel) {
+SSHConnection::SSHConnection(LIBSSH2_CHANNEL* channel, LIBSSH2_SESSION* session)
+    : channel_(channel), session_(session) {
 }
 
 bool SSHConnection::is_active() const {
@@ -221,6 +221,110 @@ SSHResult SSHConnection::upload(const fs::path& local, const std::string& remote
                       + lines + "TCCP_B64_EOF";
 
     return run(cmd);
+}
+
+SSHResult SSHConnection::run_with_input(const std::string& command,
+                                        const char* data, size_t data_len,
+                                        int timeout_secs) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!session_) {
+        return SSHResult{-1, "", "No session available for run_with_input"};
+    }
+
+    // Open a new exec channel (no PTY — binary-clean)
+    LIBSSH2_CHANNEL* exec_ch = nullptr;
+    auto open_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < open_deadline) {
+        exec_ch = libssh2_channel_open_session(session_);
+        if (exec_ch) break;
+        if (libssh2_session_last_errno(session_) != LIBSSH2_ERROR_EAGAIN) {
+            return SSHResult{-1, "", "Failed to open exec channel"};
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!exec_ch) {
+        return SSHResult{-1, "", "Timed out opening exec channel"};
+    }
+
+    // Execute the command
+    int rc;
+    while ((rc = libssh2_channel_exec(exec_ch, command.c_str())) == LIBSSH2_ERROR_EAGAIN) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (rc != 0) {
+        libssh2_channel_free(exec_ch);
+        return SSHResult{-1, "", "Failed to exec command on channel"};
+    }
+
+    // Write all data to stdin
+    size_t sent = 0;
+    int write_retries = 0;
+    while (sent < data_len) {
+        auto w = libssh2_channel_write(exec_ch, data + sent, data_len - sent);
+        if (w == LIBSSH2_ERROR_EAGAIN) {
+            if (++write_retries > 1000) {
+                libssh2_channel_close(exec_ch);
+                libssh2_channel_free(exec_ch);
+                return SSHResult{-1, "", "Write stalled sending data to channel"};
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        if (w < 0) {
+            libssh2_channel_close(exec_ch);
+            libssh2_channel_free(exec_ch);
+            return SSHResult{-1, "", "Channel write error sending data"};
+        }
+        write_retries = 0;
+        sent += static_cast<size_t>(w);
+    }
+
+    // Close stdin (send EOF) so the remote command knows input is done
+    while (libssh2_channel_send_eof(exec_ch) == LIBSSH2_ERROR_EAGAIN) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // Read stdout until channel closes
+    std::string output;
+    char buf[SSH_READ_BUF_SIZE];
+    int effective_timeout = (timeout_secs > 0) ? timeout_secs : SSH_CMD_TIMEOUT_SECS;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(effective_timeout);
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto n = libssh2_channel_read(exec_ch, buf, sizeof(buf) - 1);
+        if (n > 0) {
+            output.append(buf, static_cast<size_t>(n));
+        } else if (n == 0 || n == LIBSSH2_ERROR_EAGAIN) {
+            if (libssh2_channel_eof(exec_ch)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } else {
+            break;  // read error
+        }
+    }
+
+    // Read stderr too (for error diagnostics)
+    std::string stderr_data;
+    while (true) {
+        auto n = libssh2_channel_read_stderr(exec_ch, buf, sizeof(buf) - 1);
+        if (n > 0) {
+            stderr_data.append(buf, static_cast<size_t>(n));
+        } else {
+            break;
+        }
+    }
+
+    // Get exit status
+    int exit_status = 0;
+    while ((rc = libssh2_channel_close(exec_ch)) == LIBSSH2_ERROR_EAGAIN) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (rc == 0) {
+        exit_status = libssh2_channel_get_exit_status(exec_ch);
+    }
+
+    libssh2_channel_free(exec_ch);
+
+    return SSHResult{exit_status, output, stderr_data};
 }
 
 SSHResult SSHConnection::download(const std::string& remote, const fs::path& local) {

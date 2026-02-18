@@ -1,14 +1,15 @@
 #include "job_view.hpp"
 #include "terminal_output.hpp"
 #include "terminal_ui.hpp"
+#include <platform/platform.hpp>
+#include <platform/terminal.hpp>
+#include <platform/socket_util.hpp>
 #include <iostream>
 #include <libssh2.h>
 #include <fmt/format.h>
-#include <unistd.h>
-#include <termios.h>
-#include <poll.h>
-#include <signal.h>
-#include <sys/ioctl.h>
+#ifndef _WIN32
+#  include <unistd.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 
@@ -25,25 +26,24 @@
 static constexpr const char* JOB_START_MARKER = "__TCCP_JOB_START__";
 static constexpr size_t JOB_START_MARKER_LEN = 18;
 
-// ── SIGWINCH handler ────────────────────────────────────────────
+// ── Resize flag ─────────────────────────────────────────────────
 
-static volatile sig_atomic_t g_need_resize = 0;
-static void handle_sigwinch(int) { g_need_resize = 1; }
+static volatile int g_need_resize = 0;
 
 // ── RAII cleanup guard ──────────────────────────────────────────
 
 namespace {
 
 struct AttachCleanup {
-    struct termios* old_term = nullptr;
-    struct sigaction* old_sa = nullptr;
+    platform::RawModeGuard* raw_guard = nullptr;
+    bool has_resize = false;
     LIBSSH2_CHANNEL* channel = nullptr;
 
     ~AttachCleanup() {
-        if (old_term)
-            tcsetattr(STDIN_FILENO, TCSAFLUSH, old_term);
-        if (old_sa)
-            sigaction(SIGWINCH, old_sa, nullptr);
+        // raw_guard restores terminal on destruction — we just delete it
+        delete raw_guard;
+        if (has_resize)
+            platform::remove_terminal_resize();
         if (channel) {
             libssh2_channel_send_eof(channel);
             libssh2_channel_close(channel);
@@ -103,14 +103,14 @@ Result<LIBSSH2_CHANNEL*> JobView::open_channel(LIBSSH2_SESSION* ssh, int cols, i
     while (!(channel = libssh2_channel_open_session(ssh))) {
         if (libssh2_session_last_errno(ssh) != LIBSSH2_ERROR_EAGAIN)
             return Result<LIBSSH2_CHANNEL*>::Err("Failed to open channel on DTN");
-        usleep(100000);
+        platform::sleep_ms(100);
     }
 
     int rc;
     while ((rc = libssh2_channel_request_pty_ex(
                 channel, "xterm-256color", 14,
                 nullptr, 0, cols, pty_rows, 0, 0)) == LIBSSH2_ERROR_EAGAIN)
-        usleep(100000);
+        platform::sleep_ms(100);
 
     if (rc != 0) {
         libssh2_channel_close(channel);
@@ -132,7 +132,7 @@ Result<LIBSSH2_CHANNEL*> JobView::open_channel(LIBSSH2_SESSION* ssh, int cols, i
         compute_node_, log_path, log_path, dtach_socket_, dtach_socket_);
 
     while ((rc = libssh2_channel_exec(channel, cmd.c_str())) == LIBSSH2_ERROR_EAGAIN)
-        usleep(100000);
+        platform::sleep_ms(100);
 
     if (rc != 0) {
         libssh2_channel_close(channel);
@@ -159,29 +159,39 @@ Result<int> JobView::relay_loop(LIBSSH2_CHANNEL* channel, RelayState& state) {
     bool write_error = false;
 
     while (!write_error && !user_detached) {
+        // Poll both stdin and SSH socket
+        bool stdin_ready = false;
+        bool sock_ready = false;
+#ifdef _WIN32
+        // On Windows, check stdin and socket separately
+        stdin_ready = platform::poll_stdin(0);
+        sock_ready = platform::poll_socket(sock, POLLIN, stdin_ready ? 0 : 100) & POLLIN;
+#else
         struct pollfd fds[2];
         fds[0] = {STDIN_FILENO, POLLIN, 0};
         fds[1] = {sock, POLLIN, 0};
         poll(fds, 2, 100);
+        stdin_ready = fds[0].revents & POLLIN;
+        sock_ready = fds[1].revents & POLLIN;
+#endif
 
         // Handle window resize
         if (g_need_resize) {
             g_need_resize = 0;
-            struct winsize rws;
-            if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &rws) == 0) {
-                state.cols = rws.ws_col;
-                int new_pty = std::max(1, static_cast<int>(rws.ws_row) - TerminalUI::HEADER_ROWS);
-                state.pty_rows = new_pty;
-                std::string sr = fmt::format("\033[1;{}r", new_pty);
-                write(STDOUT_FILENO, sr.data(), sr.size());
-                draw_header();
-                libssh2_channel_request_pty_size(channel, rws.ws_col, new_pty);
-            }
+            int new_cols = platform::term_width();
+            int new_rows = platform::term_height();
+            state.cols = new_cols;
+            int new_pty = std::max(1, new_rows - TerminalUI::HEADER_ROWS);
+            state.pty_rows = new_pty;
+            std::string sr = fmt::format("\033[1;{}r", new_pty);
+            write(STDOUT_FILENO, sr.data(), sr.size());
+            draw_header();
+            libssh2_channel_request_pty_size(channel, new_cols, new_pty);
         }
 
         // ── stdin → remote (line buffering + local editing) ─────
 
-        if (fds[0].revents & POLLIN) {
+        if (stdin_ready) {
             int n = read(STDIN_FILENO, buf, sizeof(buf));
             if (n <= 0) break;
 
@@ -273,7 +283,7 @@ Result<int> JobView::relay_loop(LIBSSH2_CHANNEL* channel, RelayState& state) {
 
         // ── remote → display ────────────────────────────────────
 
-        if (fds[1].revents & POLLIN) {
+        if (sock_ready) {
             bool got_output = false;
             for (;;) {
                 int n = libssh2_channel_read(channel, buf, sizeof(buf));
@@ -366,12 +376,8 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     LIBSSH2_SESSION* ssh = session_.get_raw_session();
 
     // Get terminal dimensions
-    struct winsize ws;
-    int cols = 80, rows = 24;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
-        cols = ws.ws_col;
-        rows = ws.ws_row;
-    }
+    int cols = platform::term_width();
+    int rows = platform::term_height();
     int pty_rows = std::max(1, rows - TerminalUI::HEADER_ROWS);
 
     std::cout.flush();
@@ -392,22 +398,12 @@ Result<int> JobView::attach(bool skip_remote_replay) {
 
     // ── Setup terminal raw mode ─────────────────────────────────
 
-    struct sigaction sa, old_sa;
-    sa.sa_handler = handle_sigwinch;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGWINCH, &sa, &old_sa);
-
-    struct termios old_term, raw_term;
-    tcgetattr(STDIN_FILENO, &old_term);
-    raw_term = old_term;
-    cfmakeraw(&raw_term);
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_term);
+    platform::on_terminal_resize([] { g_need_resize = 1; });
 
     // RAII guard ensures cleanup on all exit paths (normal, Ctrl+C, Ctrl+V)
     AttachCleanup cleanup;
-    cleanup.old_term = &old_term;
-    cleanup.old_sa = &old_sa;
+    cleanup.raw_guard = new platform::RawModeGuard(platform::RawModeGuard::kFullRaw);
+    cleanup.has_resize = true;
     cleanup.channel = chan_result.value;
 
     // ── Relay ───────────────────────────────────────────────────

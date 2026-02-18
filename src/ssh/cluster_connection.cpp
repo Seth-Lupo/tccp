@@ -106,7 +106,7 @@ SSHResult ClusterConnection::connect_dtn(StatusCallback callback) {
 
     // The session's primary channel is our DTN channel
     dtn_channel_ = session_->get_channel();
-    dtn_conn_ = std::make_unique<SSHConnection>(dtn_channel_);
+    dtn_conn_ = std::make_unique<SSHConnection>(dtn_channel_, session_->get_raw_session());
 
     if (callback) {
         callback("[cluster] DTN connection established");
@@ -153,7 +153,7 @@ SSHResult ClusterConnection::open_login_tunnel(StatusCallback callback) {
         return SSHResult{-1, "", "Login node shell prompt not received: " + matcher.get_buffer()};
     }
 
-    login_conn_ = std::make_unique<SSHConnection>(login_channel_);
+    login_conn_ = std::make_unique<SSHConnection>(login_channel_, session_->get_raw_session());
 
     if (callback) {
         callback("[cluster] Login tunnel established");

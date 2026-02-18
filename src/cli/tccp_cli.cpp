@@ -5,8 +5,7 @@
 #include <sstream>
 #include <chrono>
 #include <fmt/format.h>
-#include <readline/readline.h>
-#include <readline/history.h>
+#include <replxx.hxx>
 
 TCCPCLI::TCCPCLI() : BaseCLI() {
     register_all_commands();
@@ -122,6 +121,7 @@ void TCCPCLI::run_connected_repl() {
     std::cout << theme::dim("    Type 'help' for commands, 'quit' to exit.") << "\n\n";
 
     // REPL loop — lifetime is bound to the DTN connection
+    replxx::Replxx rx;
     std::string line;
     while (true) {
         if (!service.check_alive()) {
@@ -160,19 +160,18 @@ void TCCPCLI::run_connected_repl() {
         }
 
         std::string prompt = get_prompt_string();
-        char* raw = readline(prompt.c_str());
+        const char* raw = rx.input(prompt);
         if (!raw) {
             break;
         }
 
         line = raw;
-        free(raw);
 
         if (line.empty()) {
             continue;
         }
 
-        add_history(line.c_str());
+        rx.history_add(line);
 
         std::istringstream iss(line);
         std::string command;

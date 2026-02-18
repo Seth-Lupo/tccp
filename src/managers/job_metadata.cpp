@@ -1,15 +1,13 @@
 #include "job_metadata.hpp"
+#include <platform/platform.hpp>
 #include <yaml-cpp/yaml.h>
 #include <fstream>
-#include <cstdlib>
 #include <sstream>
 
 // ── Path helpers ────────────────────────────────────────────
 
 fs::path JobMetadata::local_jobs_dir(const std::string& project_name) {
-    const char* home = std::getenv("HOME");
-    if (!home) home = "/tmp";
-    return fs::path(home) / ".tccp" / "projects" / project_name / "jobs";
+    return platform::home_dir() / ".tccp" / "projects" / project_name / "jobs";
 }
 
 fs::path JobMetadata::local_metadata_path(const std::string& project_name, const std::string& job_id) {
