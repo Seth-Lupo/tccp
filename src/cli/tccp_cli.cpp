@@ -28,6 +28,15 @@ void TCCPCLI::register_all_commands() {
         std::cout << "\033[2J\033[H" << std::flush;
     }, "Clear the screen");
 
+    add_command("refresh", [](BaseCLI& cli, const std::string& arg) {
+        cli.service.reload_config();
+        if (cli.service.has_config()) {
+            std::cout << theme::check("Reloaded tccp.yaml");
+        } else {
+            std::cout << theme::fail("Failed to reload tccp.yaml");
+        }
+    }, "Reload tccp.yaml config");
+
     register_connection_commands(*this);
     register_jobs_commands(*this);
     register_shell_commands(*this);

@@ -21,19 +21,41 @@ static void do_jobs(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
+    // Build display data and compute column widths
+    struct Row { std::string job, status, time, wait, dur, node; };
+    std::vector<Row> rows;
+    rows.reserve(summaries.size());
+    for (const auto& s : summaries) {
+        Row r;
+        r.job = s.job_name;
+        r.status = s.status;
+        if (!s.ports.empty() && r.status == "RUNNING")
+            r.status = fmt::format("RUNNING (ports: {})", s.ports);
+        r.time = s.timestamp;
+        r.wait = s.wait;
+        r.dur = s.duration;
+        r.node = s.compute_node;
+        rows.push_back(std::move(r));
+    }
+
+    size_t w0 = 3, w1 = 6, w2 = 4, w3 = 4, w4 = 8, w5 = 4; // header lengths
+    for (const auto& r : rows) {
+        w0 = std::max(w0, r.job.size());
+        w1 = std::max(w1, r.status.size());
+        w2 = std::max(w2, r.time.size());
+        w3 = std::max(w3, r.wait.size());
+        w4 = std::max(w4, r.dur.size());
+        w5 = std::max(w5, r.node.size());
+    }
+
+    std::string hfmt = fmt::format("  {{:<{}}} {{:<{}}} {{:<{}}} {{:<{}}} {{:<{}}} {{}}\n",
+                                    w0 + 2, w1 + 2, w2 + 2, w3 + 2, w4 + 2);
     std::cout << "\n";
     std::cout << theme::color::DIM
-              << fmt::format("  {:<16} {:<30} {:<16} {:<8} {:<10} {:<14}",
-                             "JOB", "STATUS", "TIMESTAMP", "WAIT", "DURATION", "NODE")
-              << theme::color::RESET << "\n";
-
-    for (const auto& s : summaries) {
-        std::string status = s.status;
-        if (!s.ports.empty() && status == "RUNNING") {
-            status = fmt::format("RUNNING (ports: {})", s.ports);
-        }
-        std::cout << fmt::format("  {:<16} {:<30} {:<16} {:<8} {:<10} {:<14}\n",
-                                  s.job_name, status, s.timestamp, s.wait, s.duration, s.compute_node);
+              << fmt::format(fmt::runtime(hfmt), "JOB", "STATUS", "TIME", "WAIT", "DURATION", "NODE")
+              << theme::color::RESET;
+    for (const auto& r : rows) {
+        std::cout << fmt::format(fmt::runtime(hfmt), r.job, r.status, r.time, r.wait, r.dur, r.node);
     }
     std::cout << "\n";
 }

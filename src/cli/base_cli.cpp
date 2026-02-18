@@ -89,18 +89,13 @@ void BaseCLI::print_help() const {
 }
 
 std::string BaseCLI::get_prompt_string() const {
-    // Readline uses \001 and \002 to wrap non-printing chars so it can
-    // compute the visible prompt width correctly for cursor positioning.
-    auto rl_esc = [](const std::string& code) {
-        return std::string("\001") + code + std::string("\002");
-    };
-
+    // Replxx handles ANSI escapes natively — no \001/\002 wrapping needed.
     if (!service.has_config()) {
-        return rl_esc(theme::color::BROWN) + "tccp"
-             + rl_esc(theme::color::RESET) + "> ";
+        return std::string(theme::color::BROWN) + "tccp"
+             + theme::color::RESET + "> ";
     }
-    return rl_esc(theme::color::BLUE) + service.config().project().name
-         + rl_esc(theme::color::RESET) + "@"
-         + rl_esc(theme::color::BROWN) + "tccp"
-         + rl_esc(theme::color::RESET) + "> ";
+    return std::string(theme::color::BLUE) + service.config().project().name
+         + theme::color::RESET + "@"
+         + theme::color::BROWN + "tccp"
+         + theme::color::RESET + "> ";
 }

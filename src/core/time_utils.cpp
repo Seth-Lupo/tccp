@@ -46,8 +46,12 @@ std::string format_timestamp(const std::string& iso_time) {
         return "?";
     }
 
-    // Format as "14:35" (24-hour time only)
+    // Format as "8:13pm" (12-hour with am/pm)
     char buf[16];
-    std::strftime(buf, sizeof(buf), "%H:%M", &tm_buf);
-    return std::string(buf);
+    std::strftime(buf, sizeof(buf), "%I:%M%p", &tm_buf);
+    // Strip leading zero and lowercase am/pm: "08:13PM" → "8:13pm"
+    std::string result(buf);
+    if (!result.empty() && result[0] == '0') result.erase(0, 1);
+    for (auto& c : result) c = std::tolower(c);
+    return result;
 }

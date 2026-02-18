@@ -37,9 +37,9 @@ TEST(TimeUtils, FormatTimestampBadParse) {
 }
 
 TEST(TimeUtils, FormatTimestampNormal) {
-    EXPECT_EQ(format_timestamp("2025-01-15T14:35:22"), "14:35");
+    EXPECT_EQ(format_timestamp("2025-01-15T14:35:22"), "2:35pm");
 }
 
 TEST(TimeUtils, FormatTimestampMidnight) {
-    EXPECT_EQ(format_timestamp("2025-01-15T00:00:00"), "00:00");
+    EXPECT_EQ(format_timestamp("2025-01-15T00:00:00"), "12:00am");
 }

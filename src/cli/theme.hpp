@@ -102,7 +102,7 @@ inline std::string log(const std::string& msg) {
 
 // Key-value row for dashboard/status panels
 inline std::string kv(const std::string& key, const std::string& value) {
-    return color::DIM + fmt::format("    {:<10}", key) + color::RESET + value + "\n";
+    return color::DIM + "    " + key + color::RESET + "  " + value + "\n";
 }
 
 } // namespace theme

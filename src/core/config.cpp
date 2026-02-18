@@ -70,10 +70,24 @@ static void apply_gpu_smart_defaults(SlurmDefaults& s, bool memory_set, bool cpu
 
 // Read inline resource keys (gpu, memory, cpus, partition) from a YAML node
 // into a SlurmDefaults, tracking which fields were explicitly set.
+// Check if a YAML node has any inline resource shorthand keys.
+static bool has_inline_resources(const YAML::Node& node) {
+    return (node["gpu"] && node["gpu"].IsScalar()) ||
+           (node["gpu_count"] && node["gpu_count"].IsScalar()) ||
+           (node["memory"] && node["memory"].IsScalar()) ||
+           (node["cpus"] && node["cpus"].IsScalar()) ||
+           (node["cpu_count"] && node["cpu_count"].IsScalar()) ||
+           (node["time"] && node["time"].IsScalar()) ||
+           (node["partition"] && node["partition"].IsScalar());
+}
+
 static void overlay_inline_resources(const YAML::Node& node, SlurmDefaults& s,
                                      bool& memory_set, bool& cpus_set) {
     if (node["gpu"] && node["gpu"].IsScalar()) {
         parse_gpu_shorthand(node["gpu"].as<std::string>(), s.gpu_type, s.gpu_count);
+    }
+    if (node["gpu_count"] && node["gpu_count"].IsScalar()) {
+        s.gpu_count = node["gpu_count"].as<int>(1);
     }
     if (node["memory"] && node["memory"].IsScalar()) {
         s.memory = node["memory"].as<std::string>();
@@ -82,6 +96,13 @@ static void overlay_inline_resources(const YAML::Node& node, SlurmDefaults& s,
     if (node["cpus"] && node["cpus"].IsScalar()) {
         s.cpus_per_task = node["cpus"].as<int>(1);
         cpus_set = true;
+    }
+    if (node["cpu_count"] && node["cpu_count"].IsScalar()) {
+        s.cpus_per_task = node["cpu_count"].as<int>(1);
+        cpus_set = true;
+    }
+    if (node["time"] && node["time"].IsScalar()) {
+        s.time = node["time"].as<std::string>();
     }
     if (node["partition"] && node["partition"].IsScalar()) {
         s.partition = node["partition"].as<std::string>();
@@ -232,13 +253,9 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
         project.slurm = parse_slurm_config(node["slurm"]);
     }
 
-    // Overlay top-level resource keys (gpu, memory, cpus, partition) on top of
-    // any existing slurm block.  Creates one if needed.
-    bool proj_has_inline = (node["gpu"] && node["gpu"].IsScalar()) ||
-                           (node["memory"] && node["memory"].IsScalar()) ||
-                           (node["cpus"] && node["cpus"].IsScalar()) ||
-                           (node["partition"] && node["partition"].IsScalar());
-    if (proj_has_inline) {
+    // Overlay top-level resource keys on top of any existing slurm block.
+    // Creates one if needed.
+    if (has_inline_resources(node)) {
         if (!project.slurm.has_value()) {
             SlurmDefaults slurm;
             slurm.partition = "batch";
@@ -295,12 +312,8 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
                     jc.slurm = parse_slurm_config(jnode["slurm"]);
                 }
 
-                // Inline resource keys: gpu, memory, cpus, partition
-                bool job_has_inline = (jnode["gpu"] && jnode["gpu"].IsScalar()) ||
-                                      (jnode["memory"] && jnode["memory"].IsScalar()) ||
-                                      (jnode["cpus"] && jnode["cpus"].IsScalar()) ||
-                                      (jnode["partition"] && jnode["partition"].IsScalar());
-                if (job_has_inline) {
+                // Inline resource keys
+                if (has_inline_resources(jnode)) {
                     if (!jc.slurm.has_value()) {
                         jc.slurm = SlurmDefaults{};
                     }
@@ -327,6 +340,23 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
         jc.script = node["script"].as<std::string>("main.py");
         jc.args = node["args"].as<std::string>("");
         project.jobs["main"] = jc;
+    }
+
+    // Top-level `port`/`ports` shorthand: apply to any job without its own ports
+    auto top_ports_node = node["ports"] ? node["ports"] : node["port"];
+    if (top_ports_node) {
+        std::vector<int> default_ports;
+        if (top_ports_node.IsScalar()) {
+            default_ports.push_back(top_ports_node.as<int>());
+        } else if (top_ports_node.IsSequence()) {
+            for (const auto& p : top_ports_node)
+                default_ports.push_back(p.as<int>());
+        }
+        if (!default_ports.empty()) {
+            for (auto& [name, jc] : project.jobs) {
+                if (jc.ports.empty()) jc.ports = default_ports;
+            }
+        }
     }
 
     if (node["rodata"]) {
