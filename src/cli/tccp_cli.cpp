@@ -74,9 +74,9 @@ void TCCPCLI::run_connected_repl() {
         std::cout << "\n";
         return;
     }
+    std::cout << theme::check("Project config valid");
     std::cout << theme::check("Credentials loaded");
     std::cout << theme::check("Global config loaded");
-    std::cout << theme::check("Project config loaded");
 
     // Reload config (preflight confirmed it's valid)
     service.reload_config();

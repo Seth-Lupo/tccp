@@ -150,6 +150,9 @@ slurm:
 # Optional: Environment modules to load
 modules: []
 
+# Optional: Text editor for viewing output (default: vim)
+# editor: "vim"
+
 # Optional: Duo auto-push setting
 duo_auto: "push"
 )";
@@ -337,17 +340,17 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
         }
     }
 
-    if (node["env_file"]) {
-        project.env_file = node["env_file"].as<std::string>("");
+    // env: accept "env" or legacy "env_file"
+    if (node["env"]) {
+        project.env = node["env"].as<std::string>(".env");
+    } else if (node["env_file"]) {
+        project.env = node["env_file"].as<std::string>(".env");
+    } else {
+        project.env = ".env";
     }
 
-    if (node["output"]) {
-        project.output = node["output"].as<std::string>("");
-    }
-
-    if (node["cache"]) {
-        project.cache = node["cache"].as<std::string>("");
-    }
+    project.output = node["output"].as<std::string>("output");
+    project.cache = node["cache"].as<std::string>("cache");
 
     // Environment-type defaults: python-pytorch gets a GPU if none was specified.
     // An explicit `gpu: none` counts as "specified" and opts out.
@@ -409,6 +412,13 @@ Result<Config> Config::load_global() {
         if (root["duo_auto"]) {
             config.duo_auto_ = root["duo_auto"].as<std::string>();
         }
+
+#ifdef _WIN32
+        const char* default_editor = "notepad";
+#else
+        const char* default_editor = "vim";
+#endif
+        config.editor_ = root["editor"].as<std::string>(default_editor);
 
         config.project_dir_ = fs::current_path();
 

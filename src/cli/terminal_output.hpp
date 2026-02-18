@@ -4,8 +4,7 @@
 
 // Terminal output processing: ANSI stripping and noise suppression.
 //
-// All incoming SSH bytes pass through strip_ansi() to produce plain text,
-// which is then fed into LogicalLines (see terminal_buffer.hpp).
+// All incoming SSH bytes pass through strip_ansi() to produce plain text.
 namespace TerminalOutput {
 
 // Strip all ANSI escape sequences (CSI, OSC, ESC+char), returning plain text.

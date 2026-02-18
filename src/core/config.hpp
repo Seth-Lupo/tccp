@@ -27,6 +27,7 @@ public:
 
     const std::vector<std::string>& modules() const { return modules_; }
     std::optional<std::string> duo_auto() const { return duo_auto_; }
+    const std::string& editor() const { return editor_; }
 
 public:
     Config() = default;
@@ -40,6 +41,7 @@ private:
     fs::path project_dir_;
     std::vector<std::string> modules_;
     std::optional<std::string> duo_auto_;
+    std::string editor_;  // text editor for viewing output
 
     friend class ConfigBuilder;
 };

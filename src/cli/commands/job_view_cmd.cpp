@@ -5,7 +5,6 @@
 #include <managers/job_log.hpp>
 #include <core/constants.hpp>
 #include <iostream>
-#include <vector>
 #include <thread>
 #include <chrono>
 #include <termios.h>
@@ -14,6 +13,21 @@
 #include <fmt/format.h>
 #include <fstream>
 #include <cstdlib>
+#include <cstdio>
+#include <filesystem>
+
+// Read new lines from init log since last position, print them, return updated position.
+static std::streampos flush_init_log(const std::string& path, std::streampos pos) {
+    std::ifstream f(path);
+    if (!f) return pos;
+    f.seekg(pos);
+    std::string line;
+    while (std::getline(f, line)) {
+        std::cout << theme::log(line) << std::flush;
+    }
+    if (f.eof()) f.clear();
+    return f.tellg();
+}
 
 void do_view(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
@@ -60,19 +74,7 @@ void do_view(BaseCLI& cli, const std::string& arg) {
         std::streampos log_pos = 0;
 
         while (true) {
-            // Incremental tail: only read new content since last check
-            std::ifstream f(init_log);
-            if (f) {
-                f.seekg(log_pos);
-                std::string line;
-                while (std::getline(f, line)) {
-                    std::cout << theme::log(line) << std::flush;
-                }
-                if (f.eof()) {
-                    f.clear();
-                }
-                log_pos = f.tellg();
-            }
+            log_pos = flush_init_log(init_log, log_pos);
 
             // Poll for Ctrl+\ or Ctrl+C (500ms intervals)
             bool user_detached = false;
@@ -119,15 +121,7 @@ void do_view(BaseCLI& cli, const std::string& arg) {
             }
 
             if (!tracked->init_error.empty()) {
-                // Read any remaining log output
-                std::ifstream f2(init_log);
-                if (f2) {
-                    f2.seekg(log_pos);
-                    std::string line;
-                    while (std::getline(f2, line)) {
-                        std::cout << theme::log(line) << std::flush;
-                    }
-                }
+                flush_init_log(init_log, log_pos);
                 std::cout << "\n" << theme::error(tracked->init_error) << std::flush;
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_term);
@@ -136,15 +130,7 @@ void do_view(BaseCLI& cli, const std::string& arg) {
             }
 
             if (tracked->init_complete) {
-                // Flush remaining log
-                std::ifstream f2(init_log);
-                if (f2) {
-                    f2.seekg(log_pos);
-                    std::string line;
-                    while (std::getline(f2, line)) {
-                        std::cout << theme::log(line) << std::flush;
-                    }
-                }
+                flush_init_log(init_log, log_pos);
 
                 // Check if it was canceled during init
                 if (tracked->canceled) {
@@ -282,26 +268,8 @@ void do_restart(BaseCLI& cli, const std::string& arg) {
     do_view(cli, job_name);
 }
 
-void do_tail(BaseCLI& cli, const std::string& arg) {
-    if (!cli.require_connection()) return;
-    if (!cli.service.job_manager()) return;
-
-    // Parse args: "job_name" or "job_name N" for number of lines
-    std::string job_name_arg = arg;
-    int num_lines = 30;
-    auto space = arg.rfind(' ');
-    if (space != std::string::npos) {
-        std::string maybe_num = arg.substr(space + 1);
-        try {
-            int n = std::stoi(maybe_num);
-            if (n > 0) {
-                num_lines = n;
-                job_name_arg = arg.substr(0, space);
-            }
-        } catch (...) {}
-    }
-
-    std::string job_name = resolve_job_name(cli, job_name_arg);
+void do_initlogs(BaseCLI& cli, const std::string& arg) {
+    std::string job_name = resolve_job_name(cli, arg);
     if (job_name.empty()) return;
 
     auto* tracked = cli.service.find_job_by_name(job_name);
@@ -310,65 +278,116 @@ void do_tail(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
-    // For initializing jobs, tail the local init log
-    if (!tracked->init_complete) {
-        if (!tracked->init_error.empty()) {
-            std::cout << theme::error(fmt::format("Job '{}' init failed: {}", job_name, tracked->init_error)) << "\n";
-            return;
-        }
-        std::string init_log = job_log_path(tracked->job_id);
-        std::ifstream f(init_log);
-        if (!f) {
-            std::cout << theme::dim("Initializing... no log output yet.") << "\n";
-            return;
-        }
-        // Read all lines, keep last N
-        std::vector<std::string> lines;
-        std::string line;
-        while (std::getline(f, line)) {
-            lines.push_back(line);
-        }
-        int start = std::max(0, static_cast<int>(lines.size()) - num_lines);
-        std::cout << theme::dim(fmt::format("── {} (initializing) ──", job_name)) << "\n";
-        for (int i = start; i < static_cast<int>(lines.size()); i++) {
-            std::cout << theme::log(lines[i]) << std::flush;
-        }
+    std::string log_path = job_log_path(tracked->job_id);
+    std::ifstream f(log_path);
+    if (!f) {
+        std::cout << theme::dim("No init logs available.") << "\n";
         return;
     }
 
-    // For running/completed jobs, tail the remote log on compute node
-    if (tracked->compute_node.empty()) {
-        std::cout << theme::error("No compute node assigned");
-        return;
+    std::string status;
+    if (!tracked->init_error.empty())
+        status = "init failed";
+    else if (tracked->canceled)
+        status = "canceled";
+    else if (tracked->completed)
+        status = tracked->exit_code == 0 ? "completed" : fmt::format("failed, exit {}", tracked->exit_code);
+    else if (!tracked->init_complete)
+        status = "initializing";
+    else
+        status = "running";
+
+    std::cout << theme::dim(fmt::format("── {} initlogs ({}) ──", job_name, status)) << "\n";
+    std::string line;
+    while (std::getline(f, line)) {
+        std::cout << line << "\n";
+    }
+    std::cout << theme::dim("── end ──") << "\n";
+}
+
+// Fetch job output: local returned copy > NFS > compute node.
+// Returns raw output data (may contain ANSI). Empty string on failure (message already printed).
+static std::string fetch_job_output(BaseCLI& cli, const TrackedJob* tracked) {
+    auto* jm = cli.service.job_manager();
+
+    // If output was already returned locally, read from disk
+    if (tracked->output_returned) {
+        namespace fs = std::filesystem;
+        fs::path local_log = cli.service.config().project_dir()
+            / "output" / JobManager::job_name_from_id(tracked->job_id)
+            / JobManager::timestamp_from_id(tracked->job_id) / "tccp.log";
+        if (fs::exists(local_log)) {
+            std::ifstream f(local_log, std::ios::binary);
+            if (f) {
+                std::string data((std::istreambuf_iterator<char>(f)),
+                                  std::istreambuf_iterator<char>());
+                return data;
+            }
+        }
     }
 
+    // For completed jobs, try NFS output dir (may still exist if return hasn't run)
+    if (tracked->completed) {
+        std::string nfs_log = jm->job_output_dir(tracked->job_id) + "/tccp.log";
+        auto result = cli.service.cluster()->dtn().run(
+            fmt::format("cat {} 2>/dev/null", nfs_log));
+        if (!result.stdout_data.empty())
+            return result.stdout_data;
+
+        std::cout << theme::dim("No output available.") << "\n";
+        return "";
+    }
+
+    // Running job: read from compute node scratch
+    if (tracked->compute_node.empty() || tracked->scratch_path.empty()) {
+        std::cout << theme::dim("No output available.") << "\n";
+        return "";
+    }
     std::string remote_log = tracked->scratch_path + "/tccp.log";
-
-    std::string ssh_cmd = fmt::format(
-        "ssh {} {} 'tail -n {} {} 2>/dev/null'",
-        SSH_OPTS_FAST, tracked->compute_node, num_lines, remote_log);
-
-    auto result = cli.service.cluster()->dtn().run(ssh_cmd);
-
+    auto result = cli.service.cluster()->dtn().run(
+        fmt::format("ssh {} {} 'cat {} 2>/dev/null'",
+                     SSH_OPTS_FAST, tracked->compute_node, remote_log));
     if (result.stdout_data.empty()) {
-        std::cout << theme::dim("No output yet.") << "\n";
+        std::cout << theme::dim("No output available.") << "\n";
+        return "";
+    }
+    return result.stdout_data;
+}
+
+void do_logs(BaseCLI& cli, const std::string& arg) {
+    if (!cli.require_connection()) return;
+    if (!cli.service.job_manager()) return;
+
+    std::string job_name = resolve_job_name(cli, arg);
+    if (job_name.empty()) return;
+
+    auto* tracked = cli.service.find_job_by_name(job_name);
+    if (!tracked) {
+        std::cout << theme::error(fmt::format("No tracked job named '{}'", job_name));
         return;
     }
 
-    std::string status_label;
-    if (tracked->completed && tracked->canceled) {
-        status_label = "canceled";
-    } else if (tracked->completed) {
-        status_label = tracked->exit_code == 0 ? "completed" : fmt::format("failed, exit {}", tracked->exit_code);
-    } else {
-        status_label = "running on " + tracked->compute_node;
-    }
+    std::string raw = fetch_job_output(cli, tracked);
+    if (raw.empty()) return;
 
-    std::cout << theme::dim(fmt::format("── {} ({}) ──", job_name, status_label)) << "\n";
-    std::cout << result.stdout_data;
-    if (!result.stdout_data.empty() && result.stdout_data.back() != '\n') {
-        std::cout << "\n";
-    }
+    std::string status;
+    if (tracked->completed && tracked->canceled)
+        status = "canceled";
+    else if (tracked->completed)
+        status = tracked->exit_code == 0 ? "completed" : fmt::format("failed, exit {}", tracked->exit_code);
+    else
+        status = "running on " + tracked->compute_node;
+
+    // Strip ANSI and noise (e.g. "Script started on ...")
+    std::string clean = TerminalOutput::strip_ansi(raw.data(), static_cast<int>(raw.size()));
+    TerminalOutput::suppress_noise(clean);
+
+    std::cout << theme::dim(fmt::format("── {} logs ({}) ──", job_name, status)) << "\n";
+    if (!clean.empty())
+        write(STDOUT_FILENO, clean.data(), clean.size());
+    if (!clean.empty() && clean.back() != '\n')
+        write(STDOUT_FILENO, "\n", 1);
+    std::cout << theme::dim("── end ──") << "\n";
 }
 
 void do_output(BaseCLI& cli, const std::string& arg) {
@@ -384,36 +403,111 @@ void do_output(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
-    // Determine log source: NFS for completed jobs, compute node for running
-    std::string cat_cmd;
-    auto* jm = cli.service.job_manager();
-    if (tracked->completed) {
-        std::string nfs_log = jm->job_output_dir(tracked->job_id) + "/tccp.log";
-        cat_cmd = fmt::format("cat {} 2>/dev/null", nfs_log);
-    } else {
-        if (tracked->compute_node.empty() || tracked->scratch_path.empty()) {
-            std::cout << theme::dim("No output available.") << "\n";
-            return;
-        }
-        std::string remote_log = tracked->scratch_path + "/tccp.log";
-        cat_cmd = fmt::format(
-            "ssh {} {} 'cat {} 2>/dev/null'",
-            SSH_OPTS_FAST, tracked->compute_node, remote_log);
-    }
-
-    auto result = cli.service.cluster()->dtn().run(cat_cmd);
-
-    if (result.stdout_data.empty()) {
-        std::cout << theme::dim("No output available.") << "\n";
-        return;
-    }
+    std::string raw = fetch_job_output(cli, tracked);
+    if (raw.empty()) return;
 
     // Write to local temp file and open in vim
     std::string local_tmp = "/tmp/tccp_view_" + tracked->job_id + ".log";
     std::ofstream out(local_tmp, std::ios::binary);
-    out.write(result.stdout_data.data(), result.stdout_data.size());
+    if (!out) {
+        std::cout << theme::error("Failed to create temp file: " + local_tmp);
+        return;
+    }
+    out.write(raw.data(), raw.size());
     out.close();
 
-    std::string vim_cmd = "vim -R " + local_tmp;
-    std::system(vim_cmd.c_str());
+    std::string editor = cli.service.config().editor();
+    std::string editor_cmd = editor + " " + local_tmp;
+    std::system(editor_cmd.c_str());
+    std::remove(local_tmp.c_str());
+}
+
+void do_tail(BaseCLI& cli, const std::string& arg) {
+    if (!cli.require_connection()) return;
+    if (!cli.service.job_manager()) return;
+
+    // Parse: "tail [job_name] [N]"
+    // If arg is a pure number, treat as N with implicit job.
+    // Otherwise first token is job name, optional second token is N.
+    std::string job_name_arg;
+    int num_lines = 30;
+
+    if (!arg.empty()) {
+        // Check if entire arg is a number
+        bool is_number = true;
+        for (char c : arg) {
+            if (!std::isdigit(static_cast<unsigned char>(c))) {
+                is_number = false;
+                break;
+            }
+        }
+
+        if (is_number) {
+            num_lines = std::stoi(arg);
+        } else {
+            auto space = arg.find(' ');
+            if (space != std::string::npos) {
+                job_name_arg = arg.substr(0, space);
+                std::string rest = arg.substr(space + 1);
+                bool rest_is_num = true;
+                for (char c : rest) {
+                    if (!std::isdigit(static_cast<unsigned char>(c))) {
+                        rest_is_num = false;
+                        break;
+                    }
+                }
+                if (rest_is_num && !rest.empty())
+                    num_lines = std::stoi(rest);
+            } else {
+                job_name_arg = arg;
+            }
+        }
+    }
+
+    std::string job_name = resolve_job_name(cli, job_name_arg);
+    if (job_name.empty()) return;
+
+    auto* tracked = cli.service.find_job_by_name(job_name);
+    if (!tracked) {
+        std::cout << theme::error(fmt::format("No tracked job named '{}'", job_name));
+        return;
+    }
+
+    std::string raw = fetch_job_output(cli, tracked);
+    if (raw.empty()) return;
+
+    std::string clean = TerminalOutput::strip_ansi(raw.data(), static_cast<int>(raw.size()));
+    TerminalOutput::suppress_noise(clean);
+
+    // Extract last N lines
+    std::vector<std::string> lines;
+    std::string::size_type pos = 0;
+    while (pos < clean.size()) {
+        auto nl = clean.find('\n', pos);
+        if (nl == std::string::npos) {
+            lines.push_back(clean.substr(pos));
+            break;
+        }
+        lines.push_back(clean.substr(pos, nl - pos));
+        pos = nl + 1;
+    }
+
+    std::string status;
+    if (tracked->completed && tracked->canceled)
+        status = "canceled";
+    else if (tracked->completed)
+        status = tracked->exit_code == 0 ? "completed" : fmt::format("failed, exit {}", tracked->exit_code);
+    else
+        status = "running on " + tracked->compute_node;
+
+    std::cout << theme::dim(fmt::format("── {} tail (last {}, {}) ──",
+                                         job_name, num_lines, status)) << "\n";
+
+    int start = static_cast<int>(lines.size()) - num_lines;
+    if (start < 0) start = 0;
+    for (int i = start; i < static_cast<int>(lines.size()); ++i) {
+        std::cout << lines[i] << "\n";
+    }
+
+    std::cout << theme::dim("── end ──") << "\n";
 }

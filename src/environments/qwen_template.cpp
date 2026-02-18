@@ -12,7 +12,7 @@ ProjectTemplate make_qwen_template() {
             "name: {{PROJECT_NAME}}\n"
             "type: python-pytorch\n"
             "\n"
-            "env_file: .env\n"
+            "env: .env\n"
             "\n"
             "output: ./output\n"
             "\n"

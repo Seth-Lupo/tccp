@@ -4,17 +4,6 @@
 #include <fmt/format.h>
 #include <core/config.hpp>
 
-static void do_disconnect(BaseCLI& cli, const std::string& arg) {
-    if (!cli.service.is_connected()) {
-        std::cout << theme::error("Not connected.");
-        return;
-    }
-
-    cli.service.disconnect();
-    std::cout << theme::dim("    Disconnecting...") << "\n";
-    exit(0);
-}
-
 static void do_status(BaseCLI& cli, const std::string& arg) {
     std::cout << theme::section("Status");
 
@@ -46,6 +35,5 @@ static void do_status(BaseCLI& cli, const std::string& arg) {
 }
 
 void register_connection_commands(BaseCLI& cli) {
-    cli.add_command("disconnect", do_disconnect, "Disconnect and exit");
     cli.add_command("status", do_status, "Show connection and project status");
 }

@@ -63,7 +63,7 @@ std::vector<SyncManifestEntry> SyncManager::build_local_manifest() {
     }
 
     // Env file (bypasses gitignore)
-    const auto& env_file = config_.project().env_file;
+    const auto& env_file = config_.project().env;
     if (!env_file.empty()) {
         fs::path env_path = env_file;
         if (env_path.is_relative()) env_path = config_.project_dir() / env_path;

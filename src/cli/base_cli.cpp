@@ -50,12 +50,11 @@ void BaseCLI::execute_command(const std::string& command, const std::string& arg
 void BaseCLI::print_help() const {
     // Group commands by category
     std::vector<std::pair<std::string, std::vector<std::string>>> categories = {
-        {"Connection",   {"status", "disconnect"}},
-        {"Jobs",         {"run", "view", "jobs", "cancel", "return", "output"}},
-        {"Allocations",  {"allocs", "dealloc", "gpus"}},
-        {"Shell",        {"shell", "exec"}},
-        {"Setup",        {"init", "register", "credentials"}},
-        {"General",      {"help", "clear", "quit", "exit"}},
+        {"Jobs",         {"run", "view", "jobs", "cancel", "return", "restart"}},
+        {"Output",       {"logs", "tail", "output", "initlogs"}},
+        {"Info",         {"status", "info", "config", "allocs", "gpus"}},
+        {"Remote",       {"ssh", "open", "shell", "exec", "dealloc"}},
+        {"General",      {"help", "clear", "quit"}},
 #ifdef TCCP_DEV
         {"Dev",          {"debug"}},
 #endif
@@ -99,15 +98,9 @@ std::string BaseCLI::get_prompt_string() const {
     if (!service.has_config()) {
         return rl_esc(theme::color::BROWN) + "tccp"
              + rl_esc(theme::color::RESET) + "> ";
-    } else if (service.is_connected()) {
-        return rl_esc(theme::color::BLUE) + service.config().project().name
-             + rl_esc(theme::color::RESET) + "@"
-             + rl_esc(theme::color::BROWN) + "tccp"
-             + rl_esc(theme::color::RESET) + "> ";
-    } else {
-        return rl_esc(theme::color::BLUE) + service.config().project().name
-             + rl_esc(theme::color::RESET) + "@"
-             + rl_esc(theme::color::BROWN) + "tccp"
-             + rl_esc(theme::color::RESET) + "> ";
     }
+    return rl_esc(theme::color::BLUE) + service.config().project().name
+         + rl_esc(theme::color::RESET) + "@"
+         + rl_esc(theme::color::BROWN) + "tccp"
+         + rl_esc(theme::color::RESET) + "> ";
 }

@@ -97,7 +97,7 @@ bool attach_to_job(BaseCLI& cli, TrackedJob* tracked,
         }
 
         // Ctrl+V: view output in vim, then reattach
-        if (result.value == -3) {
+        if (result.value == JobView::kViewOutput) {
             if (in_alt_screen) TerminalUI::leave_alt_screen();
             do_output(cli, job_name);
             // Re-enter alt screen and reattach
@@ -114,7 +114,7 @@ bool attach_to_job(BaseCLI& cli, TrackedJob* tracked,
 
         if (in_alt_screen) TerminalUI::leave_alt_screen();
 
-        if (result.value == -2) {
+        if (result.value == JobView::kCanceled) {
             std::cout << "Canceling job...\n";
             auto cancel_result = cli.service.cancel_job_by_id(tracked->job_id, nullptr);
             if (cancel_result.is_ok()) {

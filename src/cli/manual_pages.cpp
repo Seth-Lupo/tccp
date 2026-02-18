@@ -42,12 +42,25 @@ COMMANDS
   view [job]        Watch a running job's live output
   jobs              List all tracked jobs and their status
   cancel <job>      Cancel a running job
+  restart <job>     Cancel and re-run a job
   return <job>      Download output from a completed job
-  shell             Open a shell on the cluster
-  exec <cmd>        Run a one-off command on the cluster
+
+  logs [job]        Print full job output to terminal
+  tail [job] [N]    Print last N lines of output (default: 30)
+  output [job]      View full job output in vim
+  initlogs [job]    Print job initialization logs
+  info <job>        Show detailed job status (node, times, ports)
+
+  config            Show resolved project configuration
+  status            Show connection and project status
   allocs            Show your active compute allocations
-  dealloc [id]      Release a compute allocation
   gpus              Show available GPUs on the cluster
+
+  ssh <job> [cmd]   Run command on job's compute node
+  open              Open an interactive remote shell
+  shell             Open a shell on the login node
+  exec <cmd>        Run a one-off command on the login node
+  dealloc [id]      Release a compute allocation
   help              List all commands
 
 KEYBOARD SHORTCUTS (while viewing a job)
@@ -79,7 +92,7 @@ PROJECT CONFIG (tccp.yaml)
     cache: .model_cache
     rodata:
       - data
-    env_file: .env
+    env: .env
     jobs:
       train:
         script: train.py
@@ -94,7 +107,7 @@ PROJECT CONFIG (tccp.yaml)
   output     Directory downloaded back after each job
   cache      Directory that persists across jobs (model weights, etc.)
   rodata     Read-only data directories (uploaded once, not every run)
-  env_file   Dotfile to upload (e.g. .env — not blocked by .gitignore)
+  env        Dotfile to upload (default: .env — not blocked by .gitignore)
   jobs       Named jobs (shorthand: "train: train.py" or full config)
 
   An empty tccp.yaml runs main.py with no GPU. The project name
@@ -111,9 +124,8 @@ FILE SYNC
 GETTING STARTED
 ---------------
 
-  tccp setup              Store your Tufts credentials
+  tccp setup              Store your Tufts credentials (once)
   tccp new <template>     Scaffold a project (python, qwen)
-  tccp register [path]    Create tccp.yaml for an existing project
   tccp manual <topic>     Detailed guide (python, python-pytorch)
 )";
 
@@ -256,7 +268,7 @@ EXAMPLES
     cache: .hf_cache
     rodata:
       - data
-    env_file: .env
+    env: .env
     jobs:
       train:
         script: train.py
@@ -308,7 +320,7 @@ HUGGING FACE MODELS
   To use gated models (Llama, Qwen, etc.):
 
     1. Create a .env file:       HF_TOKEN=hf_xxxxx
-    2. Add to tccp.yaml:         env_file: .env
+    2. Add to tccp.yaml:         env: .env
     3. Add a cache directory:    cache: .hf_cache
 
   The cache persists across jobs, so model weights download once.

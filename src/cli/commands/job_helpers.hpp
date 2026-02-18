@@ -21,9 +21,12 @@ void draw_job_header(const std::string& job_name,
 void do_run(BaseCLI& cli, const std::string& arg);
 void do_view(BaseCLI& cli, const std::string& arg);
 void do_restart(BaseCLI& cli, const std::string& arg);
+void do_initlogs(BaseCLI& cli, const std::string& arg);
+void do_logs(BaseCLI& cli, const std::string& arg);
 void do_tail(BaseCLI& cli, const std::string& arg);
 void do_output(BaseCLI& cli, const std::string& arg);
 void do_ssh(BaseCLI& cli, const std::string& arg);
 void do_open(BaseCLI& cli, const std::string& arg);
-void do_logs(BaseCLI& cli, const std::string& arg);
 void do_clean(BaseCLI& cli, const std::string& arg);
+void do_config(BaseCLI& cli, const std::string& arg);
+void do_info(BaseCLI& cli, const std::string& arg);
