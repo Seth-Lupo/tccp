@@ -12,7 +12,7 @@
 #include <core/config.hpp>
 #include <core/credentials.hpp>
 #include <core/directory_structure.hpp>
-#include <environments/templates.hpp>
+
 
 // ── Interactive prompt helpers ──────────────────────────
 
@@ -53,29 +53,6 @@ static int prompt_choice(const std::string& label,
     return default_idx;
 }
 
-static bool write_if_missing(const std::filesystem::path& path, const std::string& content) {
-    if (std::filesystem::exists(path)) {
-        std::cout << theme::dim("    ~ ") << theme::dim(path.filename().string())
-                  << theme::dim(" (exists)") << "\n";
-        return false;
-    }
-    std::ofstream f(path);
-    f << content;
-    f.close();
-    std::cout << theme::green("    + ") << path.filename().string() << "\n";
-    return true;
-}
-
-static std::string substitute(const std::string& text, const std::string& project_name) {
-    std::string result = text;
-    const std::string placeholder = "{{PROJECT_NAME}}";
-    std::string::size_type pos = 0;
-    while ((pos = result.find(placeholder, pos)) != std::string::npos) {
-        result.replace(pos, placeholder.size(), project_name);
-        pos += project_name.size();
-    }
-    return result;
-}
 
 static std::string read_password(const std::string& prompt) {
     std::cout << prompt;
@@ -293,48 +270,6 @@ void TCCPCLI::run_register(const std::string& path_arg) {
     std::cout << "\n";
 }
 
-void TCCPCLI::run_new(const std::string& template_name) {
-    const auto* tmpl = get_template(template_name);
-    if (!tmpl) {
-        std::cout << theme::fail("Unknown template: " + template_name);
-        auto names = list_templates();
-        std::sort(names.begin(), names.end());
-        std::string available;
-        for (size_t i = 0; i < names.size(); i++) {
-            if (i > 0) available += ", ";
-            available += names[i];
-        }
-        std::cout << theme::step("Available templates: " + available);
-        return;
-    }
-
-    auto cwd = std::filesystem::current_path();
-    std::string dirname = cwd.filename().string();
-
-    std::cout << theme::banner();
-    std::cout << theme::section("New " + tmpl->description);
-    std::cout << theme::kv("Directory", cwd.string());
-    std::cout << "\n  " << theme::dim("Files") << "\n";
-
-    for (const auto& file : tmpl->files) {
-        std::string content = substitute(file.content, dirname);
-        std::filesystem::path fpath = cwd / file.path;
-        std::filesystem::create_directories(fpath.parent_path());
-        write_if_missing(fpath, content);
-    }
-
-    for (const auto& dir : tmpl->directories) {
-        std::filesystem::create_directories(cwd / dir);
-    }
-
-    std::cout << theme::divider();
-    std::cout << theme::section("Next Steps");
-    for (size_t i = 0; i < tmpl->next_steps.size(); i++) {
-        std::cout << "    " << theme::white(std::to_string(i + 1) + ".")
-                  << " " << tmpl->next_steps[i] << "\n";
-    }
-    std::cout << "\n";
-}
 
 void TCCPCLI::run_setup() {
     ensure_tccp_directory_structure();
@@ -374,14 +309,8 @@ void TCCPCLI::run_setup() {
         return;
     }
 
-    std::string email;
-    std::cout << theme::color::BROWN << "    Email (for job notifications): " << theme::color::RESET;
-    std::cout.flush();
-    std::getline(std::cin, email);
-
     auto r1 = creds.set("user", user);
     auto r2 = creds.set("password", password);
-    auto r3 = creds.set("email", email);
 
     if (r1.is_err() || r2.is_err()) {
         std::cout << "\n" << theme::fail("Failed to store credentials.");

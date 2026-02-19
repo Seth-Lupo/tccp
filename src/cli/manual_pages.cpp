@@ -13,7 +13,7 @@ QUICK START
 -----------
 
   1. tccp setup          Store your Tufts credentials (once)
-  2. tccp new python     Scaffold a project, or write tccp.yaml by hand
+  2. tccp register       Set up your project (creates tccp.yaml)
   3. tccp                Connect and enter the interactive prompt
 
 HOW IT WORKS
@@ -125,7 +125,7 @@ GETTING STARTED
 ---------------
 
   tccp setup              Store your Tufts credentials (once)
-  tccp new <template>     Scaffold a project (python, qwen)
+  tccp register           Set up your project (creates tccp.yaml)
   tccp manual <topic>     Detailed guide (python, python-pytorch)
 )";
 
@@ -141,13 +141,10 @@ GETTING STARTED
 
   mkdir myproject && cd myproject
 
-  # Option A: scaffold from template
-  tccp new python
-
-  # Option B: create tccp.yaml for an existing project
+  # Option A: interactive setup
   tccp register
 
-  # Option C: by hand
+  # Option B: by hand
   echo "script: main.py" > tccp.yaml
 
   You need a .gitignore so tccp knows what files to upload.
@@ -227,13 +224,10 @@ GETTING STARTED
 
   mkdir myproject && cd myproject
 
-  # Option A: scaffold a GPU project
-  tccp new qwen
-
-  # Option B: create tccp.yaml for an existing project
+  # Option A: interactive setup
   tccp register
 
-  # Option C: by hand
+  # Option B: by hand
   echo -e "type: python-pytorch\nscript: train.py\ngpu: a100" > tccp.yaml
 
   You need a .gitignore so tccp knows what files to upload.

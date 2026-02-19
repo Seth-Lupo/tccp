@@ -5,53 +5,94 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tccp</title>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="logo.png" type="image/png">
 </head>
 <body>
 <img src="logo.png" alt="tccp" class="logo">
-<h1>tccp</h1>
+<h1>tccp - Tufts Cluster Command Prompt</h1>
 <nav>
 <a href="index.html">home</a>
 <a href="install.html">install</a>
 <a href="architecture.html">how it works</a>
 <a href="commands.html">commands</a>
 <a href="usage.html">usage</a>
+<a href="contact.html">contact</a>
 </nav>
 
 <div class="hero">
 <h2>why this exists</h2>
 <p>
 I just wanted to code. Open my editor, change a file, run it on a GPU.
-The same loop I'd have locally. I didn't want to write SLURM scripts, scp
-files around, manage containers, debug module loads, do quota math, or
-get Duo-pushed into oblivion.
+The same loop I'd have locally. I didn't want to write SLURM batch scripts
+or manually sync files. I didn't want to click through a web UI or use
+browser notebooks. I just wanted to write and run my code as if it were
+<b>local</b>.
 </p>
 <p>
-The cluster should be invisible. Type one command, your code runs on a GPU.
-That was the whole idea.
+HPC clusters have real constraints. Your home directory is 30GB &mdash;
+that fills up fast once you start pulling containers and installing
+packages. Scratch space is big but gets wiped. Figuring out what goes
+where, cleaning up after yourself, and not blowing your quota is a whole
+second job on top of the actual work.
 </p>
 <p>
-tccp sits between your laptop and the compute node and handles all the
-stuff in between. You just write code.
+tccp takes care of all of that for you! Just pretend you're local with JUMBO compute!
 </p>
 </div>
 
-<h2>what it handles for you</h2>
+<h2>the experience</h2>
+<p>
+You work in your own editor, on your own machine. When you're ready to
+run, you type <code>run train</code>. tccp syncs your code, makes sure
+everything is set up on the cluster, and starts the job. Output streams
+to your terminal in real time. You can detach, go get coffee, come back
+and reattach. If your WiFi dies, the job keeps running. Your results
+download automatically when it finishes.
+</p>
+<p>
+It feels like running locally, except the work is happening on cluster
+hardware.
+</p>
+
+<h2>compared to the alternatives</h2>
+
+<h3>vs. writing SLURM scripts by hand</h3>
+<p>
+The traditional way: write an sbatch script, scp your code, submit it,
+check squeue, scp the results back, repeat. Every change means
+re-uploading files. You manage your own containers, environments, and
+storage. tccp does all of this for you in a single command.
+</p>
+
+<h3>vs. the On Demand web UI</h3>
+<p>
+The web UI gives you a Jupyter notebook in a browser or a remote desktop.
+It works, but you're stuck in their editor and their environment. You
+can't use your local tools, your dotfiles, your keybindings. tccp lets
+you stay in your own setup and just sends the work to the cluster.
+</p>
+
+<h2>what you get</h2>
 <ul>
-<li>Connects with a single SSH session and a single Duo push</li>
-<li>Syncs your code to the compute node when you run a job</li>
-<li>Pulls and caches Singularity containers as needed</li>
-<li>Sets up Python virtualenvs and installs your requirements.txt</li>
-<li>Finds or allocates SLURM compute nodes (and reuses them across jobs)</li>
-<li>Lets you attach and detach from running jobs, like tmux</li>
-<li>Forwards ports for things like TensorBoard and Jupyter</li>
-<li>Brings your output files back when the job finishes</li>
+<li>Edit locally, run remotely &mdash; your editor, your tools, their GPUs</li>
+<li>One command to go from code change to running job</li>
+<li>Jobs survive disconnects &mdash; close your laptop, come back later, reattach</li>
+<li>Your requirements.txt installs automatically (and only when it changes)</li>
+<li>Port forwarding for TensorBoard, Jupyter, or anything else you run</li>
+<li>Drop into an interactive shell on the compute node whenever you need to poke around</li>
+<li>Output files come back to your laptop when the job's done</li>
+<li>Storage just works &mdash; you never have to think about quotas or cleanup</li>
 </ul>
+<p>
+For the details on what's happening behind the scenes, see
+<a href="architecture.html">how it works</a>.
+</p>
 
 <h2>quick start</h2>
 <pre>
 # install the binary (see install page)
 
-# save your Tufts credentials once
+# save your credentials once
 $ tccp setup
 
 # set up your project
@@ -59,7 +100,7 @@ $ cd my-project
 $ tccp register
 
 # connect and run
-$ tccp
+$ tccpin
 tccp> run train
 </pre>
 

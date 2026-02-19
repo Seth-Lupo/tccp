@@ -44,7 +44,7 @@ bool wait_or_detach(int ms) {
             deadline - std::chrono::steady_clock::now()).count();
         if (remaining <= 0) break;
 
-        if (platform::poll_stdin(static_cast<int>(std::min(remaining, (long long)100)))) {
+        if (platform::poll_stdin(static_cast<int>(std::min<long long>(remaining, 100)))) {
             char c;
             if (read(STDIN_FILENO, &c, 1) == 1) {
                 if (c == 27) {

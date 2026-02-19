@@ -116,20 +116,9 @@ static void interactive_relay(ConnectionFactory& factory, const std::string& com
 
 void do_ssh(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
+    if (!cli.service.job_manager()) return;
 
     auto& factory = *cli.service.cluster();
-
-    // Special case: "ssh login" — interactive shell on login node via DTN
-    if (arg == "login" || arg.empty()) {
-        std::string login_host = cli.service.config().login().host;
-        // Hop through DTN's internal SSH (no Duo, passwordless)
-        std::string cmd = fmt::format(
-            "ssh -t -o StrictHostKeyChecking=no {}", login_host);
-        interactive_relay(factory, cmd);
-        return;
-    }
-
-    if (!cli.service.job_manager()) return;
 
     // Parse: "job_name [command...]"
     std::string job_name_arg = arg;
@@ -180,6 +169,16 @@ void do_ssh(BaseCLI& cli, const std::string& arg) {
             std::cerr << result.stderr_data;
         }
     }
+}
+
+void do_clusterssh(BaseCLI& cli, const std::string& arg) {
+    if (!cli.require_connection()) return;
+
+    auto& factory = *cli.service.cluster();
+    std::string login_host = cli.service.config().login().host;
+    std::string cmd = fmt::format(
+        "ssh -t -o StrictHostKeyChecking=no {}", login_host);
+    interactive_relay(factory, cmd);
 }
 
 void do_open(BaseCLI& cli, const std::string& arg) {
@@ -395,7 +394,8 @@ void register_jobs_commands(BaseCLI& cli) {
     cli.add_command("out", do_output, "View full job output (vim)");
     cli.add_command("logs", do_logs, "Print job output to terminal");
     cli.add_command("initlogs", do_initlogs, "Print job initialization logs");
-    cli.add_command("ssh", do_ssh, "SSH to login node or job's compute node");
+    cli.add_command("ssh", do_ssh, "SSH to a job's compute node");
+    cli.add_command("clusterssh", do_clusterssh, "SSH to the login node");
     cli.add_command("jobs", do_jobs, "List running jobs");
     cli.add_command("ls", do_jobs, "List running jobs (alias for 'jobs')");
     cli.add_command("cancel", do_cancel, "Cancel a job");

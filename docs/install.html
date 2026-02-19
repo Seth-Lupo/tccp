@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tccp - install</title>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="logo.png" type="image/png">
 </head>
 <body>
 <h1>install</h1>
@@ -14,15 +15,22 @@
 <a href="architecture.html">how it works</a>
 <a href="commands.html">commands</a>
 <a href="usage.html">usage</a>
+<a href="contact.html">contact</a>
 </nav>
 
-<h2>macOS / Linux</h2>
-<p>One command. Downloads the right binary for your platform and puts it
+<h2>Homebrew (macOS / Linux)</h2>
+<pre>
+brew tap seth-lupo/tap
+brew install tccp
+</pre>
+
+<h2>shell script (macOS / Linux)</h2>
+<p>Downloads the right binary for your platform and puts it
 in <code>/usr/local/bin</code>:</p>
 <pre>
-curl -fsSL https://sethlupo.github.io/tccp/install.sh | sh
+curl -fsSL https://seth-lupo.github.io/tccp/install.sh | sh
 </pre>
-<p>That's it. Verify with:</p>
+<p>Verify with:</p>
 <pre>
 tccp --version
 </pre>
@@ -67,9 +75,10 @@ on macOS/Linux), and you're good.</p>
 tccp setup
 </pre>
 <p>
-This asks for your username, password, and email. On macOS, credentials go
-into the system keychain. On Linux and Windows, they're stored in
-<code>~/.tccp/credentials</code>.
+This asks for your username and password. On macOS, credentials go
+into the system keychain. On Linux and Windows they're stored in
+<code>~/.tccp/credentials</code>. You can run it again anytime if
+your password changes.
 </p>
 <p>
 Then register your project:

@@ -16,10 +16,9 @@ void print_usage() {
     std::cout << theme::color::BLUE << "    tccp setup"
               << theme::color::RESET << theme::color::DIM
               << "            Store cluster credentials" << theme::color::RESET << "\n";
-    std::cout << theme::color::BLUE << "    tccp new "
-              << theme::color::RESET << theme::color::BROWN << "<template>"
+    std::cout << theme::color::BLUE << "    tccp creds"
               << theme::color::RESET << theme::color::DIM
-              << "   Create new project" << theme::color::RESET << "\n";
+              << "            Update cluster credentials" << theme::color::RESET << "\n";
     std::cout << theme::color::BLUE << "    tccp register "
               << theme::color::RESET << theme::color::BROWN << "[path]"
               << theme::color::RESET << theme::color::DIM
@@ -58,16 +57,8 @@ int main(int argc, char** argv) {
                 cli.run_register(argc >= 3 ? argv[2] : "");
             } else if (cmd == "manual") {
                 cli.run_manual(argc >= 3 ? argv[2] : "");
-            } else if (cmd == "setup") {
+            } else if (cmd == "setup" || cmd == "creds") {
                 cli.run_setup();
-            } else if (cmd == "new") {
-                if (argc < 3) {
-                    std::cout << theme::fail("Missing template name.");
-                    std::cout << theme::step("Usage: tccp new <template>");
-                    std::cout << theme::step("Available templates: python, qwen");
-                    return 1;
-                }
-                cli.run_new(argv[2]);
             } else {
                 std::cout << theme::fail("Unknown command: " + cmd);
                 print_usage();

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tccp - commands</title>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="logo.png" type="image/png">
 </head>
 <body>
 <h1>commands</h1>
@@ -14,6 +15,7 @@
 <a href="architecture.html">how it works</a>
 <a href="commands.html">commands</a>
 <a href="usage.html">usage</a>
+<a href="contact.html">contact</a>
 </nav>
 
 <p>
@@ -25,9 +27,14 @@ setup stuff), and the rest run inside the tccp REPL once you're connected.
 <p>These run from your terminal, before you connect:</p>
 
 <h3><code>tccp setup</code></h3>
-<p>Save your Tufts credentials. You only need to do this once,
-but you can run it again if your password changes.</p>
+<p>Save your Tufts credentials (username and password). You only need to do
+this once, but you can run it again if your password changes.</p>
 <pre>$ tccp setup</pre>
+
+<h3><code>tccp creds</code></h3>
+<p>Same as <code>tccp setup</code> &mdash; update your stored credentials.
+Handy if your password changed or you need to switch accounts.</p>
+<pre>$ tccp creds</pre>
 
 <h3><code>tccp register [path]</code></h3>
 <p>Set up a project. This walks you through creating a <code>tccp.yaml</code>
@@ -35,14 +42,6 @@ that tells tccp how to run your code.</p>
 <pre>
 $ cd my-project
 $ tccp register
-</pre>
-
-<h3><code>tccp new &lt;template&gt;</code></h3>
-<p>Start a fresh project from a template. Creates the config, a starter
-script, requirements.txt, and a .gitignore.</p>
-<pre>
-$ mkdir my-project && cd my-project
-$ tccp new python
 </pre>
 
 <h3><code>tccp manual [topic]</code></h3>
@@ -93,7 +92,8 @@ tccp> initlogs train
 
 <table>
 <tr><th>command</th><th>what it does</th></tr>
-<tr><td class="cmd">ssh [job]</td><td>SSH to the login node, or if you give it a job name, straight to that job's compute node.</td></tr>
+<tr><td class="cmd">ssh [job]</td><td>SSH to a job's compute node. With no argument, uses the default job.</td></tr>
+<tr><td class="cmd">clusterssh</td><td>SSH to the login node for running SLURM commands or poking around the cluster.</td></tr>
 <tr><td class="cmd">open [job]</td><td>Drop into a bash shell inside the Singularity container, with your code, venv, and env vars all set up.</td></tr>
 <tr><td class="cmd">exec &lt;cmd&gt;</td><td>Run a one-off command on the login node and print the result.</td></tr>
 </table>

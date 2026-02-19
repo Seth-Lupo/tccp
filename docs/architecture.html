@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tccp - how it works</title>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="logo.png" type="image/png">
 </head>
 <body>
 <h1>how it works</h1>
@@ -14,78 +15,154 @@
 <a href="architecture.html">how it works</a>
 <a href="commands.html">commands</a>
 <a href="usage.html">usage</a>
+<a href="contact.html">contact</a>
 </nav>
 
 <h2>the problem</h2>
 <p>
 Running anything on an HPC cluster usually means writing SLURM batch scripts,
 copying files with scp, loading the right modules, pulling containers,
-staring at squeue, and praying your SSH session doesn't die. And on this
-cluster, every new SSH connection means another Duo push on your phone.
-It's a lot of friction for "run my Python script on a GPU."
+and staring at squeue. On top of that, you're constantly fighting storage:
+home directories have tight quotas, container images are multi-gigabyte,
+pip and torch caches bloat fast, and scratch space disappears on reboot.
 </p>
 
 <h2>the approach</h2>
-<pre>
-your laptop                 cluster
-+----------+     SSH     +---------+     SSH hop     +---------+
-|  tccp    | ----------> |   DTN   | -------------> | compute |
-| (local)  |  1 session  | (xfer)  |  internal auth | (GPU)   |
-+----------+  1 Duo push +---------+                +---------+
-</pre>
+<svg viewBox="0 0 720 280" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:720px;margin:16px 0;">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c8b896"/>
+    </marker>
+  </defs>
+
+  <!-- cluster bracket -->
+  <line x1="255" y1="25" x2="700" y2="25" stroke="#333" stroke-width="1"/>
+  <line x1="255" y1="25" x2="255" y2="32" stroke="#333" stroke-width="1"/>
+  <line x1="700" y1="25" x2="700" y2="32" stroke="#333" stroke-width="1"/>
+  <text x="478" y="18" text-anchor="middle" fill="#666" font-family="monospace" font-size="10">cluster</text>
+
+  <!-- your laptop -->
+  <rect x="20" y="65" width="160" height="80" rx="6" fill="#111" stroke="#d4a857" stroke-width="1.5"/>
+  <text x="100" y="98" text-anchor="middle" fill="#d4a857" font-family="monospace" font-size="15" font-weight="bold">tccp</text>
+  <text x="100" y="118" text-anchor="middle" fill="#666" font-family="monospace" font-size="11">your laptop</text>
+
+  <!-- DTN -->
+  <rect x="270" y="65" width="140" height="80" rx="6" fill="#111" stroke="#6a9fb5" stroke-width="1.5"/>
+  <text x="340" y="93" text-anchor="middle" fill="#6a9fb5" font-family="monospace" font-size="15" font-weight="bold">DTN</text>
+  <text x="340" y="113" text-anchor="middle" fill="#666" font-family="monospace" font-size="10">file sync, env setup</text>
+  <text x="340" y="127" text-anchor="middle" fill="#666" font-family="monospace" font-size="10">port forwarding</text>
+
+  <!-- login node -->
+  <rect x="530" y="185" width="160" height="70" rx="6" fill="#111" stroke="#6a9fb5" stroke-width="1.5"/>
+  <text x="610" y="215" text-anchor="middle" fill="#6a9fb5" font-family="monospace" font-size="14" font-weight="bold">login</text>
+  <text x="610" y="235" text-anchor="middle" fill="#666" font-family="monospace" font-size="10">salloc, squeue, scancel</text>
+
+  <!-- compute node -->
+  <rect x="530" y="65" width="160" height="80" rx="6" fill="#111" stroke="#6a9fb5" stroke-width="1.5"/>
+  <text x="610" y="93" text-anchor="middle" fill="#6a9fb5" font-family="monospace" font-size="15" font-weight="bold">compute</text>
+  <text x="610" y="113" text-anchor="middle" fill="#666" font-family="monospace" font-size="10">your code runs here</text>
+  <text x="610" y="127" text-anchor="middle" fill="#666" font-family="monospace" font-size="10">GPU, large /tmp</text>
+
+  <!-- laptop -> DTN -->
+  <line x1="180" y1="105" x2="265" y2="105" stroke="#c8b896" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="223" y="96" text-anchor="middle" fill="#c8b896" font-family="monospace" font-size="11">SSH</text>
+  <text x="223" y="125" text-anchor="middle" fill="#666" font-family="monospace" font-size="9">1 session</text>
+
+  <!-- DTN -> compute -->
+  <line x1="410" y1="105" x2="525" y2="105" stroke="#c8b896" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="468" y="96" text-anchor="middle" fill="#c8b896" font-family="monospace" font-size="10">SSH hop</text>
+
+  <!-- DTN -> login -->
+  <line x1="410" y1="135" x2="525" y2="205" stroke="#c8b896" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="448" y="175" fill="#c8b896" font-family="monospace" font-size="10">SSH hop</text>
+
+  <!-- multiplexed note -->
+  <line x1="60" y1="260" x2="650" y2="260" stroke="#222" stroke-width="1" stroke-dasharray="4,4"/>
+  <text x="355" y="275" text-anchor="middle" fill="#666" font-family="monospace" font-size="10">everything multiplexed on one connection to DTN</text>
+</svg>
 <p>
-tccp opens a single libssh2 session to the data transfer node. One Duo push,
-that's it for the whole session. Everything runs over that one connection:
-file sync, SLURM commands, job launch, port forwarding, interactive shells.
+tccp opens a single SSH session to the data transfer node (DTN). Everything
+goes through that one connection. The DTN handles file sync, environment
+setup, and port forwarding. For SLURM commands (allocating nodes, checking
+job status, canceling), tccp hops through the DTN to the login node.
+For actually running your code, it hops to the compute node.
 </p>
 <p>
-Compute nodes don't accept SSH keys from outside the cluster, so tccp
-hops through the DTN using the cluster's internal auth. Port forwarding
-uses SSH protocol-level <code>direct-tcpip</code> channels, which don't
-need any extra authentication.
+Compute nodes don't accept external SSH keys, so all access goes through
+the DTN using cluster-internal auth. Port forwarding uses SSH protocol-level
+<code>direct-tcpip</code> channels, which don't need any extra authentication.
+</p>
+
+<h2>storage strategy</h2>
+<p>
+The cluster has three kinds of storage, each with different tradeoffs.
+tccp puts things in the right place automatically:
+</p>
+<table>
+<tr><th>location</th><th>properties</th><th>what tccp puts there</th></tr>
+<tr>
+<td>NFS home (~/) </td>
+<td>Persistent, small quota (5-30GB), visible from all nodes</td>
+<td>Container images (cached .sif files), virtualenvs, job output</td>
+</tr>
+<tr>
+<td>Compute /tmp</td>
+<td>Fast local disk, large (hundreds of GB), wiped on reboot</td>
+<td>Synced code, pip/torch/HF caches, runtime temp files</td>
+</tr>
+<tr>
+<td>Shared cache (/tmp/{user}/{project}/.tccp-cache)</td>
+<td>Persists across jobs on the same node</td>
+<td>Downloaded datasets, model checkpoints (the <code>cache:</code> dir)</td>
+</tr>
+</table>
+<p>
+Container pulls are the biggest storage challenge. OCI blobs and SIF
+conversion can need ~12GB of temp space &mdash; more than most DTN /tmp
+partitions and way over home dir quotas. So tccp pulls containers on the
+compute node (which has a large /tmp), then stores the final .sif on NFS
+where it's visible everywhere. The temp files are cleaned up in the same
+command.
+</p>
+<p>
+All runtime caches (pip, torch, HuggingFace, XDG) are redirected to
+compute node /tmp so they never touch your home quota. If a node reboots
+and /tmp is wiped, tccp detects the missing scratch and does a fresh sync
+automatically.
 </p>
 
 <h2>what happens when you type <code>run train</code></h2>
 <ol>
-<li><b>Allocate</b> &mdash; tccp looks for an idle SLURM allocation it can reuse. If there isn't one, it requests a new one and waits for a node.</li>
-<li><b>Environment</b> &mdash; checks if the container, venv, and dtach are already set up. Pulls or builds whatever's missing.</li>
-<li><b>Sync</b> &mdash; tars up your local code and pipes it through SSH to the compute node. Only sends files that changed since the last sync.</li>
-<li><b>Launch</b> &mdash; generates a run script, copies it to the node, and starts it under dtach (a lightweight session manager).</li>
+<li><b>Allocate</b> &mdash; tccp asks the login node for a SLURM allocation, or reuses an idle one.</li>
+<li><b>Environment</b> &mdash; checks if the container, venv, and dtach are set up. Pulls or builds whatever's missing. Container pull happens on the compute node to avoid quota issues.</li>
+<li><b>Sync</b> &mdash; tars up your local code and pipes it through SSH to the compute node's scratch dir. Only sends files that changed since the last sync.</li>
+<li><b>Launch</b> &mdash; generates a run script, copies it to the node, and starts it under dtach.</li>
 <li><b>Attach</b> &mdash; connects to the dtach socket and streams the job output to your terminal.</li>
 </ol>
 <p>All of this happens in a background thread, so you can keep using the REPL
-while the job initializes. You'll see notifications as each step finishes.</p>
+while the job initializes.</p>
 
-<h2>where things live on the cluster</h2>
+<h2>where things live</h2>
 <pre>
-NFS home (~/)
+NFS home (~/)                              [persistent, quota-limited]
   tccp/
     bin/dtach                    # built automatically on first use
   projects/{name}/
-    env/default/venv/            # your persistent virtualenv
-    output/{job_id}/             # output files (synced back to your laptop)
+    env/default/venv/            # persistent virtualenv
+    output/{job_id}/             # output files (synced back to laptop)
+  .tccp-cache/
+    images/*.sif                 # pulled containers (LRU managed)
 
-Container cache (~/)
-  .tccp-cache/images/*.sif       # pulled containers, managed by LRU
-
-Compute node /tmp/{user}/{project}/{job_id}/
-  (your code)                    # scratch copy, ephemeral
-  cache/                         # shared cache across jobs (bind-mounted)
-  output -> NFS output dir       # symlink to persistent storage
-  tccp_run.sh                    # the generated run script
-  tccp.log                       # log file for the job viewer
-  tccp.sock                      # dtach socket for attach/detach
+Compute node /tmp/{user}/                  [fast, large, ephemeral]
+  {project}/{job_id}/
+    (your code)                  # scratch copy
+    cache/                       # shared cache (bind-mounted)
+    output -> NFS output dir     # symlink to persistent storage
+    tccp_run.sh                  # generated run script
+    tccp.log                     # log file
+    tccp.sock                    # dtach socket
+  singularity-cache/             # temp during container pull (cleaned up)
 </pre>
-
-<h2>design decisions</h2>
-<table>
-<tr><th>choice</th><th>reasoning</th></tr>
-<tr><td>libssh2 instead of system ssh</td><td>Full control over multiplexing. Avoids extra Duo pushes.</td></tr>
-<tr><td>dtach instead of tmux/screen</td><td>Does one thing. Tiny. Easy to compile from source on any node.</td></tr>
-<tr><td>Singularity instead of Docker</td><td>The HPC standard. Runs without root. Plays nice with NFS.</td></tr>
-<tr><td>Tar pipe instead of rsync/scp</td><td>Works cleanly over nested SSH hops. Incremental diff is done locally.</td></tr>
-<tr><td>C++</td><td>Ships as a single static binary. No Python, no runtime deps.</td></tr>
-</table>
 
 </body>
 </html>

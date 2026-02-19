@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tccp - usage</title>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="logo.png" type="image/png">
 </head>
 <body>
 <h1>usage</h1>
@@ -14,6 +15,7 @@
 <a href="architecture.html">how it works</a>
 <a href="commands.html">commands</a>
 <a href="usage.html">usage</a>
+<a href="contact.html">contact</a>
 </nav>
 
 <h2>getting on the network</h2>
@@ -21,8 +23,8 @@
 You need to be on the Tufts network to use tccp.
 </p>
 <ul>
-<li><b>Cisco AnyConnect VPN</b> (recommended) &mdash; connect once and you're good. No repeated Duo pushes.</li>
-<li><b>Tufts campus WiFi</b> &mdash; works fine, but you'll get a Duo push every time you start tccp since it opens a fresh SSH connection.</li>
+<li><b>Cisco AnyConnect VPN</b> (recommended) &mdash; connect once and you're good.</li>
+<li><b>Tufts campus WiFi</b> &mdash; works fine, but requires MFA each time you start tccp.</li>
 </ul>
 
 <h2>first time</h2>
@@ -193,13 +195,33 @@ Then just open <code>http://localhost:6006</code> in your browser. No
 SSH tunnel setup needed.
 </p>
 
+<h2>storage and caching</h2>
+<p>
+You don't need to think about this much, but it's good to know:
+</p>
+<ul>
+<li>Your home directory has a small quota. tccp keeps only persistent
+things there (container images, venvs, output files) and manages them
+with LRU cleanup.</li>
+<li>All runtime caches (pip, torch, HuggingFace) are redirected to
+compute node /tmp, so they never eat into your quota.</li>
+<li>Container pulls happen on the compute node where /tmp is large,
+not on the DTN or your home dir. The final .sif is stored on NFS
+so it's only pulled once.</li>
+<li><code>requirements.txt</code> is installed automatically before each
+run. tccp caches by hash, so if nothing changed it's a no-op.</li>
+<li>The <code>cache</code> directory persists across jobs on the same
+node &mdash; good for datasets or checkpoints you don't want to
+re-download every run.</li>
+<li>The <code>output</code> directory lives on NFS and gets synced back
+to your laptop after each job finishes.</li>
+</ul>
+
 <h2>good to know</h2>
 <ul>
-<li>Your <code>.gitignore</code> (or <code>.tccpignore</code>) controls which files get synced. Keep large data files out of it.</li>
-<li>If you have a <code>requirements.txt</code>, tccp installs it automatically before each run. It caches by hash, so unchanged requirements are a no-op.</li>
-<li>The <code>cache</code> directory persists across jobs on the same node &mdash; good for downloaded datasets or model checkpoints.</li>
-<li>The <code>output</code> directory gets synced back to your laptop after each job.</li>
-<li>Changed your tccp.yaml? Type <code>refresh</code> in the REPL to pick up the changes without reconnecting.</li>
+<li>Your <code>.gitignore</code> (or <code>.tccpignore</code>) controls which files get synced. Keep large data files out.</li>
+<li>If /tmp gets wiped (node reboot), tccp detects it and does a fresh sync automatically.</li>
+<li>Changed your tccp.yaml? Type <code>refresh</code> to pick up the changes without reconnecting.</li>
 </ul>
 
 </body>

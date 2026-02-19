@@ -1,0 +1,79 @@
+name: Update Homebrew Tap
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Wait for release assets
+      run: sleep 30
+
+    - name: Get release info
+      id: release
+      run: |
+        VERSION="${GITHUB_REF#refs/tags/v}"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+        MACOS_URL="https://github.com/seth-lupo/tccp/releases/download/v${VERSION}/tccp-macos-arm64"
+        LINUX_URL="https://github.com/seth-lupo/tccp/releases/download/v${VERSION}/tccp-linux-x64"
+
+        curl -fSL -o macos-bin "$MACOS_URL"
+        curl -fSL -o linux-bin "$LINUX_URL"
+
+        echo "macos_sha=$(shasum -a 256 macos-bin | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+        echo "linux_sha=$(shasum -a 256 linux-bin | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout tap
+      uses: actions/checkout@v4
+      with:
+        repository: seth-lupo/homebrew-tap
+        token: ${{ secrets.TAP_TOKEN }}
+
+    - name: Update formula
+      run: |
+        cat > Formula/tccp.rb << 'FORMULA'
+        class Tccp < Formula
+          desc "CLI for running code on HPC clusters"
+          homepage "https://seth-lupo.github.io/tccp"
+          version "VERSION_PLACEHOLDER"
+          license "MIT"
+
+          on_macos do
+            on_arm do
+              url "https://github.com/seth-lupo/tccp/releases/download/vVERSION_PLACEHOLDER/tccp-macos-arm64"
+              sha256 "MACOS_SHA_PLACEHOLDER"
+            end
+          end
+
+          on_linux do
+            on_intel do
+              url "https://github.com/seth-lupo/tccp/releases/download/vVERSION_PLACEHOLDER/tccp-linux-x64"
+              sha256 "LINUX_SHA_PLACEHOLDER"
+            end
+          end
+
+          def install
+            binary = stable.url.split("/").last
+            bin.install binary => "tccp"
+          end
+
+          test do
+            assert_match "version", shell_output("#{bin}/tccp --version")
+          end
+        end
+        FORMULA
+
+        sed -i "s/VERSION_PLACEHOLDER/${{ steps.release.outputs.version }}/g" Formula/tccp.rb
+        sed -i "s/MACOS_SHA_PLACEHOLDER/${{ steps.release.outputs.macos_sha }}/g" Formula/tccp.rb
+        sed -i "s/LINUX_SHA_PLACEHOLDER/${{ steps.release.outputs.linux_sha }}/g" Formula/tccp.rb
+
+    - name: Commit and push
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add Formula/tccp.rb
+        git commit -m "Update tccp to ${{ steps.release.outputs.version }}"
+        git push
