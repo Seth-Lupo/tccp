@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tccp</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<img src="logo.png" alt="tccp" class="logo">
+<h1>tccp</h1>
+<nav>
+<a href="index.html">home</a>
+<a href="install.html">install</a>
+<a href="architecture.html">how it works</a>
+<a href="commands.html">commands</a>
+<a href="usage.html">usage</a>
+</nav>
+
+<div class="hero">
+<h2>motivation</h2>
+<p>
+I wanted to write ML code like I write any other code. Locally.
+Open my editor, change a file, run it. No SLURM scripts, no scp,
+no ssh tunnels, no quota math, no environment debugging.
+</p>
+<p>
+The cluster should be invisible. I should not have to think about
+allocations, Singularity containers, scratch directories, NFS mounts,
+or Duo pushes. I should type one command and my code runs on a GPU.
+</p>
+<p>
+tccp abstracts away the compute. You code locally. tccp handles everything
+between your laptop and the GPU.
+</p>
+</div>
+
+<h2>what it does</h2>
+<ul>
+<li>One SSH connection, one Duo push per session</li>
+<li>Syncs your code to the compute node automatically</li>
+<li>Pulls and caches Singularity containers</li>
+<li>Creates and manages Python virtualenvs</li>
+<li>Allocates and reuses SLURM compute nodes</li>
+<li>Attach/detach from running jobs (like tmux)</li>
+<li>Port forwarding for TensorBoard, Jupyter, etc.</li>
+<li>Auto-retrieves output when jobs finish</li>
+</ul>
+
+<h2>quick start</h2>
+<pre>
+# 1. Install (see install page)
+
+# 2. Store your Tufts credentials
+$ tccp setup
+
+# 3. Register your project
+$ cd my-project
+$ tccp register
+
+# 4. Connect and run
+$ tccp
+tccp> run train
+</pre>
+
+<p class="dim">v0.3.0 &mdash; built for the Tufts HPC cluster</p>
+</body>
+</html>

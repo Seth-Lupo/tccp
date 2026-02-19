@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tccp - architecture</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>how it works</h1>
+<nav>
+<a href="index.html">home</a>
+<a href="install.html">install</a>
+<a href="architecture.html">how it works</a>
+<a href="commands.html">commands</a>
+<a href="usage.html">usage</a>
+</nav>
+
+<h2>the problem</h2>
+<p>
+Running code on an HPC cluster normally requires: writing SLURM scripts,
+copying files via scp, managing Singularity containers, debugging module
+loads, watching squeue, and hoping your SSH session doesn't drop. Every
+SSH connection triggers a Duo MFA push. It's painful.
+</p>
+
+<h2>the solution</h2>
+<pre>
+your laptop                 cluster
++----------+     SSH     +---------+     SSH hop     +---------+
+|  tccp    | ----------> |   DTN   | -------------> | compute |
+| (local)  |  1 session  | (xfer)  |  internal auth | (GPU)   |
++----------+  1 Duo push +---------+                +---------+
+</pre>
+
+<h2>single SSH session</h2>
+<p>
+tccp opens one libssh2 session to the data transfer node (DTN).
+One Duo push. Everything multiplexes on that session: file sync,
+SLURM commands, job launch, port forwarding, interactive shells.
+</p>
+<p>
+Compute nodes don't accept external SSH keys. tccp hops through
+the DTN using cluster-internal auth (GSSAPI/hostbased). Port
+forwarding uses SSH protocol-level <code>direct-tcpip</code>
+channels &mdash; no extra auth needed.
+</p>
+
+<h2>what happens on <code>run</code></h2>
+<ol>
+<li><b>Allocate</b> &mdash; find or request a SLURM allocation (reuses idle ones)</li>
+<li><b>Environment</b> &mdash; pull container if missing, create venv if missing, build dtach if missing</li>
+<li><b>Sync</b> &mdash; tar your local code, pipe it through SSH to the compute node's scratch dir. Incremental: only changed files.</li>
+<li><b>Launch</b> &mdash; write a run script, scp it to the node, start it under dtach</li>
+<li><b>Attach</b> &mdash; connect to the dtach socket, stream output to your terminal</li>
+</ol>
+<p>Steps 1-4 happen in a background thread. You can queue another job while the first initializes.</p>
+
+<h2>file layout</h2>
+<pre>
+NFS home (~/)
+  tccp/
+    bin/dtach                    # compiled on first use
+  projects/{name}/
+    env/default/venv/            # persistent virtualenv
+    output/{job_id}/             # output files (synced back)
+
+Container cache (~/)
+  .tccp-cache/images/*.sif       # pulled containers (LRU managed)
+
+Compute node /tmp/{user}/{project}/{job_id}/
+  (your synced code)             # scratch, ephemeral
+  cache/                         # bind-mounted shared cache
+  output -> NFS output dir       # symlink
+  tccp_run.sh                    # generated run script
+  tccp.log                       # job log (for viewer)
+  tccp.sock                      # dtach socket
+</pre>
+
+<h2>key design decisions</h2>
+<table>
+<tr><th>decision</th><th>why</th></tr>
+<tr><td>libssh2, not system ssh</td><td>Control over multiplexing. No extra Duo pushes.</td></tr>
+<tr><td>dtach, not tmux/screen</td><td>Minimal. Single-purpose. Easy to build from source on any node.</td></tr>
+<tr><td>Singularity, not Docker</td><td>HPC standard. Runs unprivileged. Binds NFS mounts.</td></tr>
+<tr><td>Tar pipe, not rsync/scp</td><td>Binary-clean over nested SSH hops. Incremental via local manifest diff.</td></tr>
+<tr><td>C++</td><td>Static binary. No runtime dependencies. Ships as one file.</td></tr>
+</table>
+
+</body>
+</html>

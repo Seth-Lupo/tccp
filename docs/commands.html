@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tccp - commands</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>commands</h1>
+<nav>
+<a href="index.html">home</a>
+<a href="install.html">install</a>
+<a href="architecture.html">how it works</a>
+<a href="commands.html">commands</a>
+<a href="usage.html">usage</a>
+</nav>
+
+<h2>CLI commands (run outside the REPL)</h2>
+
+<h3><code>tccp setup</code></h3>
+<p>Store your Tufts credentials. Run once, or again to update.</p>
+<pre>$ tccp setup</pre>
+
+<h3><code>tccp register [path]</code></h3>
+<p>Register a project directory. Walks you through creating <code>tccp.yaml</code>.</p>
+<pre>
+$ cd my-project
+$ tccp register
+</pre>
+<p>Defaults to current directory. Pass a path to register elsewhere.</p>
+
+<h3><code>tccp new &lt;template&gt;</code></h3>
+<p>Scaffold a new project from a template.</p>
+<pre>
+$ mkdir my-project && cd my-project
+$ tccp new python
+$ tccp new qwen
+</pre>
+
+<h3><code>tccp manual [topic]</code></h3>
+<p>Show the built-in manual. Topics: <code>python</code>, <code>python-pytorch</code>.</p>
+<pre>$ tccp manual python-pytorch</pre>
+
+<hr>
+
+<h2>REPL commands (run inside tccp)</h2>
+<p>Start the REPL with <code>tccp</code> or <code>tccp connect</code>.</p>
+
+<h3>jobs</h3>
+
+<table>
+<tr><th>command</th><th>description</th></tr>
+<tr><td class="cmd">run &lt;job&gt; [args]</td><td>Submit a job and attach to it. Starts init in background.</td></tr>
+<tr><td class="cmd">view [job]</td><td>Attach to a running job. Scrollable viewer for finished jobs.</td></tr>
+<tr><td class="cmd">restart [job]</td><td>Cancel then re-run a job.</td></tr>
+<tr><td class="cmd">jobs</td><td>List all tracked jobs with status, node, and duration.</td></tr>
+<tr><td class="cmd">cancel &lt;job&gt;</td><td>Cancel a running or initializing job.</td></tr>
+<tr><td class="cmd">return [job]</td><td>Download output from a completed job.</td></tr>
+</table>
+
+<pre>
+tccp> run train
+tccp> run train --lr 0.001 --epochs 50
+tccp> view train
+tccp> jobs
+tccp> cancel train
+</pre>
+
+<h3>output</h3>
+
+<table>
+<tr><th>command</th><th>description</th></tr>
+<tr><td class="cmd">logs [job]</td><td>Print job output to terminal.</td></tr>
+<tr><td class="cmd">tail [job] [n]</td><td>Print last N lines (default 30).</td></tr>
+<tr><td class="cmd">output [job]</td><td>Open full output in vim.</td></tr>
+<tr><td class="cmd">initlogs [job]</td><td>Print initialization logs (allocation, sync, env setup).</td></tr>
+</table>
+
+<pre>
+tccp> logs train
+tccp> tail train 100
+tccp> initlogs train
+</pre>
+
+<h3>remote</h3>
+
+<table>
+<tr><th>command</th><th>description</th></tr>
+<tr><td class="cmd">ssh [job]</td><td>SSH to login node, or to a job's compute node.</td></tr>
+<tr><td class="cmd">open [job]</td><td>Interactive shell inside the job's container on the compute node.</td></tr>
+<tr><td class="cmd">exec &lt;cmd&gt;</td><td>Run a single command on the login node.</td></tr>
+</table>
+
+<pre>
+tccp> ssh train          # SSH to train's compute node
+tccp> open train         # shell inside singularity container
+tccp> exec squeue -u $USER
+</pre>
+
+<h3>info</h3>
+
+<table>
+<tr><th>command</th><th>description</th></tr>
+<tr><td class="cmd">status</td><td>Connection and project status.</td></tr>
+<tr><td class="cmd">info [job]</td><td>Detailed job info: SLURM ID, node, times, exit code.</td></tr>
+<tr><td class="cmd">config</td><td>Show project configuration.</td></tr>
+<tr><td class="cmd">allocs</td><td>List SLURM allocations.</td></tr>
+<tr><td class="cmd">gpus</td><td>Show available GPU resources per partition.</td></tr>
+</table>
+
+<h3>housekeeping</h3>
+
+<table>
+<tr><th>command</th><th>description</th></tr>
+<tr><td class="cmd">dealloc [id|all]</td><td>Release SLURM allocations.</td></tr>
+<tr><td class="cmd">clean</td><td>Remove old output directories (keeps latest per job).</td></tr>
+<tr><td class="cmd">refresh</td><td>Reload tccp.yaml without reconnecting.</td></tr>
+</table>
+
+<h3>general</h3>
+
+<table>
+<tr><th>command</th><th>description</th></tr>
+<tr><td class="cmd">help</td><td>Show command list.</td></tr>
+<tr><td class="cmd">pwd</td><td>Print working directory.</td></tr>
+<tr><td class="cmd">clear</td><td>Clear screen.</td></tr>
+<tr><td class="cmd">quit</td><td>Exit.</td></tr>
+</table>
+
+</body>
+</html>

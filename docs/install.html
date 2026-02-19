@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tccp - install</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>install</h1>
+<nav>
+<a href="index.html">home</a>
+<a href="install.html">install</a>
+<a href="architecture.html">how it works</a>
+<a href="commands.html">commands</a>
+<a href="usage.html">usage</a>
+</nav>
+
+<h2>download</h2>
+<p>
+Pre-built binaries are attached to each
+<a href="https://github.com/sethlupo/tccp/releases/latest">GitHub release</a>.
+Pick your platform:
+</p>
+
+<table>
+<tr><th>platform</th><th>binary</th></tr>
+<tr>
+<td>macOS (Apple Silicon)</td>
+<td><a href="https://github.com/sethlupo/tccp/releases/latest/download/tccp-macos-arm64">tccp-macos-arm64</a></td>
+</tr>
+<tr>
+<td>Linux (x64)</td>
+<td><a href="https://github.com/sethlupo/tccp/releases/latest/download/tccp-linux-x64">tccp-linux-x64</a></td>
+</tr>
+<tr>
+<td>Windows (x64)</td>
+<td><a href="https://github.com/sethlupo/tccp/releases/latest/download/tccp-windows-x64.exe">tccp-windows-x64.exe</a></td>
+</tr>
+</table>
+
+<h2>install (macOS / Linux)</h2>
+<pre>
+# Download the binary for your platform
+curl -Lo tccp https://github.com/sethlupo/tccp/releases/latest/download/tccp-macos-arm64
+chmod +x tccp
+sudo mv tccp /usr/local/bin/
+
+# Verify
+tccp --version
+</pre>
+
+<h2>install (Windows)</h2>
+<pre>
+# Download tccp-windows-x64.exe from the releases page
+# Move it somewhere on your PATH, or run it directly
+tccp.exe --version
+</pre>
+
+<h2>first-time setup</h2>
+<pre>
+# Store your Tufts cluster credentials
+tccp setup
+</pre>
+<p>
+This prompts for your Tufts username, password, and email.
+Credentials are stored in the system keychain (macOS) or
+<code>~/.tccp/credentials</code> (Linux/Windows).
+</p>
+
+<h2>build from source</h2>
+<pre>
+git clone https://github.com/sethlupo/tccp.git
+cd tccp
+cmake -B build -S . \
+  -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake \
+  -DVCPKG_TARGET_TRIPLET=arm64-osx \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/tccp --version
+</pre>
+<p>Dependencies (managed by vcpkg): libssh2, yaml-cpp, fmt, CLI11, replxx.</p>
+
+</body>
+</html>
