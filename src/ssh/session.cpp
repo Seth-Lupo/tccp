@@ -63,7 +63,7 @@ static void kbd_callback(const char* /*name*/, int /*name_len*/,
 
 SessionManager::SessionManager(const SessionTarget& target)
     : target_(target), session_(nullptr), channel_(nullptr), sock_(-1), active_(false),
-      session_mutex_(std::make_shared<std::recursive_mutex>()) {
+      io_mutex_(std::make_shared<std::mutex>()) {
 }
 
 SessionManager::~SessionManager() {
@@ -332,7 +332,7 @@ SSHResult SessionManager::wait_for_prompt(LIBSSH2_CHANNEL* chan, StatusCallback 
 }
 
 void SessionManager::close() {
-    std::lock_guard<std::recursive_mutex> lock(*session_mutex_);
+    std::lock_guard<std::mutex> lock(*io_mutex_);
     if (channel_) {
         libssh2_channel_close(channel_);
         libssh2_channel_free(channel_);
@@ -358,7 +358,7 @@ bool SessionManager::is_active() const {
 }
 
 bool SessionManager::check_alive() {
-    std::lock_guard<std::recursive_mutex> lock(*session_mutex_);
+    std::lock_guard<std::mutex> lock(*io_mutex_);
     if (!active_ || !session_ || sock_ < 0) return false;
 
     // Send SSH keepalive and check if connection is still up
@@ -380,7 +380,7 @@ bool SessionManager::check_alive() {
 }
 
 void SessionManager::send_keepalive() {
-    std::lock_guard<std::recursive_mutex> lock(*session_mutex_);
+    std::lock_guard<std::mutex> lock(*io_mutex_);
     if (session_ && active_) {
         int seconds_to_next = 0;
         libssh2_keepalive_send(session_, &seconds_to_next);

@@ -24,7 +24,11 @@ bool ShellRelay::start(const std::string& command) {
     ch_ = factory_.primary_channel();
     if (!ch_) return false;
 
-    lock_ = std::unique_lock<std::recursive_mutex>(*factory_.session_mutex());
+    io_mutex_ = factory_.io_mutex();
+    cmd_mutex_ = factory_.primary_cmd_mutex();
+    sock_ = factory_.raw_socket();
+
+    cmd_mutex_->lock();  // Hold for entire relay session
     started_ = true;
     skip_echo_ = true;
     done_ = false;
@@ -80,20 +84,27 @@ void ShellRelay::stop() {
     char tmp[4096];
 
     if (!done_) {
-        char ctrl_c = 0x03;
-        libssh2_channel_write(ch_, &ctrl_c, 1);
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            char ctrl_c = 0x03;
+            libssh2_channel_write(ch_, &ctrl_c, 1);
+        }
         platform::sleep_ms(100);
     }
 
     // Drain remaining data (prompt, post-marker text)
     for (int i = 0; i < 100; i++) {
-        int n = libssh2_channel_read(ch_, tmp, sizeof(tmp));
+        int n;
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            n = libssh2_channel_read(ch_, tmp, sizeof(tmp));
+        }
         if (n <= 0) break;
     }
 
     started_ = false;
     ch_ = nullptr;
-    lock_.unlock();
+    cmd_mutex_->unlock();
 }
 
 LIBSSH2_CHANNEL* ShellRelay::channel() const { return ch_; }
@@ -115,6 +126,7 @@ void ShellRelay::run(const std::string& command) {
         // Propagate terminal resize to remote PTY
         if (g_relay_resize) {
             g_relay_resize = 0;
+            std::lock_guard<std::mutex> lock(*io_mutex_);
             libssh2_channel_request_pty_size(
                 ch_, platform::term_width(), platform::term_height());
         }
@@ -139,7 +151,11 @@ void ShellRelay::run(const std::string& command) {
             if (n <= 0) break;
             int sent = 0;
             while (sent < n) {
-                int w = libssh2_channel_write(ch_, rbuf + sent, n - sent);
+                int w;
+                {
+                    std::lock_guard<std::mutex> lock(*io_mutex_);
+                    w = libssh2_channel_write(ch_, rbuf + sent, n - sent);
+                }
                 if (w == LIBSSH2_ERROR_EAGAIN) { platform::sleep_ms(1); continue; }
                 if (w < 0) goto out;
                 sent += w;
@@ -149,7 +165,11 @@ void ShellRelay::run(const std::string& command) {
         // channel → stdout
         if (sock_ready) {
             for (;;) {
-                int n = libssh2_channel_read(ch_, rbuf, sizeof(rbuf));
+                int n;
+                {
+                    std::lock_guard<std::mutex> lock(*io_mutex_);
+                    n = libssh2_channel_read(ch_, rbuf, sizeof(rbuf));
+                }
                 if (n <= 0) break;
                 std::string text = feed(rbuf, n);
                 if (!text.empty())
@@ -158,7 +178,12 @@ void ShellRelay::run(const std::string& command) {
             }
         }
 
-        if (libssh2_channel_eof(ch_)) break;
+        bool eof;
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            eof = libssh2_channel_eof(ch_);
+        }
+        if (eof) break;
     }
 
 out:
@@ -170,14 +195,25 @@ out:
 
 void ShellRelay::drain() {
     char tmp[4096];
-    while (libssh2_channel_read(ch_, tmp, sizeof(tmp)) > 0) {}
+    for (;;) {
+        int n;
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            n = libssh2_channel_read(ch_, tmp, sizeof(tmp));
+        }
+        if (n <= 0) break;
+    }
 }
 
 void ShellRelay::send(const std::string& text) {
     int total = static_cast<int>(text.size());
     int sent = 0;
     while (sent < total) {
-        int w = libssh2_channel_write(ch_, text.c_str() + sent, total - sent);
+        int w;
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            w = libssh2_channel_write(ch_, text.c_str() + sent, total - sent);
+        }
         if (w == LIBSSH2_ERROR_EAGAIN) { platform::sleep_ms(1); continue; }
         if (w < 0) return;
         sent += w;

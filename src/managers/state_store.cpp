@@ -70,6 +70,7 @@ ProjectState StateStore::load() {
                 e.path = n["path"].as<std::string>("");
                 e.mtime = n["mtime"].as<int64_t>(0);
                 e.size = n["size"].as<int64_t>(0);
+                e.md5 = n["md5"].as<std::string>("");
                 state.last_sync_manifest.push_back(e);
             }
         }
@@ -150,6 +151,7 @@ void StateStore::save(const ProjectState& state) {
             out << YAML::Key << "path" << YAML::Value << e.path;
             out << YAML::Key << "mtime" << YAML::Value << e.mtime;
             out << YAML::Key << "size" << YAML::Value << e.size;
+            out << YAML::Key << "md5" << YAML::Value << e.md5;
             out << YAML::EndMap;
         }
         out << YAML::EndSeq;

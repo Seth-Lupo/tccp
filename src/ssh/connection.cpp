@@ -8,8 +8,10 @@
 #include <thread>
 
 SSHConnection::SSHConnection(LIBSSH2_CHANNEL* channel, LIBSSH2_SESSION* session,
-                             std::shared_ptr<std::recursive_mutex> session_mutex)
-    : channel_(channel), session_(session), session_mutex_(std::move(session_mutex)) {
+                             std::shared_ptr<std::mutex> io_mutex, int sock,
+                             std::shared_ptr<std::mutex> cmd_mutex)
+    : channel_(channel), session_(session), io_mutex_(io_mutex),
+      sock_(sock), cmd_mutex_(cmd_mutex) {
 }
 
 bool SSHConnection::is_active() const {
@@ -17,14 +19,17 @@ bool SSHConnection::is_active() const {
 }
 
 SSHResult SSHConnection::run(const std::string& command, int timeout_secs) {
-    std::lock_guard<std::recursive_mutex> lock(*session_mutex_);
+    std::lock_guard<std::mutex> cmd_lock(*cmd_mutex_);
     if (!channel_) {
         return SSHResult{-1, "", "No channel available"};
     }
 
     // Drain any stale data sitting in the channel buffer
     char drain[SSH_DRAIN_BUF_SIZE];
-    while (libssh2_channel_read(channel_, drain, sizeof(drain)) > 0) {}
+    {
+        std::lock_guard<std::mutex> lock(*io_mutex_);
+        while (libssh2_channel_read(channel_, drain, sizeof(drain)) > 0) {}
+    }
 
     // Send command wrapped in BEGIN/DONE markers.
     // We use shell string concatenation (BEG''IN) so the literal marker
@@ -51,7 +56,11 @@ SSHResult SSHConnection::run(const std::string& command, int timeout_secs) {
     int sent = 0;
     int write_retries = 0;
     while (sent < total) {
-        int w = libssh2_channel_write(channel_, full_cmd.c_str() + sent, total - sent);
+        int w;
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            w = libssh2_channel_write(channel_, full_cmd.c_str() + sent, total - sent);
+        }
         if (w == LIBSSH2_ERROR_EAGAIN) {
             if (++write_retries > 100) {
                 return SSHResult{-1, "", "Write stalled (EAGAIN for too long)"};
@@ -74,7 +83,11 @@ SSHResult SSHConnection::run(const std::string& command, int timeout_secs) {
     int consecutive_eagain = 0;
 
     while (std::chrono::steady_clock::now() < deadline) {
-        int n = libssh2_channel_read(channel_, buf, sizeof(buf) - 1);
+        int n;
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            n = libssh2_channel_read(channel_, buf, sizeof(buf) - 1);
+        }
         if (n > 0) {
             consecutive_eagain = 0;
             output.append(buf, n);
@@ -219,7 +232,7 @@ SSHResult SSHConnection::upload(const fs::path& local, const std::string& remote
 SSHResult SSHConnection::run_with_input(const std::string& command,
                                         const char* data, size_t data_len,
                                         int timeout_secs) {
-    std::lock_guard<std::recursive_mutex> lock(*session_mutex_);
+    std::lock_guard<std::mutex> lock(*io_mutex_);
     if (!session_) {
         return SSHResult{-1, "", "No session available for run_with_input"};
     }

@@ -37,7 +37,7 @@ public:
     LIBSSH2_CHANNEL* get_channel() { return channel_; }
     int get_socket() const { return sock_; }
     const std::string& get_target() const { return target_str_; }
-    std::shared_ptr<std::recursive_mutex> session_mutex() { return session_mutex_; }
+    std::shared_ptr<std::mutex> io_mutex() { return io_mutex_; }
 
 private:
     SessionTarget target_;
@@ -46,7 +46,7 @@ private:
     int sock_;
     bool active_;
     std::string target_str_;
-    std::shared_ptr<std::recursive_mutex> session_mutex_;
+    std::shared_ptr<std::mutex> io_mutex_;
 
     SSHResult establish_connection(StatusCallback callback);
     SSHResult ssh_userauth(StatusCallback callback);

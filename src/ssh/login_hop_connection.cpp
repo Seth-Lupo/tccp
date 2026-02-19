@@ -2,9 +2,10 @@
 
 LoginHopConnection::LoginHopConnection(LIBSSH2_CHANNEL* channel,
                                        LIBSSH2_SESSION* session,
-                                       std::shared_ptr<std::recursive_mutex> mutex,
+                                       std::shared_ptr<std::mutex> io_mutex, int sock,
+                                       std::shared_ptr<std::mutex> cmd_mutex,
                                        std::string login_host)
-    : SSHConnection(channel, session, std::move(mutex)),
+    : SSHConnection(channel, session, io_mutex, sock, cmd_mutex),
       login_host_(std::move(login_host)) {}
 
 SSHResult LoginHopConnection::run(const std::string& command, int timeout_secs) {

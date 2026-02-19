@@ -68,7 +68,9 @@ public:
 private:
     ConnectionFactory& factory_;
     LIBSSH2_CHANNEL* ch_ = nullptr;
-    std::unique_lock<std::recursive_mutex> lock_;
+    std::shared_ptr<std::mutex> io_mutex_;
+    std::shared_ptr<std::mutex> cmd_mutex_;
+    int sock_ = -1;
     bool started_ = false;
     bool skip_echo_ = true;
     bool done_ = false;

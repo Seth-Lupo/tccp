@@ -54,6 +54,7 @@ struct SyncManifestEntry {
     std::string path;               // relative file path
     int64_t mtime = 0;
     int64_t size = 0;
+    std::string md5;                // MD5 checksum for integrity verification
 };
 
 struct ProjectState {

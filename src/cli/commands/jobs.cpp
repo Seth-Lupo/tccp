@@ -397,6 +397,7 @@ void register_jobs_commands(BaseCLI& cli) {
     cli.add_command("initlogs", do_initlogs, "Print job initialization logs");
     cli.add_command("ssh", do_ssh, "SSH to login node or job's compute node");
     cli.add_command("jobs", do_jobs, "List running jobs");
+    cli.add_command("ls", do_jobs, "List running jobs (alias for 'jobs')");
     cli.add_command("cancel", do_cancel, "Cancel a job");
     cli.add_command("return", do_return, "Download job output");
     cli.add_command("open", do_open, "Open an interactive remote shell");

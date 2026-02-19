@@ -55,13 +55,15 @@ public:
     LIBSSH2_CHANNEL* primary_channel();
     LIBSSH2_SESSION* raw_session();
     int raw_socket();
-    std::shared_ptr<std::recursive_mutex> session_mutex();
+    std::shared_ptr<std::mutex> io_mutex();
+    std::shared_ptr<std::mutex> primary_cmd_mutex();
 
 private:
     const Config& config_;
     std::unique_ptr<SessionManager> session_;
     std::unique_ptr<SSHConnection> dtn_;
     std::unique_ptr<LoginHopConnection> login_;
+    std::shared_ptr<std::mutex> primary_cmd_mutex_;
 
     SSHResult connect_session(StatusCallback callback);
 };

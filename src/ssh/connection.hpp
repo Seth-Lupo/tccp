@@ -15,7 +15,8 @@ typedef struct _LIBSSH2_CHANNEL LIBSSH2_CHANNEL;
 class SSHConnection {
 public:
     SSHConnection(LIBSSH2_CHANNEL* channel, LIBSSH2_SESSION* session,
-                  std::shared_ptr<std::recursive_mutex> session_mutex);
+                  std::shared_ptr<std::mutex> io_mutex, int sock,
+                  std::shared_ptr<std::mutex> cmd_mutex);
 
     virtual ~SSHConnection() = default;
 
@@ -34,5 +35,7 @@ public:
 protected:
     LIBSSH2_CHANNEL* channel_;
     LIBSSH2_SESSION* session_;
-    std::shared_ptr<std::recursive_mutex> session_mutex_;
+    std::shared_ptr<std::mutex> io_mutex_;
+    int sock_;
+    std::shared_ptr<std::mutex> cmd_mutex_;
 };

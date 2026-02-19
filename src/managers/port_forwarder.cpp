@@ -66,7 +66,7 @@ static void forward_connection(ConnectionFactory& factory,
                                LIBSSH2_CHANNEL* ch,
                                std::atomic<bool>& stop_flag) {
     char buf[16384];
-    auto mtx = factory.session_mutex();
+    auto io_mtx = factory.io_mutex();
     int sock = factory.raw_socket();
 
     while (!stop_flag.load()) {
@@ -79,10 +79,13 @@ static void forward_connection(ConnectionFactory& factory,
             int n = read(client_fd, buf, sizeof(buf));
             if (n <= 0) break;  // client closed
 
-            std::lock_guard<std::recursive_mutex> lock(*mtx);
             int sent = 0;
             while (sent < n) {
-                int w = libssh2_channel_write(ch, buf + sent, n - sent);
+                int w;
+                {
+                    std::lock_guard<std::mutex> lock(*io_mtx);
+                    w = libssh2_channel_write(ch, buf + sent, n - sent);
+                }
                 if (w == LIBSSH2_ERROR_EAGAIN) {
                     platform::sleep_ms(1);
                     continue;
@@ -92,12 +95,13 @@ static void forward_connection(ConnectionFactory& factory,
             }
         }
 
-        // channel → local (non-blocking read)
+        // channel → local (non-blocking read - session is already non-blocking)
         {
-            std::lock_guard<std::recursive_mutex> lock(*mtx);
-            libssh2_session_set_blocking(factory.raw_session(), 0);
-            int n = libssh2_channel_read(ch, buf, sizeof(buf));
-            libssh2_session_set_blocking(factory.raw_session(), 1);
+            int n;
+            {
+                std::lock_guard<std::mutex> lock(*io_mtx);
+                n = libssh2_channel_read(ch, buf, sizeof(buf));
+            }
 
             if (n > 0) {
                 int sent = 0;
@@ -106,8 +110,13 @@ static void forward_connection(ConnectionFactory& factory,
                     if (w <= 0) goto done;
                     sent += w;
                 }
-            } else if (n == 0 || libssh2_channel_eof(ch)) {
-                break;  // remote closed
+            } else if (n == 0) {
+                bool eof;
+                {
+                    std::lock_guard<std::mutex> lock(*io_mtx);
+                    eof = libssh2_channel_eof(ch);
+                }
+                if (eof) break;  // remote closed
             }
             // EAGAIN = no data, keep looping
         }
@@ -116,7 +125,7 @@ static void forward_connection(ConnectionFactory& factory,
 done:
     // Close channel under mutex
     {
-        std::lock_guard<std::recursive_mutex> lock(*mtx);
+        std::lock_guard<std::mutex> lock(*io_mtx);
         libssh2_channel_close(ch);
         libssh2_channel_free(ch);
     }

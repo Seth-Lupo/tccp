@@ -85,9 +85,9 @@ inline std::string error(const std::string& msg) {
     return color::RED + msg + color::RESET + "\n";
 }
 
-// Info message (blue tilde, indented) - alias for check
+// Info message (blue, unindented, no symbol) - for job watcher notifications
 inline std::string info(const std::string& msg) {
-    return color::BLUE + "    ~ " + color::RESET + msg + "\n";
+    return color::BLUE + msg + color::RESET + "\n";
 }
 
 // Progress/step message (dim, indented 6 spaces, no symbol)

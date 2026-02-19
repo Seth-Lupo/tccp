@@ -1,9 +1,12 @@
 #include "utils.hpp"
 #include "credentials.hpp"
+#include <platform/platform.hpp>
 #include <chrono>
 #include <ctime>
 #include <cstdio>
 #include <stdexcept>
+#include <filesystem>
+#include <array>
 
 std::string get_cluster_username() {
     auto result = CredentialManager::instance().get("user");
@@ -58,4 +61,42 @@ std::string base64_encode(const std::string& input) {
         out += (i + 2 < len) ? B64_CHARS[val & 0x3F] : '=';
     }
     return out;
+}
+
+std::string compute_file_md5(const std::filesystem::path& path) {
+    if (!std::filesystem::exists(path)) {
+        return "";
+    }
+
+    // Use platform-specific MD5 command
+#ifdef __APPLE__
+    const char* md5_cmd = "md5 -q";
+#else
+    const char* md5_cmd = "md5sum";
+#endif
+
+    std::string cmd = std::string(md5_cmd) + " \"" + path.string() + "\"";
+    std::array<char, 128> buffer;
+    std::string result;
+
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        return "";
+    }
+
+    while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
+        result += buffer.data();
+    }
+    pclose(pipe);
+
+    // Extract just the MD5 hash (first 32 hex chars)
+    // md5sum format: "hash  filename"
+    // md5 -q format: "hash"
+    trim(result);
+    size_t space_pos = result.find(' ');
+    if (space_pos != std::string::npos) {
+        result = result.substr(0, space_pos);
+    }
+
+    return result;
 }

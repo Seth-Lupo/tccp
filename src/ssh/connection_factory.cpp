@@ -18,17 +18,24 @@ SSHResult ConnectionFactory::connect(StatusCallback callback) {
     auto result = connect_session(callback);
     if (result.failed()) return result;
 
+    // Create shared cmd_mutex for primary channel
+    primary_cmd_mutex_ = std::make_shared<std::mutex>();
+
     // DTN connection: wraps the primary shell channel
     dtn_ = std::make_unique<SSHConnection>(
         session_->get_channel(),
         session_->get_raw_session(),
-        session_->session_mutex());
+        session_->io_mutex(),
+        session_->get_socket(),
+        primary_cmd_mutex_);
 
     // Login hop: shares primary shell channel, prefixes commands with SSH hop
     login_ = std::make_unique<LoginHopConnection>(
         session_->get_channel(),
         session_->get_raw_session(),
-        session_->session_mutex(),
+        session_->io_mutex(),
+        session_->get_socket(),
+        primary_cmd_mutex_,
         config_.login().host);
 
     if (callback)
@@ -73,7 +80,7 @@ ShellRelay ConnectionFactory::shell() {
 // ── Channel grants ─────────────────────────────────────────────
 
 LIBSSH2_CHANNEL* ConnectionFactory::exec_channel() {
-    std::lock_guard<std::recursive_mutex> lock(*session_->session_mutex());
+    std::lock_guard<std::mutex> lock(*session_->io_mutex());
 
     LIBSSH2_SESSION* ssh = session_->get_raw_session();
     if (!ssh) return nullptr;
@@ -91,7 +98,7 @@ LIBSSH2_CHANNEL* ConnectionFactory::exec_channel() {
 }
 
 LIBSSH2_CHANNEL* ConnectionFactory::tunnel(const std::string& host, int port) {
-    std::lock_guard<std::recursive_mutex> lock(*session_->session_mutex());
+    std::lock_guard<std::mutex> lock(*session_->io_mutex());
 
     LIBSSH2_SESSION* ssh = session_->get_raw_session();
     if (!ssh) return nullptr;
@@ -122,8 +129,12 @@ int ConnectionFactory::raw_socket() {
     return session_ ? session_->get_socket() : -1;
 }
 
-std::shared_ptr<std::recursive_mutex> ConnectionFactory::session_mutex() {
-    return session_ ? session_->session_mutex() : nullptr;
+std::shared_ptr<std::mutex> ConnectionFactory::io_mutex() {
+    return session_ ? session_->io_mutex() : nullptr;
+}
+
+std::shared_ptr<std::mutex> ConnectionFactory::primary_cmd_mutex() {
+    return primary_cmd_mutex_;
 }
 
 // ── Internal ───────────────────────────────────────────────────

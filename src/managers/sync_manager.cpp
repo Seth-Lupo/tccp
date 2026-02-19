@@ -11,6 +11,7 @@
 #include <set>
 #include <sstream>
 #include <map>
+#include <tuple>
 
 namespace fs = std::filesystem;
 
@@ -39,9 +40,11 @@ std::vector<SyncManifestEntry> SyncManager::build_local_manifest() {
         try {
             entry.mtime = fs::last_write_time(abs_path).time_since_epoch().count();
             entry.size = static_cast<int64_t>(fs::file_size(abs_path));
+            entry.md5 = compute_file_md5(abs_path);
         } catch (...) {
             entry.mtime = 0;
             entry.size = 0;
+            entry.md5 = "";
         }
         manifest.push_back(entry);
     };
@@ -82,17 +85,20 @@ void SyncManager::diff_manifests(const std::vector<SyncManifestEntry>& current,
                                   const std::vector<SyncManifestEntry>& previous,
                                   std::vector<std::string>& changed,
                                   std::vector<std::string>& deleted) {
-    std::map<std::string, std::pair<int64_t, int64_t>> prev_map;
+    std::map<std::string, std::tuple<int64_t, int64_t, std::string>> prev_map;
     for (const auto& e : previous) {
-        prev_map[e.path] = {e.mtime, e.size};
+        prev_map[e.path] = {e.mtime, e.size, e.md5};
     }
 
     for (const auto& e : current) {
         auto it = prev_map.find(e.path);
         if (it == prev_map.end()) {
             changed.push_back(e.path);
-        } else if (it->second.first != e.mtime || it->second.second != e.size) {
-            changed.push_back(e.path);
+        } else {
+            const auto& [prev_mtime, prev_size, prev_md5] = it->second;
+            if (prev_mtime != e.mtime || prev_size != e.size || prev_md5 != e.md5) {
+                changed.push_back(e.path);
+            }
         }
     }
 
@@ -116,12 +122,13 @@ static fs::path create_local_tar(const fs::path& project_dir,
 
 // Pipe tar to compute node via base64 heredoc through the primary shell channel.
 // This avoids opening an exec channel (which triggers Duo re-auth on some clusters).
-// Includes mkdir, tar extract, and verification probe in one round-trip.
-// Returns true if verification probe file was found after extraction.
+// Includes mkdir, tar extract, and MD5 verification in one round-trip.
+// Returns true if probe file MD5 matches expected_md5 after extraction.
 bool SyncManager::pipe_tar_to_node(const fs::path& tar_path,
                                     const std::string& compute_node,
                                     const std::string& scratch_path,
-                                    const std::string& probe_file) {
+                                    const std::string& probe_file,
+                                    const std::string& expected_md5) {
     // Read the tar file into memory
     std::ifstream tar_file(tar_path, std::ios::binary | std::ios::ate);
     if (!tar_file) {
@@ -142,24 +149,51 @@ bool SyncManager::pipe_tar_to_node(const fs::path& tar_path,
     }
 
     // Single command through primary shell: decode base64, pipe through SSH hop
-    // to compute node where it's extracted. Verify with probe file.
+    // to compute node where it's extracted. Verify with MD5 checksum.
     std::string cmd = fmt::format(
         "base64 -d << 'TCCP_B64_EOF' | ssh -T {} {} '"
         "mkdir -p {} && cd {} && tar xf - 2>/dev/null; "
-        "test -f {}/{} && echo TCCP_SYNC_OK'\n"
+        "if [ -f {}/{} ]; then md5sum {}/{} | cut -d\" \" -f1; fi'\n"
         "{}TCCP_B64_EOF",
         SSH_OPTS, compute_node,
         scratch_path, scratch_path,
+        scratch_path, probe_file,
         scratch_path, probe_file,
         b64_lines);
 
     auto result = dtn_.run(cmd, 120);
     if (result.failed()) {
         throw std::runtime_error(fmt::format(
-            "File sync failed: {}. Check SSH connectivity to DTN.", result.stderr_data));
+            "File sync failed (exit code {}): {}. stdout: {}",
+            result.exit_code, result.stderr_data, result.stdout_data));
     }
 
-    return result.stdout_data.find("TCCP_SYNC_OK") != std::string::npos;
+    // Verify MD5 checksum
+    std::string remote_md5 = result.stdout_data;
+    trim(remote_md5);
+
+    if (remote_md5.empty()) {
+        throw std::runtime_error(fmt::format(
+            "Sync verification failed: {} not found on compute node after extraction. "
+            "Expected MD5: {}. Command output was empty - tar may have failed to extract.",
+            probe_file, expected_md5));
+    }
+
+    // Validate MD5 format (should be 32 hex chars)
+    if (remote_md5.length() != 32) {
+        throw std::runtime_error(fmt::format(
+            "Invalid MD5 format from remote: '{}' (expected 32 hex chars). "
+            "Full command output: '{}'",
+            remote_md5, result.stdout_data));
+    }
+
+    if (remote_md5 != expected_md5) {
+        throw std::runtime_error(fmt::format(
+            "Sync corruption detected: {} MD5 mismatch (expected: {}, got: {})",
+            probe_file, expected_md5, remote_md5));
+    }
+
+    return true;
 }
 
 // ── Sync strategies ────────────────────────────────────────
@@ -175,8 +209,17 @@ bool SyncManager::full_sync(const std::string& compute_node,
     rel_paths.reserve(manifest.size());
     for (const auto& e : manifest) rel_paths.push_back(e.path);
 
+    // Find expected MD5 for probe file
+    std::string expected_md5;
+    for (const auto& e : manifest) {
+        if (e.path == probe_file) {
+            expected_md5 = e.md5;
+            break;
+        }
+    }
+
     fs::path tar_path = create_local_tar(config_.project_dir(), rel_paths);
-    bool verified = pipe_tar_to_node(tar_path, compute_node, scratch_path, probe_file);
+    bool verified = pipe_tar_to_node(tar_path, compute_node, scratch_path, probe_file, expected_md5);
     fs::remove(tar_path);
 
     return verified;
@@ -187,6 +230,7 @@ bool SyncManager::incremental_sync(const std::string& compute_node,
                                     const std::vector<std::string>& changed_files,
                                     const std::vector<std::string>& deleted_files,
                                     const std::string& probe_file,
+                                    const std::string& expected_md5,
                                     StatusCallback cb) {
     // Build a single SSH command that deletes removed files AND checks probe,
     // so we only need one round-trip if there are no changed files to transfer.
@@ -214,7 +258,7 @@ bool SyncManager::incremental_sync(const std::string& compute_node,
     if (existing.empty()) return true;
 
     fs::path tar_path = create_local_tar(config_.project_dir(), existing);
-    bool verified = pipe_tar_to_node(tar_path, compute_node, scratch_path, probe_file);
+    bool verified = pipe_tar_to_node(tar_path, compute_node, scratch_path, probe_file, expected_md5);
     fs::remove(tar_path);
 
     return verified;
@@ -308,6 +352,13 @@ void SyncManager::sync_to_scratch(const std::string& compute_node,
 
     // Pick a file from the manifest to use as a verification probe
     std::string probe_file = local_manifest[0].path;
+    std::string expected_md5 = local_manifest[0].md5;
+
+    if (expected_md5.empty()) {
+        throw std::runtime_error(fmt::format(
+            "Failed to compute MD5 checksum for probe file: {}. "
+            "Ensure file exists and is readable.", probe_file));
+    }
 
     // Try to reuse previous scratch on the same node
     bool reused = false;
@@ -323,7 +374,7 @@ void SyncManager::sync_to_scratch(const std::string& compute_node,
     // Decide sync strategy: incremental or full.
     // For incremental, we need a previous manifest from the same node AND
     // a successful reuse (we skip the separate verify — pipe_tar_to_node
-    // does built-in verification in the same SSH command).
+    // does built-in MD5 verification in the same SSH command).
     bool verified = false;
     if (reused && !state.last_sync_manifest.empty() &&
         state.last_sync_node == compute_node) {
@@ -333,7 +384,7 @@ void SyncManager::sync_to_scratch(const std::string& compute_node,
 
         if (!changed.empty() || !deleted.empty()) {
             verified = incremental_sync(compute_node, scratch_path,
-                                        changed, deleted, probe_file, cb);
+                                        changed, deleted, probe_file, expected_md5, cb);
         } else {
             if (cb) cb("All files up to date");
             // Quick verify with a lightweight check built into next command,
