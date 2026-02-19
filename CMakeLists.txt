@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 set(VCPKG_INSTALL_OPTIONS "--no-print-usage")
-project(tccp VERSION 0.3.0 LANGUAGES CXX)
+project(tccp VERSION 0.3.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -43,6 +43,9 @@ endif()
 
 # Test option
 option(TCCP_BUILD_TESTS "Build unit tests" OFF)
+
+# Version define — single source of truth (from project() VERSION above)
+add_compile_definitions(TCCP_VERSION="${PROJECT_VERSION}")
 
 # Source subdirectories
 add_subdirectory(src/platform)

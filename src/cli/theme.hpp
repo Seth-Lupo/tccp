@@ -44,7 +44,7 @@ inline std::string banner() {
         "\033[2J\033[H\n"
         + color::BLUE + color::BOLD
         + "  Tufts Cluster Command Prompt\n"
-        + color::RESET + color::DIM + "  v0.3.0\n"
+        + color::RESET + color::DIM + "  v" + TCCP_VERSION + "\n"
         + "  Powered by Jumbo"
         + color::RESET + "\n\n"
         + rule();

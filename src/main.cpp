@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
             if (cmd == "--version") {
                 std::cout << theme::color::BROWN << theme::color::BOLD << "tccp"
                           << theme::color::RESET << theme::color::DIM
-                          << " version 0.3.0" << theme::color::RESET << "\n";
+                          << " version " << TCCP_VERSION << theme::color::RESET << "\n";
                 return 0;
             } else if (cmd == "--help") {
                 print_usage();

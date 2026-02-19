@@ -57,8 +57,9 @@ std::vector<PreflightIssue> check_project_config() {
 
     if (!project_config_exists()) {
         issues.push_back({
-            "No tccp.yaml in current directory",
-            "Run 'tccp new python' or create tccp.yaml"
+            "No tccp.yaml found in this directory",
+            "Run 'tccp register' to set up your project",
+            true
         });
         return issues;
     }

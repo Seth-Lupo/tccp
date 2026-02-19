@@ -7,6 +7,7 @@
 struct PreflightIssue {
     std::string message;
     std::string fix;
+    bool is_hint = false;  // true = friendly nudge, false = error
 };
 
 // Runs all preflight checks before connecting.

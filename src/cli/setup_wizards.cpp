@@ -102,10 +102,33 @@ void TCCPCLI::run_register(const std::string& path_arg) {
     bool has_tccpignore = fs::exists(target / ".tccpignore");
     bool has_gitignore = fs::exists(target / ".gitignore");
     if (!has_tccpignore && !has_gitignore) {
-        std::cout << theme::fail("No .gitignore found in " + target.string());
-        std::cout << theme::step("Create a .gitignore before registering so tccp knows what to sync.");
-        std::cout << theme::step("At minimum, add patterns for large files you don't want uploaded.");
-        return;
+        // Create a sensible default .gitignore
+        std::ofstream gi(target / ".gitignore");
+        gi << "# Python\n"
+           << "__pycache__/\n"
+           << "*.pyc\n"
+           << ".venv/\n"
+           << "venv/\n"
+           << "\n"
+           << "# Data and models\n"
+           << "*.pt\n"
+           << "*.pth\n"
+           << "*.ckpt\n"
+           << "*.bin\n"
+           << "*.h5\n"
+           << "*.safetensors\n"
+           << "data/\n"
+           << "\n"
+           << "# Output\n"
+           << "output/\n"
+           << "wandb/\n"
+           << "\n"
+           << "# System\n"
+           << ".DS_Store\n"
+           << ".env\n";
+        gi.close();
+        std::cout << theme::ok("Created .gitignore with sensible defaults.") << "\n";
+        std::cout << theme::dim("    Edit it later to exclude anything else you don't want synced.") << "\n\n";
     }
 
     std::string dirname = target.filename().string();

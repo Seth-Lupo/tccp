@@ -79,8 +79,13 @@ void TCCPCLI::run_connected_repl() {
     auto issues = run_preflight_checks();
     if (!issues.empty()) {
         for (const auto& issue : issues) {
-            std::cout << theme::fail(issue.message);
-            std::cout << theme::step(issue.fix);
+            if (issue.is_hint) {
+                std::cout << theme::step(issue.message);
+                std::cout << theme::step(issue.fix);
+            } else {
+                std::cout << theme::fail(issue.message);
+                std::cout << theme::step(issue.fix);
+            }
         }
         std::cout << "\n";
         return;
