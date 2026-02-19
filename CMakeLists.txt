@@ -27,6 +27,7 @@ find_package(libssh2 CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
+find_package(Threads REQUIRED)
 find_package(replxx CONFIG REQUIRED)
 
 # Platform-specific libraries
