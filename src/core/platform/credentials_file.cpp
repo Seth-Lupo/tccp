@@ -3,7 +3,9 @@
 #include <fstream>
 #include <sstream>
 #include <filesystem>
-#include <sys/stat.h>
+#ifndef _WIN32
+#  include <sys/stat.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -43,7 +45,9 @@ static bool write_all(const std::map<std::string, std::string>& m) {
     }
     f.close();
 
+#ifndef _WIN32
     chmod(path.c_str(), 0600);
+#endif
     return true;
 }
 

@@ -17,7 +17,11 @@ std::string now_iso() {
     auto now = std::chrono::system_clock::now();
     auto t = std::chrono::system_clock::to_time_t(now);
     struct tm tm_buf;
+#ifdef _WIN32
+    localtime_s(&tm_buf, &t);
+#else
     localtime_r(&t, &tm_buf);
+#endif
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm_buf);
     return std::string(buf);
@@ -79,7 +83,11 @@ std::string compute_file_md5(const std::filesystem::path& path) {
     std::array<char, 128> buffer;
     std::string result;
 
+#ifdef _WIN32
+    FILE* pipe = _popen(cmd.c_str(), "r");
+#else
     FILE* pipe = popen(cmd.c_str(), "r");
+#endif
     if (!pipe) {
         return "";
     }
@@ -87,7 +95,11 @@ std::string compute_file_md5(const std::filesystem::path& path) {
     while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
         result += buffer.data();
     }
+#ifdef _WIN32
+    _pclose(pipe);
+#else
     pclose(pipe);
+#endif
 
     // Extract just the MD5 hash (first 32 hex chars)
     // md5sum format: "hash  filename"
