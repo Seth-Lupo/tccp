@@ -1,0 +1,44 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+    paths: [releases]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Get version from releases file
+      id: ver
+      run: |
+        LINE=$(tail -1 releases)
+        VERSION=$(echo "$LINE" | cut -d'|' -f1)
+        TITLE=$(echo "$LINE" | cut -s -d'|' -f2)
+        [ -z "$TITLE" ] && TITLE="Release v$VERSION"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+        echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+
+    - name: Check if tag exists
+      id: check
+      run: |
+        if git rev-parse "v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Create release
+      if: steps.check.outputs.exists == 'false'
+      run: |
+        gh release create "${{ steps.ver.outputs.tag }}" \
+          --title "${{ steps.ver.outputs.title }}" \
+          --generate-notes
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

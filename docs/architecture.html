@@ -12,9 +12,10 @@
 <nav>
 <a href="index.html">home</a>
 <a href="install.html">install</a>
-<a href="architecture.html">how it works</a>
-<a href="commands.html">commands</a>
 <a href="usage.html">usage</a>
+<a href="commands.html">commands</a>
+<a href="settings.html">settings</a>
+<a href="architecture.html">how it works</a>
 <a href="contact.html">contact</a>
 </nav>
 
@@ -143,26 +144,107 @@ automatically.
 while the job initializes.</p>
 
 <h2>where things live</h2>
-<pre>
-NFS home (~/)                              [persistent, quota-limited]
-  tccp/
-    bin/dtach                    # built automatically on first use
-  projects/{name}/
-    env/default/venv/            # persistent virtualenv
-    output/{job_id}/             # output files (synced back to laptop)
-  .tccp-cache/
-    images/*.sif                 # pulled containers (LRU managed)
 
-Compute node /tmp/{user}/                  [fast, large, ephemeral]
-  {project}/{job_id}/
-    (your code)                  # scratch copy
-    cache/                       # shared cache (bind-mounted)
-    output -> NFS output dir     # symlink to persistent storage
-    tccp_run.sh                  # generated run script
-    tccp.log                     # log file
-    tccp.sock                    # dtach socket
-  singularity-cache/             # temp during container pull (cleaned up)
-</pre>
+<svg viewBox="0 0 720 380" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:720px;margin:16px 0;">
+  <!-- NFS box -->
+  <rect x="10" y="10" width="340" height="280" rx="8" fill="#111" stroke="#d4a857" stroke-width="1.5"/>
+  <text x="24" y="34" fill="#d4a857" font-family="monospace" font-size="13" font-weight="bold">NFS home (~/)</text>
+  <text x="24" y="50" fill="#666" font-family="monospace" font-size="10">persistent, quota-limited, all nodes</text>
+
+  <text x="30" y="74" fill="#6a9fb5" font-family="monospace" font-size="11">tccp/</text>
+  <text x="50" y="92" fill="#c8b896" font-family="monospace" font-size="10">bin/dtach</text>
+  <text x="190" y="92" fill="#666" font-family="monospace" font-size="9">built on first use</text>
+  <text x="50" y="110" fill="#6a9fb5" font-family="monospace" font-size="10">container-cache/</text>
+  <text x="50" y="126" fill="#c8b896" font-family="monospace" font-size="10">  images/*.sif</text>
+  <text x="190" y="126" fill="#666" font-family="monospace" font-size="9">containers (LRU managed)</text>
+
+  <text x="50" y="150" fill="#6a9fb5" font-family="monospace" font-size="10">projects/{name}/</text>
+  <text x="70" y="168" fill="#c8b896" font-family="monospace" font-size="10">env/default/venv/</text>
+  <text x="210" y="168" fill="#666" font-family="monospace" font-size="9">persistent virtualenv</text>
+  <text x="70" y="186" fill="#c8b896" font-family="monospace" font-size="10">output/{job_id}/</text>
+  <text x="210" y="186" fill="#666" font-family="monospace" font-size="9">synced back to laptop</text>
+
+  <!-- Compute box — same height -->
+  <rect x="370" y="10" width="340" height="280" rx="8" fill="#111" stroke="#6a9fb5" stroke-width="1.5"/>
+  <text x="384" y="34" fill="#6a9fb5" font-family="monospace" font-size="13" font-weight="bold">Compute /tmp/{user}/</text>
+  <text x="384" y="50" fill="#666" font-family="monospace" font-size="10">fast, large, wiped on reboot</text>
+
+  <text x="390" y="74" fill="#6a9fb5" font-family="monospace" font-size="11">{project}/{job_id}/</text>
+
+  <text x="410" y="92" fill="#c8b896" font-family="monospace" font-size="10">(your code)</text>
+  <text x="550" y="92" fill="#666" font-family="monospace" font-size="9">scratch copy</text>
+
+  <text x="410" y="110" fill="#c8b896" font-family="monospace" font-size="10">cache/</text>
+  <text x="550" y="110" fill="#666" font-family="monospace" font-size="9">bind-mounted cache</text>
+
+  <text x="410" y="128" fill="#c8b896" font-family="monospace" font-size="10">output/</text>
+  <text x="550" y="128" fill="#666" font-family="monospace" font-size="9">symlink to NFS</text>
+
+  <text x="410" y="146" fill="#c8b896" font-family="monospace" font-size="10">tccp_run.sh</text>
+  <text x="550" y="146" fill="#666" font-family="monospace" font-size="9">generated run script</text>
+
+  <text x="410" y="164" fill="#c8b896" font-family="monospace" font-size="10">tccp.log</text>
+  <text x="550" y="164" fill="#666" font-family="monospace" font-size="9">job output log</text>
+
+  <text x="410" y="182" fill="#c8b896" font-family="monospace" font-size="10">tccp.sock</text>
+  <text x="550" y="182" fill="#666" font-family="monospace" font-size="9">dtach socket</text>
+
+  <text x="390" y="210" fill="#6a9fb5" font-family="monospace" font-size="11">{project}/.tccp-cache/</text>
+  <text x="410" y="226" fill="#666" font-family="monospace" font-size="9">persists across jobs on same node</text>
+
+  <text x="390" y="250" fill="#6a9fb5" font-family="monospace" font-size="11">singularity-cache/</text>
+  <text x="410" y="266" fill="#666" font-family="monospace" font-size="9">temp during pull, cleaned up after</text>
+
+  <!-- legend row below both boxes -->
+  <rect x="10" y="310" width="12" height="12" rx="2" fill="none" stroke="#d4a857" stroke-width="1.5"/>
+  <text x="28" y="321" fill="#666" font-family="monospace" font-size="10">persistent (NFS)</text>
+
+  <rect x="170" y="310" width="12" height="12" rx="2" fill="none" stroke="#6a9fb5" stroke-width="1.5"/>
+  <text x="188" y="321" fill="#666" font-family="monospace" font-size="10">ephemeral (local /tmp)</text>
+
+  <text x="370" y="321" fill="#6a9fb5" font-family="monospace" font-size="10">directory/</text>
+  <text x="440" y="321" fill="#c8b896" font-family="monospace" font-size="10">file</text>
+  <text x="475" y="321" fill="#666" font-family="monospace" font-size="10">description</text>
+</svg>
+
+<h2>job lifecycle</h2>
+
+<svg viewBox="0 0 720 80" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:720px;margin:16px 0;">
+  <line x1="20" y1="30" x2="700" y2="30" stroke="#333" stroke-width="2"/>
+  <circle cx="60" cy="30" r="5" fill="#d4a857"/>
+  <text x="60" y="55" text-anchor="middle" fill="#c8b896" font-family="monospace" font-size="10">submit</text>
+  <circle cx="200" cy="30" r="5" fill="#6a9fb5"/>
+  <text x="200" y="55" text-anchor="middle" fill="#c8b896" font-family="monospace" font-size="10">running</text>
+  <text x="200" y="70" text-anchor="middle" fill="#666" font-family="monospace" font-size="9">attach/detach freely</text>
+  <circle cx="400" cy="30" r="5" fill="#6a9fb5"/>
+  <text x="400" y="55" text-anchor="middle" fill="#c8b896" font-family="monospace" font-size="10">completed</text>
+  <text x="400" y="70" text-anchor="middle" fill="#666" font-family="monospace" font-size="9">detected ~1s</text>
+  <circle cx="560" cy="30" r="5" fill="#d4a857"/>
+  <text x="560" y="55" text-anchor="middle" fill="#c8b896" font-family="monospace" font-size="10">output returned</text>
+  <text x="560" y="70" text-anchor="middle" fill="#666" font-family="monospace" font-size="9">auto-downloaded</text>
+  <line x1="60" y1="30" x2="200" y2="30" stroke="#d4a857" stroke-width="2"/>
+  <line x1="200" y1="30" x2="400" y2="30" stroke="#6a9fb5" stroke-width="2"/>
+  <line x1="400" y1="30" x2="560" y2="30" stroke="#d4a857" stroke-width="2"/>
+  <circle cx="680" cy="30" r="5" fill="#333" stroke="#666" stroke-width="1"/>
+  <text x="680" y="55" text-anchor="middle" fill="#666" font-family="monospace" font-size="9">alloc idle</text>
+  <text x="680" y="70" text-anchor="middle" fill="#666" font-family="monospace" font-size="9">(reusable)</text>
+</svg>
+
+<p>
+Jobs run under <b>dtach</b>, so they survive disconnects, laptop sleep,
+and WiFi drops. <code>view</code> attaches to the live output,
+<code>Ctrl+C</code> detaches &mdash; reattach anytime. A background
+watcher on the DTN monitors the dtach socket and detects completion
+within about a second. Output is downloaded automatically when a job
+finishes; if you're offline, it downloads next time you connect.
+</p>
+<p>
+Allocations stay alive after jobs end, so the next <code>run</code> with
+compatible resources reuses the existing node instantly &mdash; no queue
+wait, no environment setup, just sync and launch. When you exit tccp,
+any idle allocations (no running jobs) are released automatically so
+you don't burn SUs by accident.
+</p>
 
 </body>
 </html>

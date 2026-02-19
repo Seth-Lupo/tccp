@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tccp - settings</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="logo.png" type="image/png">
+</head>
+<body>
+<h1>settings</h1>
+<nav>
+<a href="index.html">home</a>
+<a href="install.html">install</a>
+<a href="usage.html">usage</a>
+<a href="commands.html">commands</a>
+<a href="settings.html">settings</a>
+<a href="architecture.html">how it works</a>
+<a href="contact.html">contact</a>
+</nav>
+
+<p>
+Everything is configured in <code>tccp.yaml</code> at the root of your project.
+Run <code>tccp register</code> to generate one interactively, or write it
+by hand. All fields are optional &mdash; tccp has reasonable defaults for
+everything.
+</p>
+
+<h2>minimal example</h2>
+<pre>
+script: train.py
+</pre>
+<p>That's it. tccp will use a plain Python container and run your script.</p>
+
+<h2>full example</h2>
+<pre>
+type: python-pytorch
+gpu: a100
+env: .env
+output: checkpoints
+cache: .hf_cache
+rodata:
+  - data
+
+environment:
+  WANDB_PROJECT: my-experiment
+
+jobs:
+  train:
+    script: train.py
+    args: "--epochs 100 --lr 0.001"
+    time: "8:00:00"
+    gpu: a100-80gb
+    gpu_count: 2
+    memory: "64G"
+    cpus: 8
+    ports: [6006, 8888]
+
+  eval:
+    script: eval.py
+    time: "1:00:00"
+</pre>
+
+<h2>project settings</h2>
+
+<table>
+<tr><th>field</th><th>default</th><th>description</th></tr>
+<tr>
+<td><code>name</code></td>
+<td>directory name</td>
+<td>Project name. Used for remote directory naming.</td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td><code>python</code></td>
+<td>Environment type: <code>python</code> or <code>python-pytorch</code>.
+See <a href="#environments">environments</a> below.</td>
+</tr>
+<tr>
+<td><code>script</code></td>
+<td><code>main.py</code></td>
+<td>Default script to run. If no <code>jobs:</code> section is defined,
+this creates a default "main" job automatically.</td>
+</tr>
+<tr>
+<td><code>args</code></td>
+<td>(none)</td>
+<td>Default CLI arguments passed to the script.</td>
+</tr>
+<tr>
+<td><code>env</code></td>
+<td><code>.env</code></td>
+<td>Path to an environment file containing secrets (API keys, tokens).
+Always synced to the compute node, even if it's in your
+<code>.gitignore</code>.</td>
+</tr>
+<tr>
+<td><code>output</code></td>
+<td><code>output</code></td>
+<td>Directory synced back to your laptop when a job finishes. Lives on
+NFS so it persists across node reboots.</td>
+</tr>
+<tr>
+<td><code>cache</code></td>
+<td><code>cache</code></td>
+<td>Cache directory that persists across jobs on the same node. Good for
+downloaded datasets, model weights, or anything you don't want to
+re-download every run.</td>
+</tr>
+<tr>
+<td><code>rodata</code></td>
+<td>(none)</td>
+<td>Read-only data directories. Uploaded once per allocation, not
+re-synced on every run. Can be a single string or a list.</td>
+</tr>
+<tr>
+<td><code>environment</code></td>
+<td>(none)</td>
+<td>Map of custom environment variables exported before job execution.</td>
+</tr>
+</table>
+
+<h3>rodata example</h3>
+<pre>
+rodata:
+  - data
+  - models/pretrained
+</pre>
+<p>These directories are synced once when the allocation starts, then
+bind-mounted read-only into every job. Useful for large datasets you
+don't want to re-upload on every <code>run</code>.</p>
+
+<h3>environment example</h3>
+<pre>
+environment:
+  WANDB_PROJECT: my-experiment
+  CUDA_VISIBLE_DEVICES: "0,1"
+</pre>
+<p>These are exported in your job's shell and also when you use
+<code>open</code> or <code>ssh</code>.</p>
+
+<h2>resource settings</h2>
+
+<p>These control what SLURM allocates for your jobs. Set them at the
+top level for project-wide defaults, or per-job to override.</p>
+
+<table>
+<tr><th>field</th><th>default</th><th>description</th></tr>
+<tr>
+<td><code>gpu</code></td>
+<td>(none)</td>
+<td>GPU type. Common options include <code>a100</code>,
+<code>a100-40gb</code>, <code>a100-80gb</code>, <code>l40s</code>,
+<code>v100</code>, <code>t4</code>, and <code>none</code> &mdash;
+but available types depend on what the cluster has. tccp discovers
+GPUs from SLURM automatically. Bare names like <code>a100</code>
+resolve to the cheapest variant. Include a count with a colon:
+<code>a100:2</code>.</td>
+</tr>
+<tr>
+<td><code>gpu_count</code></td>
+<td>0</td>
+<td>Number of GPUs (alternative to the <code>a100:2</code> syntax).</td>
+</tr>
+<tr>
+<td><code>memory</code></td>
+<td><code>4G</code></td>
+<td>Memory per node. Supports M/MB, G/GB, T/TB suffixes. Auto-increases
+to <code>32G</code> (or <code>64G</code> for 80GB GPUs) when a GPU is
+requested.</td>
+</tr>
+<tr>
+<td><code>cpus</code></td>
+<td>1</td>
+<td>CPUs per task. Auto-increases to 4 when a GPU is requested.</td>
+</tr>
+<tr>
+<td><code>time</code></td>
+<td><code>1:00:00</code></td>
+<td>Walltime limit in <code>HH:MM:SS</code> or <code>H:MM</code>
+format.</td>
+</tr>
+<tr>
+<td><code>partition</code></td>
+<td>(auto)</td>
+<td>SLURM partition. Auto-selects <code>gpu</code> if a GPU is
+requested.</td>
+</tr>
+<tr>
+<td><code>exclude_nodes</code></td>
+<td>(none)</td>
+<td>Comma-separated list of nodes to avoid.</td>
+</tr>
+<tr>
+<td><code>ports</code></td>
+<td>(none)</td>
+<td>Ports to forward to localhost. Can be a single number or a list.
+Top-level ports apply to all jobs that don't set their own.</td>
+</tr>
+</table>
+
+<h3>advanced: full slurm block</h3>
+<p>For fine-grained control, use a <code>slurm:</code> block instead of
+(or alongside) the shorthand fields:</p>
+<pre>
+slurm:
+  partition: gpu
+  time: "8:00:00"
+  nodes: 1
+  cpus_per_task: 8
+  memory: "64G"
+  gpu_type: a100-80gb
+  gpu_count: 2
+  exclude_nodes: "s1cmp003,s1cmp004"
+</pre>
+
+<h2>jobs</h2>
+
+<p>The <code>jobs:</code> section defines named jobs. Each job can override
+any resource setting from the project level.</p>
+
+<table>
+<tr><th>field</th><th>default</th><th>description</th></tr>
+<tr>
+<td><code>script</code></td>
+<td>(required*)</td>
+<td>Python script to run.</td>
+</tr>
+<tr>
+<td><code>package</code></td>
+<td>(required*)</td>
+<td>Python package to run with <code>-m</code> flag (instead of script).</td>
+</tr>
+<tr>
+<td><code>args</code></td>
+<td>(none)</td>
+<td>CLI arguments for this job.</td>
+</tr>
+<tr>
+<td><code>time</code></td>
+<td>inherited</td>
+<td>Job-specific walltime override.</td>
+</tr>
+<tr>
+<td><code>ports</code></td>
+<td>inherited</td>
+<td>Ports to forward for this job.</td>
+</tr>
+<tr>
+<td colspan="3" class="dim">
+* Each job needs either <code>script</code> or <code>package</code>.
+All resource fields (<code>gpu</code>, <code>memory</code>,
+<code>cpus</code>, <code>partition</code>, <code>exclude_nodes</code>)
+can also be set per-job.
+</td>
+</tr>
+</table>
+
+<h3>job shorthand</h3>
+<p>If a job only needs a script name, you can use the short form:</p>
+<pre>
+jobs:
+  train: train.py
+  eval: eval.py
+</pre>
+<p>This is equivalent to:</p>
+<pre>
+jobs:
+  train:
+    script: train.py
+  eval:
+    script: eval.py
+</pre>
+
+<h2 id="environments">environments</h2>
+
+<table>
+<tr><th>type</th><th>container</th><th>includes</th></tr>
+<tr>
+<td><code>python</code></td>
+<td>python:3.11-slim</td>
+<td>Python 3.11 standard library</td>
+</tr>
+<tr>
+<td><code>python-pytorch</code></td>
+<td>pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime</td>
+<td>PyTorch 2.6, CUDA 12.4, cuDNN 9, torchvision, torchaudio</td>
+</tr>
+</table>
+
+<p>
+The <code>python-pytorch</code> environment creates a virtualenv with
+<code>--system-site-packages</code> so you get the container's PyTorch
+for free. It also filters out <code>torch</code>, <code>torchvision</code>,
+and <code>torchaudio</code> from your <code>requirements.txt</code> to
+avoid conflicts.
+</p>
+
+<h2>setting precedence</h2>
+<p>Settings are merged in this order (later wins):</p>
+<ol>
+<li>Global defaults (<code>~/.tccp/config.yaml</code>)</li>
+<li>Project-level settings (top of <code>tccp.yaml</code>)</li>
+<li>Job-level settings (inside <code>jobs:</code>)</li>
+</ol>
+
+<h2>file sync</h2>
+<p>tccp syncs your project files to the compute node before each run.
+A few things to know:</p>
+<ul>
+<li>Respects <code>.gitignore</code> (or <code>.tccpignore</code> if
+present).</li>
+<li>Automatic exclusions: <code>.git/</code>, <code>__pycache__/</code>,
+<code>.venv/</code>, <code>node_modules/</code>, and other common
+directories.</li>
+<li>Only changed files are sent (incremental sync based on hashing).</li>
+<li>The <code>env</code> file is always synced, even if gitignored.</li>
+<li>Put <code>requirements.txt</code> in your project root &mdash; it's
+installed automatically, and cached by hash so unchanged deps are
+a no-op.</li>
+</ul>
+
+</body>
+</html>

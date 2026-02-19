@@ -11,13 +11,13 @@
 #ifdef _WIN32
 #  include <io.h>
 #  define read  _read
-#  define write _write
 #  ifndef STDIN_FILENO
 #    define STDIN_FILENO 0
 #  endif
 #  ifndef STDOUT_FILENO
 #    define STDOUT_FILENO 1
 #  endif
+   inline int write(int fd, const void* buf, unsigned int len) { return _write(fd, buf, len); }
 #else
 #  include <unistd.h>
 #endif

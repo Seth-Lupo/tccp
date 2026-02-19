@@ -12,44 +12,33 @@
 <nav>
 <a href="index.html">home</a>
 <a href="install.html">install</a>
-<a href="architecture.html">how it works</a>
-<a href="commands.html">commands</a>
 <a href="usage.html">usage</a>
+<a href="commands.html">commands</a>
+<a href="settings.html">settings</a>
+<a href="architecture.html">how it works</a>
 <a href="contact.html">contact</a>
 </nav>
 
-<h2>getting on the network</h2>
+<h2>getting started</h2>
 <p class="note">
-You need to be on the Tufts network to use tccp.
+You need to be on the Tufts network (Cisco AnyConnect VPN or campus WiFi).
 </p>
-<ul>
-<li><b>Cisco AnyConnect VPN</b> (recommended) &mdash; connect once and you're good.</li>
-<li><b>Tufts campus WiFi</b> &mdash; works fine, but requires MFA each time you start tccp.</li>
-</ul>
-
-<h2>first time</h2>
 <pre>
-# save your credentials (username, password, email)
-$ tccp setup
-
-# go to your project and register it
+$ tccp setup              <span class="c"># save credentials (one time)</span>
 $ cd my-ml-project
-$ tccp register
-
-# connect
-$ tccp
+$ tccp register           <span class="c"># set up your project (one time)</span>
+$ tccp                    <span class="c"># connect</span>
 </pre>
-<p>
-<code>tccp setup</code> and <code>tccp register</code> are one-time things.
-After that, you just run <code>tccp</code> from your project directory to
-connect and start working.
-</p>
 
 <h2>tccp.yaml</h2>
-<p>This lives in your project root. Here's a simple one:</p>
+<p>
+Lives in your project root. <code>tccp register</code> creates it for you,
+or write it by hand. Everything is optional &mdash; see
+<a href="settings.html">settings</a> for the full reference.
+</p>
 <pre>
 type: python-pytorch
-gpu: t4
+gpu: a100
 env: .env
 output: output
 cache: cache
@@ -57,132 +46,100 @@ cache: cache
 jobs:
   train:
     script: train.py
+    args: "--lr 0.001"
+    time: "4:00:00"
+    ports: [6006]
 </pre>
-<p>You can add more options per job. Everything here is optional &mdash;
-tccp has reasonable defaults for all of it:</p>
-<pre>
-jobs:
-  train:
-    script: train.py
-    time: "4:00:00"       # walltime limit (default: 1:00:00)
-    args: "--lr 0.001"    # default arguments
-    ports: [6006]         # auto-forwarded (tensorboard, jupyter, etc.)
-    memory: "16G"         # per node
-    gpu: a100             # override the project-level GPU
-    gpu_count: 2          # more than one GPU
-  eval:
-    script: eval.py
-    time: "0:30:00"
-</pre>
-
-<h2>secrets</h2>
 <p>
-Put API keys and tokens in a <code>.env</code> file in your project root.
-tccp syncs it to the compute node automatically, and it's never tracked
-by git.
+Put API keys in a <code>.env</code> file &mdash; tccp syncs it automatically
+and it's never tracked by git.
 </p>
-<pre>
-HF_TOKEN=hf_xxxxxxxxxxxxx
-WANDB_API_KEY=xxxxxxxxxx
-</pre>
-<p>Use <code>os.environ["HF_TOKEN"]</code> or <code>python-dotenv</code>
-to read them in your code.</p>
 
 <h2>running jobs</h2>
+<p>
+Type <code>run train</code> and tccp handles the rest: finds or creates a
+SLURM allocation, sets up the environment, syncs your code, and launches.
+This happens in the background so you can keep using the REPL. You can
+pass extra arguments inline or run multiple jobs at once.
+</p>
 <pre>
-tccp> run train
-</pre>
-<p>Behind the scenes, tccp:</p>
-<ol>
-<li>Finds an idle allocation or requests a new one from SLURM</li>
-<li>Makes sure the container, venv, and dtach are all set up</li>
-<li>Syncs your code to the compute node (only files that changed)</li>
-<li>Launches the job and attaches you to the output</li>
-</ol>
-<p>This all happens in the background. You can keep typing commands while
-it sets up, and you'll get notified as each step finishes.</p>
-
-<pre>
-# pass extra arguments to your script
 tccp> run train --epochs 100 --batch-size 64
-
-# run multiple jobs at once
-tccp> run train
 tccp> run eval
 </pre>
 
-<h2>interactivity</h2>
-
-<h3>attach and detach</h3>
+<h2>viewing output</h2>
 <p>
-<code>view</code> connects you to a running job's output stream. Hit
-<code>Ctrl+C</code> to detach &mdash; the job keeps running in the background.
-Come back anytime with <code>view</code> again.
-</p>
-<pre>
-tccp> view train
-... watching output ...
-(Ctrl+C)
-tccp> view train         # right back where you were
-</pre>
-
-<h3>scrolling through output</h3>
-<p>
-While you're viewing a job, <code>Up/Down</code> and <code>PgUp/PgDn</code>
-let you scroll through everything the job has printed so far.
-<code>q</code> exits scroll mode, <code>f</code> jumps back to following
-live output.
+When a job is running, <code>view</code> attaches you to the live output
+stream. <code>Ctrl+C</code> cancels the job, <code>Ctrl+\</code> detaches
+(job keeps running &mdash; reattach anytime with <code>view</code> again).
+<code>Ctrl+V</code> opens the full output buffer in your text editor
+(vim on macOS/Linux, nano on Windows) for searching and scrolling. You can
+also use the <code>output</code> command to do the same thing from the REPL.
 </p>
 
-<h3>getting a shell</h3>
+<!-- terminal mockup -->
+<svg viewBox="0 0 720 340" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:720px;margin:16px 0;border-radius:8px;overflow:hidden;">
+  <rect width="720" height="340" fill="#0c0c0c"/>
+  <rect width="720" height="28" fill="#222"/>
+  <circle cx="16" cy="14" r="5" fill="#ff5f56"/>
+  <circle cx="34" cy="14" r="5" fill="#ffbd2e"/>
+  <circle cx="52" cy="14" r="5" fill="#27c93f"/>
+  <text x="360" y="18" text-anchor="middle" fill="#888" font-family="monospace" font-size="11">Terminal</text>
+  <text x="14" y="54" fill="#c8b896" font-family="monospace" font-size="12">Epoch 1/50  loss=2.4183  acc=0.312  lr=0.001</text>
+  <text x="14" y="72" fill="#c8b896" font-family="monospace" font-size="12">Epoch 2/50  loss=1.8741  acc=0.445  lr=0.001</text>
+  <text x="14" y="90" fill="#c8b896" font-family="monospace" font-size="12">Epoch 3/50  loss=1.5029  acc=0.521  lr=0.001</text>
+  <text x="14" y="108" fill="#c8b896" font-family="monospace" font-size="12">Epoch 4/50  loss=1.2156  acc=0.598  lr=0.001</text>
+  <text x="14" y="126" fill="#c8b896" font-family="monospace" font-size="12">Epoch 5/50  loss=0.9847  acc=0.654  lr=0.001</text>
+  <text x="14" y="144" fill="#c8b896" font-family="monospace" font-size="12">Epoch 6/50  loss=0.8213  acc=0.701  lr=0.001</text>
+  <text x="14" y="162" fill="#c8b896" font-family="monospace" font-size="12">Epoch 7/50  loss=0.7104  acc=0.733  lr=0.001</text>
+  <text x="14" y="180" fill="#c8b896" font-family="monospace" font-size="12">Epoch 8/50  loss=0.6241  acc=0.758  lr=0.0005</text>
+  <text x="14" y="198" fill="#c8b896" font-family="monospace" font-size="12">Epoch 9/50  loss=0.5518  acc=0.779  lr=0.0005</text>
+  <text x="14" y="216" fill="#c8b896" font-family="monospace" font-size="12">Epoch 10/50 loss=0.4932  acc=0.801  lr=0.0005</text>
+  <text x="14" y="234" fill="#c8b896" font-family="monospace" font-size="12">Epoch 11/50 loss=0.4471  acc=0.815  lr=0.0005</text>
+  <text x="14" y="252" fill="#c8b896" font-family="monospace" font-size="12">Epoch 12/50 loss=0.4089  acc=0.828  lr=0.0005</text>
+  <rect x="14" y="260" width="8" height="14" fill="#c8b896" opacity="0.7">
+    <animate attributeName="opacity" values="0.7;0;0.7" dur="1.2s" repeatCount="indefinite"/>
+  </rect>
+  <rect y="284" width="720" height="26" fill="#3e3e3e"/>
+  <text x="10" y="302" fill="#3e78b2" font-family="monospace" font-size="12" font-weight="bold">tccp</text>
+  <text x="42" y="302" fill="#b2b2b2" font-family="monospace" font-size="12"> | train | SLURM:48291 | c0178</text>
+  <rect y="310" width="720" height="30" fill="#55483e"/>
+  <text x="10" y="330" fill="#c8b896" font-family="monospace" font-size="12">RUNNING</text>
+  <text x="390" y="330" fill="#787878" font-family="monospace" font-size="11">Ctrl+C cancel  Ctrl+\ detach  Ctrl+V output</text>
+</svg>
+
+<h2>interactive shell</h2>
 <p>
-<code>open</code> puts you inside a bash shell on the compute node, running
-inside the same Singularity container as your job. Your code is there, your
-venv is active, all your env vars are set.
+<code>open</code> drops you into a bash shell on the compute node, inside
+the same container as your job. Your code, venv, and env vars are all there.
 </p>
 <pre>
 tccp> open train
-train@c0001> python -c "import torch; print(torch.cuda.is_available())"
+train@c0178> python -c "import torch; print(torch.cuda.is_available())"
 True
-train@c0001> exit
 </pre>
 
-<h2>jobs survive disconnects</h2>
+<h2>disconnects and output</h2>
 <p>
-If your laptop sleeps, your WiFi drops, or you just close the terminal,
-your jobs keep running on the cluster. Next time you run <code>tccp</code>,
-everything's still there.
-</p>
-<pre>
-$ tccp
-tccp> jobs               # all your jobs, still going
-tccp> view train         # reattach like nothing happened
-</pre>
-<p>
-When a job finishes, tccp downloads the output for you automatically. If
-you happen to be disconnected when it completes, it'll download next time
-you connect.
+Jobs survive disconnects. If your laptop sleeps or your WiFi drops, the
+job keeps running. Reconnect with <code>tccp</code> and everything is
+still there. When a job finishes, output is downloaded to your machine
+automatically &mdash; if you're offline, it downloads next time you connect.
 </p>
 
-<h2>allocation reuse</h2>
+<h2>allocations</h2>
 <p>
-tccp doesn't throw away SLURM allocations when a job finishes. If you run
-another job that needs the same resources, it reuses the existing node
-instead of waiting in the queue again.
-</p>
-<pre>
-tccp> allocs             # see what you have
-tccp> dealloc all        # release everything when you're done for the day
-</pre>
-<p class="note">
-Heads up: idle allocations still burn SUs. Don't forget to release them
-when you're done working.
+tccp reuses SLURM allocations across jobs. If you run a second job that
+needs the same resources, it skips the queue and launches instantly.
+When you exit tccp, idle allocations are released automatically.
+You can also manage them manually with <code>allocs</code> and
+<code>dealloc</code>.
 </p>
 
 <h2>port forwarding</h2>
 <p>
-If your job runs a web server (TensorBoard, Jupyter, etc.), declare the
-ports in your config and they get forwarded to localhost automatically.
+Declare ports in your config and they're forwarded to localhost automatically.
+No SSH tunnel setup &mdash; just open <code>http://localhost:6006</code>.
 </p>
 <pre>
 jobs:
@@ -190,39 +147,15 @@ jobs:
     script: train.py
     ports: [6006]
 </pre>
-<p>
-Then just open <code>http://localhost:6006</code> in your browser. No
-SSH tunnel setup needed.
-</p>
-
-<h2>storage and caching</h2>
-<p>
-You don't need to think about this much, but it's good to know:
-</p>
-<ul>
-<li>Your home directory has a small quota. tccp keeps only persistent
-things there (container images, venvs, output files) and manages them
-with LRU cleanup.</li>
-<li>All runtime caches (pip, torch, HuggingFace) are redirected to
-compute node /tmp, so they never eat into your quota.</li>
-<li>Container pulls happen on the compute node where /tmp is large,
-not on the DTN or your home dir. The final .sif is stored on NFS
-so it's only pulled once.</li>
-<li><code>requirements.txt</code> is installed automatically before each
-run. tccp caches by hash, so if nothing changed it's a no-op.</li>
-<li>The <code>cache</code> directory persists across jobs on the same
-node &mdash; good for datasets or checkpoints you don't want to
-re-download every run.</li>
-<li>The <code>output</code> directory lives on NFS and gets synced back
-to your laptop after each job finishes.</li>
-</ul>
 
 <h2>good to know</h2>
-<ul>
-<li>Your <code>.gitignore</code> (or <code>.tccpignore</code>) controls which files get synced. Keep large data files out.</li>
-<li>If /tmp gets wiped (node reboot), tccp detects it and does a fresh sync automatically.</li>
-<li>Changed your tccp.yaml? Type <code>refresh</code> to pick up the changes without reconnecting.</li>
-</ul>
+<p>
+Your <code>.gitignore</code> (or <code>.tccpignore</code>) controls which
+files get synced &mdash; keep large data out. <code>requirements.txt</code>
+is installed automatically and cached by hash, so unchanged deps are a no-op.
+If you edit <code>tccp.yaml</code>, type <code>refresh</code> to pick up
+changes without reconnecting.
+</p>
 
 </body>
 </html>

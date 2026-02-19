@@ -13,9 +13,10 @@
 <nav>
 <a href="index.html">home</a>
 <a href="install.html">install</a>
-<a href="architecture.html">how it works</a>
-<a href="commands.html">commands</a>
 <a href="usage.html">usage</a>
+<a href="commands.html">commands</a>
+<a href="settings.html">settings</a>
+<a href="architecture.html">how it works</a>
 <a href="contact.html">contact</a>
 </nav>
 
@@ -30,7 +31,7 @@ browser notebooks. I just wanted to write and run my code as if it were
 </p>
 <p>
 HPC clusters have real constraints. Your home directory is 30GB &mdash;
-that fills up fast once you start pulling containers and installing
+that fills up fast once you start using datasets and installing
 packages. Scratch space is big but gets wiped. Figuring out what goes
 where, cleaning up after yourself, and not blowing your quota is a whole
 second job on top of the actual work.
@@ -45,7 +46,7 @@ tccp takes care of all of that for you! Just pretend you're local with JUMBO com
 You work in your own editor, on your own machine. When you're ready to
 run, you type <code>run train</code>. tccp syncs your code, makes sure
 everything is set up on the cluster, and starts the job. Output streams
-to your terminal in real time. You can detach, go get coffee, come back
+to your terminal for realtime interactive use. You can detach, go get coffee, come back
 and reattach. If your WiFi dies, the job keeps running. Your results
 download automatically when it finishes.
 </p>
@@ -74,36 +75,32 @@ you stay in your own setup and just sends the work to the cluster.
 
 <h2>what you get</h2>
 <ul>
-<li>Edit locally, run remotely &mdash; your editor, your tools, their GPUs</li>
-<li>One command to go from code change to running job</li>
-<li>Jobs survive disconnects &mdash; close your laptop, come back later, reattach</li>
-<li>Your requirements.txt installs automatically (and only when it changes)</li>
-<li>Port forwarding for TensorBoard, Jupyter, or anything else you run</li>
-<li>Drop into an interactive shell on the compute node whenever you need to poke around</li>
-<li>Output files come back to your laptop when the job's done</li>
-<li>Storage just works &mdash; you never have to think about quotas or cleanup</li>
+<li>Edit locally, run remotely. Your editor, their GPUs.</li>
+<li>One command from code change to running job</li>
+<li>Jobs survive disconnects</li>
+<li>Dependencies install automatically</li>
+<li>Port forwarding for TensorBoard, Jupyter, etc.</li>
+<li>Output downloads when the job finishes</li>
+<li>Storage managed for you (no quota headaches)</li>
 </ul>
-<p>
-For the details on what's happening behind the scenes, see
-<a href="architecture.html">how it works</a>.
-</p>
 
 <h2>quick start</h2>
 <pre>
-# install the binary (see install page)
+<span class="c"># install the binary (see install page)</span>
 
-# save your credentials once
+<span class="c"># save your credentials once</span>
 $ tccp setup
 
-# set up your project
+<span class="c"># set up your project</span>
 $ cd my-project
 $ tccp register
 
-# connect and run
+<span class="c"># connect and run</span>
 $ tccp
 tccp> run train
 </pre>
 
-<p class="dim">v0.3.1 &mdash; built for the Tufts HPC cluster</p>
+<p class="dim">v<span class="ver"></span> &mdash; built for the Tufts HPC cluster</p>
+<script src="version.js"></script>
 </body>
 </html>
