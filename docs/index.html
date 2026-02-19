@@ -23,11 +23,11 @@
 <div class="hero">
 <h2>why this exists</h2>
 <p>
-I just wanted to code. Open my editor, change a file, run it on a GPU.
-The same loop I'd have locally. I didn't want to write SLURM batch scripts
-or manually sync files. I didn't want to click through a web UI or use
-browser notebooks. I just wanted to write and run my code as if it were
-<b>local</b>.
+Running code on an HPC cluster shouldn't feel different from running it
+on your laptop. Open your editor, change a file, run it on a GPU. But
+the usual workflow is: write a SLURM batch script, scp your code over,
+submit, check the queue, scp results back. Or use a web UI with a clunky browser notebook. tccp replaces all of that with a
+single CLI that makes the cluster feel <b>local</b>.
 </p>
 <p>
 HPC clusters have real constraints. Your home directory is 30GB &mdash;
