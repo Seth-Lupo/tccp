@@ -9,7 +9,17 @@
 #include <iostream>
 #include <libssh2.h>
 #include <fmt/format.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#  include <io.h>
+#  define read  _read
+#  define write _write
+#  ifndef STDIN_FILENO
+#    define STDIN_FILENO 0
+#  endif
+#  ifndef STDOUT_FILENO
+#    define STDOUT_FILENO 1
+#  endif
+#else
 #  include <unistd.h>
 #  include <poll.h>
 #endif
@@ -133,7 +143,7 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
             int new_cols = platform::term_width();
             int new_rows = platform::term_height();
             state.cols = new_cols;
-            int new_pty = std::max(1, new_rows - TerminalUI::HEADER_ROWS);
+            int new_pty = (std::max)(1, new_rows - TerminalUI::HEADER_ROWS);
             state.pty_rows = new_pty;
             std::string sr = fmt::format("\033[1;{}r", new_pty);
             write(STDOUT_FILENO, sr.data(), sr.size());
@@ -301,7 +311,7 @@ Result<int> JobView::attach(bool skip_remote_replay) {
 
     int cols = platform::term_width();
     int rows = platform::term_height();
-    int pty_rows = std::max(1, rows - TerminalUI::HEADER_ROWS);
+    int pty_rows = (std::max)(1, rows - TerminalUI::HEADER_ROWS);
 
     std::cout.flush();
 

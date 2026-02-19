@@ -7,7 +7,17 @@
 #include <platform/terminal.hpp>
 #include <iostream>
 #include <chrono>
-#ifndef _WIN32
+#ifdef _WIN32
+#  include <io.h>
+#  define read  _read
+#  define write _write
+#  ifndef STDIN_FILENO
+#    define STDIN_FILENO 0
+#  endif
+#  ifndef STDOUT_FILENO
+#    define STDOUT_FILENO 1
+#  endif
+#else
 #  include <unistd.h>
 #endif
 #include <fmt/format.h>
