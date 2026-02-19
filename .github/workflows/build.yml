@@ -29,18 +29,17 @@ jobs:
       with:
         submodules: true
 
-    - name: Setup vcpkg
-      uses: lukka/run-vcpkg@v11
+    - name: Cache vcpkg installed packages
+      uses: actions/cache@v4
       with:
-        vcpkgDirectory: ${{ github.workspace }}/vcpkg
-        appendedCacheKey: ${{ matrix.triplet }}
-        additionalCachedPaths: ${{ github.workspace }}/build
+        path: build/vcpkg_installed
+        key: vcpkg-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json') }}
 
     - name: Configure CMake
       run: cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DTCCP_STATIC_BUILD=ON -DCMAKE_BUILD_TYPE=Release
 
     - name: Build
-      run: cmake --build build --config Release
+      run: cmake --build build --config Release --parallel
 
     - name: Strip binary (Unix)
       if: runner.os != 'Windows'
