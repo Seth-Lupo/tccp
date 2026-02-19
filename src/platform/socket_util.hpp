@@ -3,7 +3,9 @@
 // Cross-platform socket utilities.
 
 #ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
    using socket_t = SOCKET;

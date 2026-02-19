@@ -162,18 +162,18 @@ SSHResult SessionManager::establish_connection(StatusCallback callback) {
 
     // Enable TCP keepalive on the socket
     int tcp_keepalive = 1;
-    setsockopt(sock_, SOL_SOCKET, SO_KEEPALIVE, &tcp_keepalive, sizeof(tcp_keepalive));
+    setsockopt(sock_, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&tcp_keepalive), sizeof(tcp_keepalive));
     int keepidle = 60;
     int keepintvl = 15;
     int keepcnt = 4;
 #ifdef TCP_KEEPIDLE
-    setsockopt(sock_, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+    setsockopt(sock_, IPPROTO_TCP, TCP_KEEPIDLE, reinterpret_cast<const char*>(&keepidle), sizeof(keepidle));
 #endif
 #ifdef TCP_KEEPINTVL
-    setsockopt(sock_, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+    setsockopt(sock_, IPPROTO_TCP, TCP_KEEPINTVL, reinterpret_cast<const char*>(&keepintvl), sizeof(keepintvl));
 #endif
 #ifdef TCP_KEEPCNT
-    setsockopt(sock_, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+    setsockopt(sock_, IPPROTO_TCP, TCP_KEEPCNT, reinterpret_cast<const char*>(&keepcnt), sizeof(keepcnt));
 #endif
 
     // Enable SSH keepalive (send every 30s, allow 3 missed)

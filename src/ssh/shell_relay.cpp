@@ -2,11 +2,19 @@
 #include "connection_factory.hpp"
 #include <platform/platform.hpp>
 #include <platform/terminal.hpp>
+#include <platform/socket_util.hpp>
 #include <libssh2.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#  include <io.h>
+#  define STDIN_FILENO  0
+#  define STDOUT_FILENO 1
+#  define read  _read
+#  define write _write
+#else
 #  include <unistd.h>
 #  include <poll.h>
 #endif
+#include <algorithm>
 
 static const std::string DONE_MARKER = "__TCCP_DONE__";
 // Shell string splitting: DO''NE prevents the marker from appearing in PTY echo.
@@ -65,7 +73,7 @@ std::string ShellRelay::feed(const char* data, int len) {
     // Only hold back bytes that could be the start of the done marker.
     // Check if the tail of buf_ matches a prefix of DONE_MARKER.
     size_t hold = 0;
-    for (size_t i = 1; i <= std::min(buf_.size(), DONE_MARKER.size()); i++) {
+    for (size_t i = 1; i <= (std::min)(buf_.size(), DONE_MARKER.size()); i++) {
         if (buf_.compare(buf_.size() - i, i, DONE_MARKER, 0, i) == 0)
             hold = i;
     }
