@@ -1,6 +1,6 @@
 # tccp installer for Windows
 
-$repo = "sethlupo/tccp"
+$repo = "Seth-Lupo/tccp"
 $binary = "tccp-windows-x64.exe"
 $url = "https://github.com/$repo/releases/latest/download/$binary"
 $installDir = "$env:LOCALAPPDATA\tccp"

@@ -3,7 +3,7 @@ set -e
 
 # tccp installer for macOS and Linux
 
-REPO="sethlupo/tccp"
+REPO="Seth-Lupo/tccp"
 
 # detect platform
 OS=$(uname -s)

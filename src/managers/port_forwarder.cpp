@@ -2,9 +2,14 @@
 #include "job_log.hpp"
 #include <ssh/connection_factory.hpp>
 #include <platform/platform.hpp>
+#include <platform/socket_util.hpp>
 #include <fmt/format.h>
 #include <libssh2.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#  include <io.h>
+#  define read  _read
+#  define write _write
+#else
 #  include <unistd.h>
 #  include <sys/socket.h>
 #  include <netinet/in.h>
@@ -71,8 +76,12 @@ static void forward_connection(ConnectionFactory& factory,
 
     while (!stop_flag.load()) {
         // Poll local client socket for incoming data (100ms timeout)
-        struct pollfd pfd = {client_fd, POLLIN, 0};
+        struct pollfd pfd = {static_cast<socket_t>(client_fd), POLLIN, 0};
+#ifdef _WIN32
+        int pr = WSAPoll(&pfd, 1, 100);
+#else
         int pr = poll(&pfd, 1, 100);
+#endif
 
         // local → channel
         if (pr > 0 && (pfd.revents & POLLIN)) {
@@ -129,7 +138,11 @@ done:
         libssh2_channel_close(ch);
         libssh2_channel_free(ch);
     }
+#ifdef _WIN32
+    closesocket(client_fd);
+#else
     close(client_fd);
+#endif
 }
 
 void PortForwarder::tunnel_thread(ConnectionFactory& factory,
@@ -139,12 +152,20 @@ void PortForwarder::tunnel_thread(ConnectionFactory& factory,
 
     while (!stop_flag.load()) {
         // Accept with timeout so we can check stop flag
-        struct pollfd pfd = {listen_fd, POLLIN, 0};
+        struct pollfd pfd = {static_cast<socket_t>(listen_fd), POLLIN, 0};
+#ifdef _WIN32
+        int pr = WSAPoll(&pfd, 1, 500);
+#else
         int pr = poll(&pfd, 1, 500);
+#endif
         if (pr <= 0) continue;
 
         struct sockaddr_in client_addr{};
+#ifdef _WIN32
+        int len = sizeof(client_addr);
+#else
         socklen_t len = sizeof(client_addr);
+#endif
         int client = accept(listen_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &len);
         if (client < 0) continue;
 
@@ -152,7 +173,11 @@ void PortForwarder::tunnel_thread(ConnectionFactory& factory,
         LIBSSH2_CHANNEL* ch = factory.tunnel(compute_node, port);
         if (!ch) {
             tccp_log(fmt::format("PortForwarder: direct-tcpip to {}:{} failed", compute_node, port));
+#ifdef _WIN32
+            closesocket(client);
+#else
             close(client);
+#endif
             continue;
         }
 
@@ -195,7 +220,7 @@ std::vector<std::shared_ptr<TunnelHandle>> PortForwarder::start(
         }
 
         int reuse = 1;
-        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -204,13 +229,13 @@ std::vector<std::shared_ptr<TunnelHandle>> PortForwarder::start(
 
         if (bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
             emit(fmt::format("bind() failed for port {}", port));
-            close(listen_fd);
+            platform::close_socket(listen_fd);
             continue;
         }
 
         if (listen(listen_fd, 8) < 0) {
             emit(fmt::format("listen() failed for port {}", port));
-            close(listen_fd);
+            platform::close_socket(listen_fd);
             continue;
         }
 
