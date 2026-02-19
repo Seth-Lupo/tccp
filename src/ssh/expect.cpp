@@ -5,6 +5,10 @@
 
 ExpectMatcher::ExpectMatcher() = default;
 
+void ExpectMatcher::set_io_mutex(std::shared_ptr<std::mutex> mtx) {
+    io_mutex_ = std::move(mtx);
+}
+
 MatchResult ExpectMatcher::expect(
     LIBSSH2_CHANNEL* channel,
     const std::vector<Pattern>& patterns,
@@ -55,13 +59,15 @@ MatchResult ExpectMatcher::expect(
 
 std::string ExpectMatcher::read_nonblocking(LIBSSH2_CHANNEL* channel) {
     char buf[4096];
-    int n = libssh2_channel_read(channel, buf, sizeof(buf) - 1);
-
-    if (n == LIBSSH2_ERROR_EAGAIN) {
-        return "";
+    int n;
+    if (io_mutex_) {
+        std::lock_guard<std::mutex> lock(*io_mutex_);
+        n = libssh2_channel_read(channel, buf, sizeof(buf) - 1);
+    } else {
+        n = libssh2_channel_read(channel, buf, sizeof(buf) - 1);
     }
 
-    if (n < 0) {
+    if (n == LIBSSH2_ERROR_EAGAIN || n < 0) {
         return "";
     }
 
@@ -85,9 +91,8 @@ bool ExpectMatcher::check_patterns(const std::string& buffer,
 }
 
 bool ExpectMatcher::wait_for_data(LIBSSH2_CHANNEL* channel, std::chrono::milliseconds timeout) {
-    // Since libssh2 handles the socket internally, we can't directly select on it
-    // Instead, we rely on non-blocking reads and small sleep intervals
-    // This is acceptable for SSH channel operations
+    // Since libssh2 handles the socket internally, we can't directly select on it.
+    // We rely on non-blocking reads and small sleep intervals.
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     return true;
 }

@@ -80,36 +80,40 @@ ShellRelay ConnectionFactory::shell() {
 // ── Channel grants ─────────────────────────────────────────────
 
 LIBSSH2_CHANNEL* ConnectionFactory::exec_channel() {
-    std::lock_guard<std::mutex> lock(*session_->io_mutex());
-
+    auto io_mtx = session_->io_mutex();
     LIBSSH2_SESSION* ssh = session_->get_raw_session();
     if (!ssh) return nullptr;
 
     LIBSSH2_CHANNEL* ch = nullptr;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (std::chrono::steady_clock::now() < deadline) {
-        ch = libssh2_channel_open_session(ssh);
+        {
+            std::lock_guard<std::mutex> lock(*io_mtx);
+            ch = libssh2_channel_open_session(ssh);
+            if (!ch && libssh2_session_last_errno(ssh) != LIBSSH2_ERROR_EAGAIN)
+                return nullptr;
+        }
         if (ch) break;
-        if (libssh2_session_last_errno(ssh) != LIBSSH2_ERROR_EAGAIN)
-            return nullptr;
         platform::sleep_ms(10);
     }
     return ch;
 }
 
 LIBSSH2_CHANNEL* ConnectionFactory::tunnel(const std::string& host, int port) {
-    std::lock_guard<std::mutex> lock(*session_->io_mutex());
-
+    auto io_mtx = session_->io_mutex();
     LIBSSH2_SESSION* ssh = session_->get_raw_session();
     if (!ssh) return nullptr;
 
     LIBSSH2_CHANNEL* ch = nullptr;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (std::chrono::steady_clock::now() < deadline) {
-        ch = libssh2_channel_direct_tcpip(ssh, host.c_str(), port);
+        {
+            std::lock_guard<std::mutex> lock(*io_mtx);
+            ch = libssh2_channel_direct_tcpip(ssh, host.c_str(), port);
+            if (!ch && libssh2_session_last_errno(ssh) != LIBSSH2_ERROR_EAGAIN)
+                return nullptr;
+        }
         if (ch) break;
-        if (libssh2_session_last_errno(ssh) != LIBSSH2_ERROR_EAGAIN)
-            return nullptr;
         platform::sleep_ms(10);
     }
     return ch;

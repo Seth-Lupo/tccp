@@ -86,6 +86,7 @@ void JobView::draw_header(bool terminated, int exit_code, bool canceled) {
 
 Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
     LIBSSH2_CHANNEL* ch = relay.channel();
+    auto io_mtx = relay.io_mutex();
     int sock = relay.socket();
 
     char buf[16384];
@@ -137,7 +138,10 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
             std::string sr = fmt::format("\033[1;{}r", new_pty);
             write(STDOUT_FILENO, sr.data(), sr.size());
             draw_header();
-            libssh2_channel_request_pty_size(ch, new_cols, new_pty);
+            {
+                std::lock_guard<std::mutex> lock(*io_mtx);
+                libssh2_channel_request_pty_size(ch, new_cols, new_pty);
+            }
         }
 
         // ── stdin → remote ──────────────────────────────────────
@@ -193,7 +197,11 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
                     int send_len = static_cast<int>(input_buffer.size());
                     int sent = 0;
                     while (sent < send_len) {
-                        int w = libssh2_channel_write(ch, send_buf + sent, send_len - sent);
+                        int w;
+                        {
+                            std::lock_guard<std::mutex> lock(*io_mtx);
+                            w = libssh2_channel_write(ch, send_buf + sent, send_len - sent);
+                        }
                         if (w == LIBSSH2_ERROR_EAGAIN) continue;
                         if (w < 0) { write_error = true; break; }
                         sent += w;
@@ -220,7 +228,11 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
         if (sock_ready) {
             bool got_output = false;
             for (;;) {
-                int n = libssh2_channel_read(ch, buf, sizeof(buf));
+                int n;
+                {
+                    std::lock_guard<std::mutex> lock(*io_mtx);
+                    n = libssh2_channel_read(ch, buf, sizeof(buf));
+                }
                 if (n <= 0) break;
 
                 // ShellRelay handles echo skip + done marker
@@ -265,8 +277,14 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
             }
         }
 
-        if (libssh2_channel_eof(ch))
-            break;
+        {
+            bool eof;
+            {
+                std::lock_guard<std::mutex> lock(*io_mtx);
+                eof = libssh2_channel_eof(ch);
+            }
+            if (eof) break;
+        }
     }
 
     if (user_detached)

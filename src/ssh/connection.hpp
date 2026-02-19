@@ -4,7 +4,6 @@
 #include <memory>
 #include <mutex>
 #include <core/types.hpp>
-#include "result.hpp"
 
 namespace fs = std::filesystem;
 

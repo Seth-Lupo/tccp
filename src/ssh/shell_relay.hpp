@@ -11,21 +11,23 @@ typedef struct _LIBSSH2_CHANNEL LIBSSH2_CHANNEL;
 //
 // The primary shell channel is the ONLY channel with Kerberos tickets,
 // making it the sole safe path for SSH hops to login/compute nodes.
-// All operations are serialized via the session mutex.
+// Commands are serialized via the shared cmd_mutex (blocks dtn_/login_
+// while the relay is active, but io_mutex_ holds are brief so health
+// checks and port forwarding continue).
 //
-// Protocol: send command → skip echoed command line → relay output →
-//           detect done marker → drain. On early exit, Ctrl+C kills
+// Protocol: send command -> skip echoed command line -> relay output ->
+//           detect done marker -> drain. On early exit, Ctrl+C kills
 //           the running command before draining.
 //
 // Simple usage (raw stdin/stdout relay):
-//     ShellRelay relay(mux);
+//     ShellRelay relay(factory);
 //     relay.run("ssh -t login 'bash'");
 //
 // Advanced usage (custom relay loop):
-//     ShellRelay relay(mux);
+//     ShellRelay relay(factory);
 //     if (!relay.start("ssh -t compute '...'")) return;
 //     while (!relay.done()) {
-//         int n = libssh2_channel_read(relay.channel(), buf, sizeof(buf));
+//         int n; // read from relay.channel() under relay.io_mutex()
 //         std::string text = relay.feed(buf, n);
 //         // custom output processing...
 //     }
@@ -44,7 +46,7 @@ public:
 
     // ── Advanced lifecycle ──────────────────────────────────────
 
-    // Lock session, drain stale data, send command with done marker.
+    // Acquire cmd_mutex, drain stale data, send command with done marker.
     // Returns false if channel unavailable.
     bool start(const std::string& command);
 
@@ -57,12 +59,13 @@ public:
     bool done() const;
 
     // Clean up. Sends Ctrl+C if command still running. Drains channel.
-    // Releases session lock. Safe to call multiple times.
+    // Releases cmd_mutex. Safe to call multiple times.
     void stop();
 
-    // ── Raw access ─────────────────────────────────────────────
+    // ── Raw access (for callers that need direct channel I/O) ──
 
     LIBSSH2_CHANNEL* channel() const;
+    std::shared_ptr<std::mutex> io_mutex() const;
     int socket() const;
 
 private:

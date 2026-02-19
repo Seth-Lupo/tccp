@@ -560,9 +560,10 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
                 }
             }
 
-            cancel_mutex_.lock();
-            cancel_requested_.erase(job_id);
-            cancel_mutex_.unlock();
+            {
+                std::lock_guard<std::mutex> cancel_lock(cancel_mutex_);
+                cancel_requested_.erase(job_id);
+            }
         }
 
         for (auto& js : allocs_.state().jobs) {

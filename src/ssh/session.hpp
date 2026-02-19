@@ -5,7 +5,6 @@
 #include <optional>
 #include <string>
 #include <core/types.hpp>
-#include "result.hpp"
 #include "auth.hpp"
 
 // libssh2 forward declarations

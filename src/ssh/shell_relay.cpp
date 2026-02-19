@@ -108,7 +108,8 @@ void ShellRelay::stop() {
 }
 
 LIBSSH2_CHANNEL* ShellRelay::channel() const { return ch_; }
-int ShellRelay::socket() const { return factory_.raw_socket(); }
+std::shared_ptr<std::mutex> ShellRelay::io_mutex() const { return io_mutex_; }
+int ShellRelay::socket() const { return sock_; }
 
 // ── Simple interface ───────────────────────────────────────────
 

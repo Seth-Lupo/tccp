@@ -332,16 +332,32 @@ SSHResult SessionManager::wait_for_prompt(LIBSSH2_CHANNEL* chan, StatusCallback 
 }
 
 void SessionManager::close() {
-    std::lock_guard<std::mutex> lock(*io_mutex_);
+    // Mark inactive first so concurrent operations bail out early
+    active_ = false;
+
+    // Each libssh2 call gets its own brief lock — avoids blocking other
+    // operations for the entire disconnect sequence (which does network I/O).
     if (channel_) {
-        libssh2_channel_close(channel_);
-        libssh2_channel_free(channel_);
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            libssh2_channel_close(channel_);
+        }
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            libssh2_channel_free(channel_);
+        }
         channel_ = nullptr;
     }
 
     if (session_) {
-        libssh2_session_disconnect(session_, "Normal disconnection");
-        libssh2_session_free(session_);
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            libssh2_session_disconnect(session_, "Normal disconnection");
+        }
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            libssh2_session_free(session_);
+        }
         session_ = nullptr;
     }
 
@@ -349,8 +365,6 @@ void SessionManager::close() {
         platform::close_socket(sock_);
         sock_ = -1;
     }
-
-    active_ = false;
 }
 
 bool SessionManager::is_active() const {

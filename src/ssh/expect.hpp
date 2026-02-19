@@ -5,6 +5,7 @@
 #include <regex>
 #include <chrono>
 #include <memory>
+#include <mutex>
 
 // libssh2 forward declaration
 typedef struct _LIBSSH2_SESSION LIBSSH2_SESSION;
@@ -34,6 +35,10 @@ class ExpectMatcher {
 public:
     ExpectMatcher();
 
+    // Set io_mutex for thread-safe libssh2 access. Optional — if not set,
+    // calls are unprotected (safe only during single-threaded init).
+    void set_io_mutex(std::shared_ptr<std::mutex> mtx);
+
     MatchResult expect(
         LIBSSH2_CHANNEL* channel,
         const std::vector<Pattern>& patterns,
@@ -45,6 +50,7 @@ public:
 
 private:
     std::string buffer_;
+    std::shared_ptr<std::mutex> io_mutex_;
 
     std::string read_nonblocking(LIBSSH2_CHANNEL* channel);
     bool check_patterns(const std::string& buffer,

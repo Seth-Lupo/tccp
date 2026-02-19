@@ -4,7 +4,6 @@
 #include <mutex>
 #include <string>
 #include <core/types.hpp>
-#include "result.hpp"
 
 // libssh2 forward declarations
 typedef struct _LIBSSH2_SESSION LIBSSH2_SESSION;
