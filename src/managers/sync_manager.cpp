@@ -114,7 +114,8 @@ static fs::path create_local_tar(const fs::path& project_dir,
     return tar_path;
 }
 
-// Pipe tar to compute node via single nested SSH command.
+// Pipe tar to compute node via base64 heredoc through the primary shell channel.
+// This avoids opening an exec channel (which triggers Duo re-auth on some clusters).
 // Includes mkdir, tar extract, and verification probe in one round-trip.
 // Returns true if verification probe file was found after extraction.
 bool SyncManager::pipe_tar_to_node(const fs::path& tar_path,
@@ -132,17 +133,27 @@ bool SyncManager::pipe_tar_to_node(const fs::path& tar_path,
     tar_file.read(tar_data.data(), file_size);
     tar_file.close();
 
-    // Single SSH command: mkdir + extract + verify probe file.
-    // All in one nested SSH hop to avoid multiple round-trips.
+    // Base64-encode the tar for binary-safe transfer through the PTY shell channel.
+    // Split into 76-char lines (standard base64 line length).
+    std::string encoded = base64_encode(tar_data);
+    std::string b64_lines;
+    for (size_t i = 0; i < encoded.size(); i += 76) {
+        b64_lines += encoded.substr(i, 76) + "\n";
+    }
+
+    // Single command through primary shell: decode base64, pipe through SSH hop
+    // to compute node where it's extracted. Verify with probe file.
     std::string cmd = fmt::format(
-        "ssh {} {} '"
+        "base64 -d << 'TCCP_B64_EOF' | ssh -T {} {} '"
         "mkdir -p {} && cd {} && tar xf - 2>/dev/null; "
-        "test -f {}/{} && echo TCCP_SYNC_OK'",
+        "test -f {}/{} && echo TCCP_SYNC_OK'\n"
+        "{}TCCP_B64_EOF",
         SSH_OPTS, compute_node,
         scratch_path, scratch_path,
-        scratch_path, probe_file);
+        scratch_path, probe_file,
+        b64_lines);
 
-    auto result = dtn_.run_with_input(cmd, tar_data.data(), tar_data.size());
+    auto result = dtn_.run(cmd, 120);
     if (result.failed()) {
         throw std::runtime_error(fmt::format(
             "File sync failed: {}. Check SSH connectivity to DTN.", result.stderr_data));

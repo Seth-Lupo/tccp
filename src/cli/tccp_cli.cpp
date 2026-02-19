@@ -284,16 +284,8 @@ void TCCPCLI::monitor_loop() {
             }
         }
 
-        // Watcher fired — a job's dtach socket disappeared.
-        // Run full poll (SSH confirm + cleanup) before collecting events
-        // so collect_job_events() sees the completed state in the same cycle.
-        std::vector<std::string> output_msgs;
-        if (service.job_manager() && service.job_manager()->consume_watcher_event()) {
-            poll_and_return_output(&output_msgs);
-            last_ssh_poll = now;  // reset fallback timer
-        }
-
         // Local state diff to detect init-thread and completion transitions
+        std::vector<std::string> output_msgs;
         auto msgs = collect_job_events();
 
         // Print notifications + output messages as a grouped block

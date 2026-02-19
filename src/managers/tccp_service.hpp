@@ -6,7 +6,7 @@
 #include <optional>
 #include <functional>
 #include <core/config.hpp>
-#include <ssh/cluster_connection.hpp>
+#include <ssh/connection_factory.hpp>
 #include "state_store.hpp"
 #include "allocation_manager.hpp"
 #include "sync_manager.hpp"
@@ -44,7 +44,7 @@ public:
 
     // ── Connection lifecycle ──────────────────────────────────
 
-    // Connect to the cluster. Loads config, creates ClusterConnection, inits managers.
+    // Connect to the cluster. Loads config, creates ConnectionFactory, inits managers.
     // Returns error string on failure, empty on success.
     Result<void> connect(StatusCallback cb = nullptr);
 
@@ -120,14 +120,14 @@ public:
 
     // ── Direct accessors for CLI-specific needs (e.g. JobView) ──
 
-    ClusterConnection* cluster() { return cluster_.get(); }
+    ConnectionFactory* cluster() { return cluster_.get(); }
     JobManager* job_manager() { return jobs_.get(); }
     AllocationManager* alloc_manager() { return allocs_.get(); }
     StateStore* state_store() { return state_store_.get(); }
 
 private:
     std::optional<Config> config_;
-    std::unique_ptr<ClusterConnection> cluster_;
+    std::unique_ptr<ConnectionFactory> cluster_;
     std::unique_ptr<StateStore> state_store_;
     std::unique_ptr<AllocationManager> allocs_;
     std::unique_ptr<SyncManager> sync_;

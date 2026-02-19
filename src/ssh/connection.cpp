@@ -7,8 +7,9 @@
 #include <chrono>
 #include <thread>
 
-SSHConnection::SSHConnection(LIBSSH2_CHANNEL* channel, LIBSSH2_SESSION* session)
-    : channel_(channel), session_(session) {
+SSHConnection::SSHConnection(LIBSSH2_CHANNEL* channel, LIBSSH2_SESSION* session,
+                             std::shared_ptr<std::recursive_mutex> session_mutex)
+    : channel_(channel), session_(session), session_mutex_(std::move(session_mutex)) {
 }
 
 bool SSHConnection::is_active() const {
@@ -16,7 +17,7 @@ bool SSHConnection::is_active() const {
 }
 
 SSHResult SSHConnection::run(const std::string& command, int timeout_secs) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(*session_mutex_);
     if (!channel_) {
         return SSHResult{-1, "", "No channel available"};
     }
@@ -31,8 +32,20 @@ SSHResult SSHConnection::run(const std::string& command, int timeout_secs) {
     // The echo commands still output the full marker strings.
     std::string begin_marker = "__TCCP_BEGIN__";
     std::string done_marker  = "__TCCP_DONE__";
-    std::string full_cmd = "echo __TCCP_BEG''IN__; " + command +
-                           "\necho __TCCP_DO''NE__ $?\n";
+    // Single-line commands: put DONE echo on the same line with ';'.
+    // This prevents SSH hop commands (ssh -T ...) from consuming the
+    // DONE marker out of the TTY input buffer — the shell parses the
+    // entire line before starting execution.
+    // Multi-line commands (heredocs): must keep DONE on a separate line
+    // so the heredoc terminator isn't mangled.
+    std::string full_cmd;
+    if (command.find('\n') == std::string::npos) {
+        full_cmd = "echo __TCCP_BEG''IN__; " + command +
+                   "; echo __TCCP_DO''NE__ $?\n";
+    } else {
+        full_cmd = "echo __TCCP_BEG''IN__; " + command +
+                   "\necho __TCCP_DO''NE__ $?\n";
+    }
 
     int total = full_cmd.length();
     int sent = 0;
@@ -144,27 +157,7 @@ SSHResult SSHConnection::run(const std::string& command, int timeout_secs) {
     return SSHResult{-1, output, "Command timed out after " + std::to_string(effective_timeout) + "s"};
 }
 
-// ── Base64 encode/decode for binary-safe transfer over PTY ──
-
-static const char B64_CHARS[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static std::string base64_encode(const std::string& input) {
-    std::string out;
-    out.reserve(((input.size() + 2) / 3) * 4);
-    const auto* data = reinterpret_cast<const unsigned char*>(input.data());
-    size_t len = input.size();
-    for (size_t i = 0; i < len; i += 3) {
-        unsigned val = data[i] << 16;
-        if (i + 1 < len) val |= data[i + 1] << 8;
-        if (i + 2 < len) val |= data[i + 2];
-        out += B64_CHARS[(val >> 18) & 0x3F];
-        out += B64_CHARS[(val >> 12) & 0x3F];
-        out += (i + 1 < len) ? B64_CHARS[(val >> 6) & 0x3F] : '=';
-        out += (i + 2 < len) ? B64_CHARS[val & 0x3F] : '=';
-    }
-    return out;
-}
+// ── Base64 decode for binary-safe transfer over PTY ──
 
 static int b64_val(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
@@ -226,7 +219,7 @@ SSHResult SSHConnection::upload(const fs::path& local, const std::string& remote
 SSHResult SSHConnection::run_with_input(const std::string& command,
                                         const char* data, size_t data_len,
                                         int timeout_secs) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(*session_mutex_);
     if (!session_) {
         return SSHResult{-1, "", "No session available for run_with_input"};
     }

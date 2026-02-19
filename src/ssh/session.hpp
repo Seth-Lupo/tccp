@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <core/types.hpp>
@@ -27,7 +28,6 @@ public:
     ~SessionManager();
 
     SSHResult establish(StatusCallback callback = nullptr);
-    LIBSSH2_CHANNEL* open_extra_channel(StatusCallback callback = nullptr);
     void close();
     bool is_active() const;
     bool check_alive();
@@ -37,6 +37,7 @@ public:
     LIBSSH2_CHANNEL* get_channel() { return channel_; }
     int get_socket() const { return sock_; }
     const std::string& get_target() const { return target_str_; }
+    std::shared_ptr<std::recursive_mutex> session_mutex() { return session_mutex_; }
 
 private:
     SessionTarget target_;
@@ -45,6 +46,7 @@ private:
     int sock_;
     bool active_;
     std::string target_str_;
+    std::shared_ptr<std::recursive_mutex> session_mutex_;
 
     SSHResult establish_connection(StatusCallback callback);
     SSHResult ssh_userauth(StatusCallback callback);

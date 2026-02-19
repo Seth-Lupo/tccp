@@ -39,3 +39,23 @@ int safe_stoi(const std::string& s, int fallback) {
         return fallback;
     }
 }
+
+static const char B64_CHARS[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+std::string base64_encode(const std::string& input) {
+    std::string out;
+    out.reserve(((input.size() + 2) / 3) * 4);
+    const auto* data = reinterpret_cast<const unsigned char*>(input.data());
+    size_t len = input.size();
+    for (size_t i = 0; i < len; i += 3) {
+        unsigned val = data[i] << 16;
+        if (i + 1 < len) val |= data[i + 1] << 8;
+        if (i + 2 < len) val |= data[i + 2];
+        out += B64_CHARS[(val >> 18) & 0x3F];
+        out += B64_CHARS[(val >> 12) & 0x3F];
+        out += (i + 1 < len) ? B64_CHARS[(val >> 6) & 0x3F] : '=';
+        out += (i + 2 < len) ? B64_CHARS[val & 0x3F] : '=';
+    }
+    return out;
+}

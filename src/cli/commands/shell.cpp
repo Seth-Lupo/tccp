@@ -8,7 +8,8 @@ static void do_exec(BaseCLI& cli, const std::string& arg) {
         return;
     }
     auto result = cli.service.exec_remote(arg);
-    std::cout << result.stdout_data;
+    if (!result.stdout_data.empty())
+        std::cout << result.stdout_data << "\n";
     if (!result.stderr_data.empty()) {
         std::cerr << result.stderr_data;
     }

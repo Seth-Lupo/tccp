@@ -1,169 +1,166 @@
 #include "port_forwarder.hpp"
 #include "job_log.hpp"
-#include <core/utils.hpp>
+#include <ssh/connection_factory.hpp>
 #include <platform/platform.hpp>
-#include <platform/process.hpp>
 #include <fmt/format.h>
-#include <fstream>
-#include <filesystem>
+#include <libssh2.h>
 #ifndef _WIN32
 #  include <unistd.h>
 #  include <sys/socket.h>
 #  include <netinet/in.h>
 #  include <arpa/inet.h>
+#  include <poll.h>
+#  include <fcntl.h>
 #endif
 
-namespace fs = std::filesystem;
+// ── TunnelHandle ──────────────────────────────────────────
 
-PortForwarder::PortForwarder(const DTNConfig& dtn)
-    : dtn_(dtn), username_(get_cluster_username()) {
-    key_path_ = (platform::home_dir() / ".ssh" / "id_ed25519").string();
+TunnelHandle::~TunnelHandle() {
+    stop.store(true);
+    if (thread.joinable()) thread.join();
+    if (listen_fd >= 0) {
+#ifdef _WIN32
+        closesocket(listen_fd);
+#else
+        close(listen_fd);
+#endif
+    }
 }
 
-// ── Key setup ─────────────────────────────────────────────
+// ── PortForwarder ─────────────────────────────────────────
 
-bool PortForwarder::ensure_keys(SSHConnection& dtn, StatusCallback log) {
-    auto emit = [&](const std::string& msg) {
-        tccp_log(fmt::format("PortForwarder: {}", msg));
-        if (log) log(msg);
-    };
-
-    if (keys_ready_) return true;
-    if (key_path_.empty()) { emit("HOME not set"); return false; }
-
-    // Generate key if missing
-    if (!fs::exists(key_path_)) {
-        emit("Generating SSH key...");
-        std::string cmd = fmt::format("ssh-keygen -t ed25519 -N \"\" -f {} -q", key_path_);
-        if (std::system(cmd.c_str()) != 0) { emit("ssh-keygen failed"); return false; }
-    }
-
-    // Read public key
-    std::ifstream pubfile(key_path_ + ".pub");
-    std::string pubkey;
-    if (pubfile) std::getline(pubfile, pubkey);
-    if (pubkey.empty()) { emit("Cannot read public key"); return false; }
-
-    // Escape single quotes for shell
-    std::string escaped = pubkey;
-    for (std::string::size_type p = 0; (p = escaped.find('\'', p)) != std::string::npos; p += 4)
-        escaped.replace(p, 1, "'\\''");
-
-    // Install on DTN via libssh2
-    emit("Installing pubkey on DTN...");
-    auto result = dtn.run(fmt::format(
-        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
-        "grep -qF '{}' ~/.ssh/authorized_keys 2>/dev/null || "
-        "echo '{}' >> ~/.ssh/authorized_keys && "
-        "chmod 600 ~/.ssh/authorized_keys",
-        escaped, escaped));
-    if (result.failed()) {
-        emit(fmt::format("Pubkey install failed: {}", result.get_output()));
-        return false;
-    }
-
-    // Verify system SSH works
-    emit("Verifying system SSH to DTN...");
-    std::string verify = fmt::format(
-        "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no "
-        "-i {} {}@{} echo OK >/dev/null 2>&1",
-        key_path_, username_, dtn_.host);
-    if (std::system(verify.c_str()) != 0) {
-        emit(fmt::format("System SSH verify failed ({}@{})", username_, dtn_.host));
-        return false;
-    }
-
-    keys_ready_ = true;
-    emit("SSH keys ready");
-    return true;
-}
-
-// ── Port checking ─────────────────────────────────────────
+PortForwarder::PortForwarder(ConnectionFactory& factory)
+    : factory_(factory) {}
 
 bool PortForwarder::is_port_open(int port) {
 #ifdef _WIN32
     platform::init_networking();
     SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock == INVALID_SOCKET) return false;
-
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-
     int rc = connect(sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
     closesocket(sock);
     return rc == 0;
 #else
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return false;
-
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-
     int rc = connect(sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
     close(sock);
     return rc == 0;
 #endif
 }
 
-// ── Tunnel lifecycle ──────────────────────────────────────
+// ── Tunnel thread ─────────────────────────────────────────
 
-platform::ProcessHandle PortForwarder::spawn_tunnel(int port,
-                                                     const std::string& compute_node,
-                                                     const std::string& dtn_host) {
-    std::string tunnel_log = (platform::temp_dir() / "tccp_tunnel.log").string();
-    std::string local_fwd = fmt::format("{}:localhost:{}", port, port);
-    std::string inner_cmd = fmt::format(
-        "exec ssh -N -o StrictHostKeyChecking=no -o BatchMode=yes "
-        "-L localhost:{}:localhost:{} {}", port, port, compute_node);
+// Forward data between a local TCP socket and a libssh2 direct-tcpip channel.
+// Runs until the connection closes or stop_flag is set.
+static void forward_connection(ConnectionFactory& factory,
+                               int client_fd,
+                               LIBSSH2_CHANNEL* ch,
+                               std::atomic<bool>& stop_flag) {
+    char buf[16384];
+    auto mtx = factory.session_mutex();
+    int sock = factory.raw_socket();
 
-    return platform::spawn("ssh", {
-        "-T",
-        "-L", local_fwd,
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "BatchMode=yes",
-        "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=60",
-        "-o", "ServerAliveCountMax=3",
-        "-i", key_path_,
-        dtn_host,
-        inner_cmd
-    }, tunnel_log);
-}
+    while (!stop_flag.load()) {
+        // Poll local client socket for incoming data (100ms timeout)
+        struct pollfd pfd = {client_fd, POLLIN, 0};
+        int pr = poll(&pfd, 1, 100);
 
-bool PortForwarder::wait_for_tunnel(platform::ProcessHandle& handle, int port,
-                                     int timeout_ms, StatusCallback log) {
-    auto emit = [&](const std::string& msg) {
-        tccp_log(fmt::format("PortForwarder: {}", msg));
-        if (log) log(msg);
-    };
+        // local → channel
+        if (pr > 0 && (pfd.revents & POLLIN)) {
+            int n = read(client_fd, buf, sizeof(buf));
+            if (n <= 0) break;  // client closed
 
-    int elapsed = 0;
-    while (elapsed < timeout_ms) {
-        platform::sleep_ms(200);
-        elapsed += 200;
-
-        // Check if process died
-        if (!handle.running()) {
-            emit(fmt::format("Tunnel died — see {}",
-                             (platform::temp_dir() / "tccp_tunnel.log").string()));
-            return false;
+            std::lock_guard<std::recursive_mutex> lock(*mtx);
+            int sent = 0;
+            while (sent < n) {
+                int w = libssh2_channel_write(ch, buf + sent, n - sent);
+                if (w == LIBSSH2_ERROR_EAGAIN) {
+                    platform::sleep_ms(1);
+                    continue;
+                }
+                if (w < 0) goto done;
+                sent += w;
+            }
         }
 
-        if (is_port_open(port)) return true;
+        // channel → local (non-blocking read)
+        {
+            std::lock_guard<std::recursive_mutex> lock(*mtx);
+            libssh2_session_set_blocking(factory.raw_session(), 0);
+            int n = libssh2_channel_read(ch, buf, sizeof(buf));
+            libssh2_session_set_blocking(factory.raw_session(), 1);
+
+            if (n > 0) {
+                int sent = 0;
+                while (sent < n) {
+                    int w = write(client_fd, buf + sent, n - sent);
+                    if (w <= 0) goto done;
+                    sent += w;
+                }
+            } else if (n == 0 || libssh2_channel_eof(ch)) {
+                break;  // remote closed
+            }
+            // EAGAIN = no data, keep looping
+        }
     }
 
-    // Timed out — kill the process
-    emit(fmt::format("Tunnel timeout ({}s) — port {} never opened",
-                     timeout_ms / 1000, port));
-    handle.terminate();
-    return false;
+done:
+    // Close channel under mutex
+    {
+        std::lock_guard<std::recursive_mutex> lock(*mtx);
+        libssh2_channel_close(ch);
+        libssh2_channel_free(ch);
+    }
+    close(client_fd);
 }
 
-std::vector<std::shared_ptr<platform::ProcessHandle>> PortForwarder::start(
+void PortForwarder::tunnel_thread(ConnectionFactory& factory,
+                                   std::string compute_node, int port,
+                                   int listen_fd, std::atomic<bool>& stop_flag) {
+    std::vector<std::thread> conn_threads;
+
+    while (!stop_flag.load()) {
+        // Accept with timeout so we can check stop flag
+        struct pollfd pfd = {listen_fd, POLLIN, 0};
+        int pr = poll(&pfd, 1, 500);
+        if (pr <= 0) continue;
+
+        struct sockaddr_in client_addr{};
+        socklen_t len = sizeof(client_addr);
+        int client = accept(listen_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &len);
+        if (client < 0) continue;
+
+        // Open direct-tcpip channel to compute_node:port
+        LIBSSH2_CHANNEL* ch = factory.tunnel(compute_node, port);
+        if (!ch) {
+            tccp_log(fmt::format("PortForwarder: direct-tcpip to {}:{} failed", compute_node, port));
+            close(client);
+            continue;
+        }
+
+        // Spawn a forwarding thread for this connection
+        conn_threads.emplace_back(forward_connection,
+            std::ref(factory), client, ch, std::ref(stop_flag));
+    }
+
+    // Clean up connection threads
+    for (auto& t : conn_threads) {
+        if (t.joinable()) t.join();
+    }
+}
+
+// ── Start/Stop ────────────────────────────────────────────
+
+std::vector<std::shared_ptr<TunnelHandle>> PortForwarder::start(
     const std::string& compute_node,
     const std::vector<int>& ports,
     StatusCallback log) {
@@ -172,11 +169,8 @@ std::vector<std::shared_ptr<platform::ProcessHandle>> PortForwarder::start(
         if (log) log(msg);
     };
 
-    std::vector<std::shared_ptr<platform::ProcessHandle>> handles;
-    if (!keys_ready_) { emit("Skipping — SSH keys not ready"); return handles; }
+    std::vector<std::shared_ptr<TunnelHandle>> handles;
     if (ports.empty()) return handles;
-
-    std::string dtn_host = fmt::format("{}@{}", username_, dtn_.host);
 
     for (int port : ports) {
         if (is_port_open(port)) {
@@ -184,28 +178,61 @@ std::vector<std::shared_ptr<platform::ProcessHandle>> PortForwarder::start(
             continue;
         }
 
-        emit(fmt::format("Forwarding localhost:{} → {}:{}...", port, compute_node, port));
-
-        auto handle = std::make_shared<platform::ProcessHandle>(
-            spawn_tunnel(port, compute_node, dtn_host));
-        if (!handle->valid()) {
-            emit(fmt::format("spawn failed for port {}", port));
+        // Create listening socket on localhost:port
+        int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd < 0) {
+            emit(fmt::format("socket() failed for port {}", port));
             continue;
         }
 
-        if (wait_for_tunnel(*handle, port, 10000, log)) {
+        int reuse = 1;
+        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+        if (bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+            emit(fmt::format("bind() failed for port {}", port));
+            close(listen_fd);
+            continue;
+        }
+
+        if (listen(listen_fd, 8) < 0) {
+            emit(fmt::format("listen() failed for port {}", port));
+            close(listen_fd);
+            continue;
+        }
+
+        auto handle = std::make_shared<TunnelHandle>();
+        handle->listen_fd = listen_fd;
+        handle->thread = std::thread(tunnel_thread,
+            std::ref(factory_), compute_node, port, listen_fd, std::ref(handle->stop));
+
+        // Wait briefly for the port to become available
+        for (int i = 0; i < 10; i++) {
+            platform::sleep_ms(100);
+            if (is_port_open(port)) break;
+        }
+
+        if (is_port_open(port)) {
             emit(fmt::format("localhost:{} → {}:{} ready", port, compute_node, port));
             handles.push_back(std::move(handle));
+        } else {
+            emit(fmt::format("Port {} not responding after bind", port));
+            handle->stop.store(true);
+            handles.push_back(std::move(handle));  // still track for cleanup
         }
     }
 
     return handles;
 }
 
-void PortForwarder::stop(std::vector<std::shared_ptr<platform::ProcessHandle>>& handles) {
-    for (auto& handle : handles) {
-        if (handle && handle->valid()) {
-            handle->terminate();
-        }
+void PortForwarder::stop(std::vector<std::shared_ptr<TunnelHandle>>& handles) {
+    for (auto& h : handles) {
+        if (h) h->stop.store(true);
     }
+    // Destructor joins threads and closes sockets
+    handles.clear();
 }

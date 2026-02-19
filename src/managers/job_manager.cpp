@@ -16,13 +16,13 @@ namespace fs = std::filesystem;
 
 // ── Constructor ────────────────────────────────────────────
 
-JobManager::JobManager(const Config& config, SSHConnection& dtn, SSHConnection& login,
+JobManager::JobManager(const Config& config, ConnectionFactory& factory,
                        AllocationManager& allocs, SyncManager& sync, CacheManager& cache)
-    : config_(config), dtn_(dtn), login_(login),
+    : config_(config), factory_(factory),
+      dtn_(factory.dtn()), login_(factory.login()),
       allocs_(allocs), sync_(sync), cache_(cache),
       username_(get_cluster_username()),
-      port_fwd_(config.dtn()),
-      watcher_(config.dtn()) {
+      port_fwd_(factory) {
 
     // Restore tracked jobs from persistent state
     auto& state = allocs_.state();
@@ -48,38 +48,18 @@ JobManager::JobManager(const Config& config, SSHConnection& dtn, SSHConnection& 
     }
 
     // Re-establish port forwarding tunnels for running jobs
-    bool keys_ensured = false;
     for (auto& tj : tracked_) {
         if (!tj.completed && tj.init_complete && !tj.compute_node.empty()
             && !tj.forwarded_ports.empty()) {
-            if (!keys_ensured) {
-                keys_ensured = port_fwd_.ensure_keys(dtn_);
-                if (!keys_ensured) break;
-            }
             tj.tunnel_pids = port_fwd_.start(tj.compute_node, tj.forwarded_ports);
         }
     }
 
-    // Start watchers for running jobs (instant completion detection).
-    // Requires SSH keys — reuse the keys_ensured result from tunnel restoration.
-    if (keys_ensured) {
-        for (auto& tj : tracked_) {
-            if (tj.init_complete && !tj.completed && !tj.canceled
-                && !tj.compute_node.empty()) {
-                watcher_.watch(tj.job_id, tj.compute_node,
-                    tj.scratch_path + "/tccp.sock",
-                    [this] { watcher_fired_.store(true); });
-            }
-        }
-    }
 }
 
 JobManager::~JobManager() {
     // Signal all background init threads to stop
     shutdown_.store(true);
-
-    // Stop all job watchers
-    watcher_.stop_all();
 
     // Stop all tunnel processes
     for (auto& tj : tracked_) {
@@ -488,10 +468,6 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
         ensure_environment(alloc->node, log_to_file);
         if (check_canceled()) throw std::runtime_error("Canceled during initialization");
 
-        log_to_file("Checking SSH keys");
-        port_fwd_.ensure_keys(dtn_, log_to_file);
-        if (check_canceled()) throw std::runtime_error("Canceled during initialization");
-
         // Sync code to compute node
         std::string scratch = scratch_dir(job_id);
         log_to_file(fmt::format("Syncing code to {}", alloc->node));
@@ -512,7 +488,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
         log_to_file(fmt::format("Job launched successfully on {}", alloc->node));
 
         // Start port forwarding tunnels if configured
-        std::vector<std::shared_ptr<platform::ProcessHandle>> tunnel_pids;
+        std::vector<std::shared_ptr<TunnelHandle>> tunnel_pids;
         std::vector<int> fwd_ports;
         auto job_it = config_.project().jobs.find(job_name);
         if (job_it != config_.project().jobs.end() && !job_it->second.ports.empty()) {
@@ -557,10 +533,6 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
         } else {
             allocs_.persist();
         }
-
-        // Start watcher for instant completion detection (after init_complete is set)
-        watcher_.watch(job_id, alloc->node, scratch + "/tccp.sock",
-            [this] { watcher_fired_.store(true); });
 
         tccp_log(fmt::format("INIT THREAD COMPLETE: job_id={}", job_id));
 

@@ -1,9 +1,10 @@
 #pragma once
 
 #include <string>
-#include <libssh2.h>
 #include <core/types.hpp>
-#include <ssh/session.hpp>
+#include <ssh/connection_factory.hpp>
+
+class ShellRelay;
 
 class JobView {
 public:
@@ -11,7 +12,7 @@ public:
     static constexpr int kCanceled   = -2;
     static constexpr int kViewOutput = -3;
 
-    JobView(SessionManager& session, const std::string& compute_node,
+    JobView(ConnectionFactory& factory, const std::string& compute_node,
             const std::string& username, const std::string& dtach_socket,
             const std::string& job_name, const std::string& slurm_id,
             const std::string& job_id, const std::string& dtn_host,
@@ -31,9 +32,8 @@ private:
         bool skip_remote_replay;
     };
 
-    Result<LIBSSH2_CHANNEL*> open_channel(LIBSSH2_SESSION* ssh, int cols, int pty_rows);
-    Result<int> relay_loop(LIBSSH2_CHANNEL* channel, RelayState& state);
-    SessionManager& session_;
+    Result<int> relay_loop(ShellRelay& relay, RelayState& state);
+    ConnectionFactory& factory_;
     std::string compute_node_;
     std::string username_;
     std::string dtach_socket_;

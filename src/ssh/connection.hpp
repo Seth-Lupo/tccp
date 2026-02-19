@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <core/types.hpp>
 #include "result.hpp"
@@ -13,9 +14,12 @@ typedef struct _LIBSSH2_CHANNEL LIBSSH2_CHANNEL;
 
 class SSHConnection {
 public:
-    explicit SSHConnection(LIBSSH2_CHANNEL* channel, LIBSSH2_SESSION* session = nullptr);
+    SSHConnection(LIBSSH2_CHANNEL* channel, LIBSSH2_SESSION* session,
+                  std::shared_ptr<std::recursive_mutex> session_mutex);
 
-    SSHResult run(const std::string& command, int timeout_secs = 0);
+    virtual ~SSHConnection() = default;
+
+    virtual SSHResult run(const std::string& command, int timeout_secs = 0);
     SSHResult upload(const fs::path& local, const std::string& remote);
     SSHResult download(const std::string& remote, const fs::path& local);
 
@@ -26,10 +30,9 @@ public:
                              int timeout_secs = 0);
 
     bool is_active() const;
-    LIBSSH2_CHANNEL* get_channel() { return channel_; }
 
-private:
+protected:
     LIBSSH2_CHANNEL* channel_;
     LIBSSH2_SESSION* session_;
-    std::recursive_mutex mutex_;
+    std::shared_ptr<std::recursive_mutex> session_mutex_;
 };

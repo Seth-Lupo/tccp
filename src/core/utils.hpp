@@ -15,6 +15,9 @@ std::time_t parse_iso_time(const std::string& iso);
 // Safe integer parse: returns fallback on failure (no exceptions).
 int safe_stoi(const std::string& s, int fallback = 0);
 
+// Base64-encode binary data (for binary-safe transfer over PTY channels).
+std::string base64_encode(const std::string& input);
+
 // Trim leading and trailing whitespace in-place.
 inline void trim(std::string& s) {
     auto start = s.find_first_not_of(" \t\r\n");

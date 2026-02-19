@@ -26,7 +26,7 @@ Result<void> TccpService::connect(StatusCallback cb) {
         config_ = config_result.value;
     }
 
-    cluster_ = std::make_unique<ClusterConnection>(config_.value());
+    cluster_ = std::make_unique<ConnectionFactory>(config_.value());
     auto result = cluster_->connect(cb);
     if (result.failed()) {
         cluster_.reset();
@@ -303,7 +303,7 @@ void TccpService::init_managers() {
         sync_ = std::make_unique<SyncManager>(config_.value(), cluster_->dtn());
         cache_ = std::make_unique<CacheManager>(cluster_->dtn(), get_cluster_username());
         jobs_ = std::make_unique<JobManager>(
-            config_.value(), cluster_->dtn(), cluster_->login(), *allocs_, *sync_, *cache_);
+            config_.value(), *cluster_, *allocs_, *sync_, *cache_);
     }
 }
 

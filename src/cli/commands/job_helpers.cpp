@@ -68,7 +68,7 @@ bool attach_to_job(BaseCLI& cli, TrackedJob* tracked,
                    const std::string& job_name, bool replay,
                    bool in_alt_screen) {
     for (;;) {
-        JobView view(*cli.service.cluster()->get_session(),
+        JobView view(*cli.service.cluster(),
                      tracked->compute_node,
                      get_cluster_username(),
                      dtach_sock_for(*tracked),

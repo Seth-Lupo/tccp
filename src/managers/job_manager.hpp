@@ -9,11 +9,11 @@
 #include <atomic>
 #include <core/config.hpp>
 #include <ssh/connection.hpp>
+#include <ssh/connection_factory.hpp>
 #include "allocation_manager.hpp"
 #include "sync_manager.hpp"
 #include "cache_manager.hpp"
 #include "port_forwarder.hpp"
-#include "job_watcher.hpp"
 
 struct TrackedJob {
     std::string job_id;       // YYYY-MM-DDTHH-MM-SS-mmm__<job-name>
@@ -35,7 +35,7 @@ struct TrackedJob {
     bool output_returned = false;    // true if output was downloaded and remote cleaned
 
     // Port forwarding
-    std::vector<std::shared_ptr<platform::ProcessHandle>> tunnel_pids;
+    std::vector<std::shared_ptr<TunnelHandle>> tunnel_pids;
     std::vector<int> forwarded_ports;
 
     // Timing
@@ -46,7 +46,7 @@ struct TrackedJob {
 
 class JobManager {
 public:
-    JobManager(const Config& config, SSHConnection& dtn, SSHConnection& login,
+    JobManager(const Config& config, ConnectionFactory& factory,
                AllocationManager& allocs, SyncManager& sync, CacheManager& cache);
     ~JobManager();
 
@@ -85,11 +85,9 @@ public:
     // NFS output directory for a job (accessible from DTN after job ends)
     std::string job_output_dir(const std::string& job_id) const;
 
-    // Returns true (and clears) if a watcher detected job completion since last check.
-    bool consume_watcher_event();
-
 private:
     const Config& config_;
+    ConnectionFactory& factory_;
     SSHConnection& dtn_;
     SSHConnection& login_;
     AllocationManager& allocs_;
@@ -104,8 +102,6 @@ private:
     std::atomic<bool> shutdown_{false};        // signals init threads to exit
     bool environment_checked_ = false;  // Cache: only check environment once per session
     PortForwarder port_fwd_;
-    JobWatcher watcher_;
-    std::atomic<bool> watcher_fired_{false};  // signals monitor to run poll()
 
     // Path helpers (new directory structure)
     std::string persistent_base() const;

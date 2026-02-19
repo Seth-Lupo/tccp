@@ -4,12 +4,19 @@
 #include <core/utils.hpp>
 #include <core/time_utils.hpp>
 #include <managers/job_log.hpp>
+#include <ssh/shell_relay.hpp>
+#include <ssh/connection_factory.hpp>
+#include <platform/terminal.hpp>
+#include <platform/platform.hpp>
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
 #include <thread>
 #include <chrono>
 #include <fmt/format.h>
+#ifndef _WIN32
+#  include <unistd.h>
+#endif
 
 static void do_jobs(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
@@ -102,21 +109,23 @@ static void do_return(BaseCLI& cli, const std::string& arg) {
     }
 }
 
+static void interactive_relay(ConnectionFactory& factory, const std::string& command) {
+    ShellRelay relay(factory);
+    relay.run(command);
+}
+
 void do_ssh(BaseCLI& cli, const std::string& arg) {
     if (!cli.require_connection()) return;
 
-    std::string dtn_host = cli.service.config().dtn().host;
-    std::string user = get_cluster_username();
+    auto& factory = *cli.service.cluster();
 
     // Special case: "ssh login" — interactive shell on login node via DTN
     if (arg == "login" || arg.empty()) {
         std::string login_host = cli.service.config().login().host;
-        // Hop: local -> DTN -> login node (uses DTN's internal auth)
-        std::string sys_cmd = fmt::format(
-            "ssh -t -o StrictHostKeyChecking=no {}@{} "
-            "'ssh -t -o StrictHostKeyChecking=no {}'",
-            user, dtn_host, login_host);
-        std::system(sys_cmd.c_str());
+        // Hop through DTN's internal SSH (no Duo, passwordless)
+        std::string cmd = fmt::format(
+            "ssh -t -o StrictHostKeyChecking=no {}", login_host);
+        interactive_relay(factory, cmd);
         return;
     }
 
@@ -154,13 +163,11 @@ void do_ssh(BaseCLI& cli, const std::string& arg) {
     std::string shell_cmd = jm->shell_command(*tracked, remote_cmd);
 
     if (remote_cmd.empty()) {
-        // Interactive: local -> DTN -> compute node
-        std::string sys_cmd = fmt::format(
-            "ssh -t -o StrictHostKeyChecking=no {}@{} "
-            "'ssh -t -o StrictHostKeyChecking=no {} '\\''{}'\\'",
-            user, dtn_host,
+        // Interactive: DTN exec channel → SSH hop to compute node
+        std::string cmd = fmt::format(
+            "ssh -t -o StrictHostKeyChecking=no {} '{}'",
             tracked->compute_node, shell_cmd);
-        std::system(sys_cmd.c_str());
+        interactive_relay(factory, cmd);
     } else {
         // One-off command: use libssh2 through DTN
         std::string ssh_cmd = fmt::format(
