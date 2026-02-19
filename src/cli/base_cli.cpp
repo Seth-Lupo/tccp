@@ -54,7 +54,7 @@ void BaseCLI::print_help() const {
         {"Output",       {"logs", "tail", "output", "initlogs"}},
         {"Info",         {"status", "info", "config", "allocs", "gpus"}},
         {"Remote",       {"ssh", "open", "exec", "dealloc"}},
-        {"General",      {"help", "refresh", "creds", "pwd", "clear", "quit"}},
+        {"General",      {"help", "refresh", "pwd", "clear", "quit"}},
 #ifdef TCCP_DEV
         {"Dev",          {"debug"}},
 #endif
@@ -85,7 +85,9 @@ void BaseCLI::print_help() const {
             }
         }
     }
-    std::cout << "\n";
+    std::cout << "\n" << theme::color::DIM
+              << "  Run outside the REPL: tccp setup, tccp register, tccp new, tccp manual"
+              << theme::color::RESET << "\n\n";
 }
 
 std::string BaseCLI::get_prompt_string() const {

@@ -10,6 +10,7 @@
 #include <core/config.hpp>
 #include <ssh/connection.hpp>
 #include <ssh/connection_factory.hpp>
+#include <environments/environment.hpp>
 #include "allocation_manager.hpp"
 #include "sync_manager.hpp"
 #include "cache_manager.hpp"
@@ -111,6 +112,14 @@ private:
 
     std::string generate_job_id(const std::string& job_name) const;
     void ensure_environment(const std::string& compute_node, StatusCallback cb);
+    void ensure_container(const std::string& compute_node,
+                          const EnvironmentConfig& env,
+                          const std::string& image_path,
+                          StatusCallback cb);
+    void ensure_venv(const EnvironmentConfig& env,
+                     const std::string& image_path,
+                     const std::string& venv_path,
+                     StatusCallback cb);
     void ensure_dtach(StatusCallback cb);
     void ensure_dirs(const std::string& job_id, StatusCallback cb);
 

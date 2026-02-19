@@ -155,7 +155,7 @@ JobManager::JobEnvPaths JobManager::resolve_env_paths(const std::string& job_id,
 
 std::string JobManager::build_run_preamble(const JobEnvPaths& paths,
                                             const std::string& scratch) const {
-    return fmt::format(
+    std::string preamble = fmt::format(
         "#!/bin/bash\n"
         "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true\n"
         "export SINGULARITY_CACHEDIR={rc}/cache\n"
@@ -168,7 +168,16 @@ std::string JobManager::build_run_preamble(const JobEnvPaths& paths,
         "export PIP_CACHE_DIR={rc}/pip-cache\n"
         "export HF_HOME={rc}/huggingface\n"
         "export TORCH_HOME={rc}/torch\n"
-        "mkdir -p $XDG_CACHE_HOME $TMPDIR $PIP_CACHE_DIR $HF_HOME $TORCH_HOME\n"
+        "mkdir -p $XDG_CACHE_HOME $TMPDIR $PIP_CACHE_DIR $HF_HOME $TORCH_HOME\n",
+        fmt::arg("rc", paths.runtime_cache),
+        fmt::arg("scratch", scratch));
+
+    // Custom environment variables from tccp.yaml
+    for (const auto& [key, val] : config_.project().environment) {
+        preamble += fmt::format("export {}='{}'\n", key, val);
+    }
+
+    preamble += fmt::format(
         "if [ -f requirements.txt ]; then\n"
         "    REQ_HASH=$(md5sum requirements.txt 2>/dev/null | cut -d' ' -f1)\n"
         "    STAMP={venv}/.req_installed\n"
@@ -180,12 +189,12 @@ std::string JobManager::build_run_preamble(const JobEnvPaths& paths,
         "    fi\n"
         "fi\n"
         "printf '\\n__TCCP_JOB_START__\\n'\n",
-        fmt::arg("rc", paths.runtime_cache),
-        fmt::arg("scratch", scratch),
         fmt::arg("req_filter", paths.req_filter),
         fmt::arg("binds", paths.binds),
         fmt::arg("image", paths.image),
         fmt::arg("venv", paths.venv));
+
+    return preamble;
 }
 
 std::string JobManager::build_job_payload(const std::string& job_name,
@@ -251,6 +260,11 @@ std::string JobManager::shell_command(const TrackedJob& tj, const std::string& i
         paths.runtime_cache,
         paths.runtime_cache, paths.runtime_cache, paths.runtime_cache,
         paths.runtime_cache, paths.runtime_cache);
+
+    // Custom environment variables from tccp.yaml
+    for (const auto& [key, val] : config_.project().environment) {
+        env_setup += fmt::format("export {}='{}'; ", key, val);
+    }
 
     // Activate venv for python environments so bare `python` and `pip` work
     if (paths.has_python) {

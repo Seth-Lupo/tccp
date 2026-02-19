@@ -42,15 +42,9 @@ void TCCPCLI::register_all_commands() {
         }
     }, "Reload tccp.yaml config");
 
-    add_command("creds", [this](BaseCLI& cli, const std::string& arg) {
-        this->run_setup();
-    }, "Update cluster credentials");
-
     register_connection_commands(*this);
     register_jobs_commands(*this);
     register_shell_commands(*this);
-    register_setup_commands(*this);
-    register_credentials_commands(*this);
     register_allocations_commands(*this);
 
 #ifdef TCCP_DEV

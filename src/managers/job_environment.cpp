@@ -25,8 +25,72 @@ void JobManager::ensure_dirs(const std::string& job_id, StatusCallback cb) {
     std::filesystem::create_directories(local_output, ec);
 }
 
+void JobManager::ensure_container(const std::string& compute_node,
+                                   const EnvironmentConfig& env,
+                                   const std::string& image,
+                                   StatusCallback cb) {
+    std::string cc = container_cache();
+    std::string docker_uri = env.docker_uri;
+
+    if (cb) cb(fmt::format("Pulling container on {}: {} (this may take 5-15 min)...",
+                           compute_node, docker_uri));
+    dtn_.run(fmt::format("mkdir -p {}/images", cc));
+    std::string pull_cache = fmt::format("/tmp/{}/singularity-cache", username_);
+    std::string pull_tmp = fmt::format("/tmp/{}/singularity-tmp", username_);
+    std::string pull_cmd = fmt::format(
+        "ssh {} {} '"
+        "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
+        "mkdir -p {} {}; "
+        "SINGULARITY_CACHEDIR={} SINGULARITY_TMPDIR={} singularity pull {} {}; "
+        "rm -rf {} {}'",
+        SSH_OPTS, compute_node,
+        pull_cache, pull_tmp,
+        pull_cache, pull_tmp, image, docker_uri,
+        pull_cache, pull_tmp);
+    auto pull_result = dtn_.run(pull_cmd, CONTAINER_PULL_TIMEOUT_SECS);
+    if (pull_result.exit_code != 0) {
+        throw std::runtime_error(fmt::format("Container pull failed ({}): {}",
+                                             pull_result.stderr_data, pull_result.get_output()));
+    }
+    if (cb) cb("Container pull finished, verifying...");
+    // Verify the image was actually pulled (check from DTN — NFS-visible)
+    auto img_check = dtn_.run("test -f " + image + " && echo IMG_OK || echo IMG_FAIL");
+    if (img_check.stdout_data.find("IMG_FAIL") != std::string::npos) {
+        throw std::runtime_error(fmt::format("Container pull failed: {}", pull_result.get_output()));
+    }
+    // Report image size
+    auto sz = dtn_.run(fmt::format("du -sh {} 2>/dev/null | cut -f1", image));
+    std::string size_str = sz.stdout_data;
+    while (!size_str.empty() && (size_str.back() == '\n' || size_str.back() == '\r'))
+        size_str.pop_back();
+    if (cb) cb(fmt::format("Container image ready ({})", size_str.empty() ? "?" : size_str));
+}
+
+void JobManager::ensure_venv(const EnvironmentConfig& env,
+                              const std::string& image,
+                              const std::string& venv,
+                              StatusCallback cb) {
+    if (cb) cb(fmt::format("Creating Python venv ({}site-packages)...",
+                           env.gpu ? "with system " : ""));
+    std::string base = persistent_base();
+    std::string venv_flags = env.gpu ? "--system-site-packages " : "";
+    // Do NOT use --nv for venv creation: it runs on the DTN which has no
+    // GPU driver, so singularity exec --nv would fail silently.
+    std::string pip_tmp = fmt::format("/tmp/{}/tccp-pip-tmp", username_);
+    dtn_.run(fmt::format("mkdir -p {}", pip_tmp));
+    std::string venv_cmd = fmt::format(
+        "TMPDIR={} singularity exec --bind {}:{} {} python -m venv {}{}",
+        pip_tmp, base, base, image, venv_flags, venv);
+    auto venv_result = dtn_.run(venv_cmd);
+    if (venv_result.exit_code != 0) {
+        throw std::runtime_error(fmt::format(
+            "Failed to create venv: {}", venv_result.get_output()));
+    }
+    dtn_.run(fmt::format("rm -rf {} 2>/dev/null; true", pip_tmp));
+    if (cb) cb("Python venv created");
+}
+
 void JobManager::ensure_environment(const std::string& compute_node, StatusCallback cb) {
-    // Skip check if already validated this session
     if (environment_checked_) {
         return;
     }
@@ -44,11 +108,9 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
     const auto& env = get_environment(config_.project().type);
     std::string cc = container_cache();
     std::string image = cc + "/images/" + env.sif_filename;
-    std::string docker_uri = env.docker_uri;
     std::string venv = env_dir() + "/default/venv";
     std::string tccp_home = fmt::format(REMOTE_TCCP_HOME, username_);
     std::string dtach_bin = tccp_home + "/bin/dtach";
-    bool gpu = env.gpu;
 
     // Single check for all three components
     std::string check_all = fmt::format(
@@ -62,7 +124,6 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
     bool need_venv = result.stdout_data.find("VENV_MISSING") != std::string::npos;
     bool need_dtach = result.stdout_data.find("DTACH_MISSING") != std::string::npos;
 
-    // Show what we found
     if (cb) {
         if (!need_image) cb(fmt::format("[{}] Container image ({}): found", elapsed(), env.sif_filename));
         else cb(fmt::format("[{}] Container image ({}): MISSING — will pull", elapsed(), env.sif_filename));
@@ -74,85 +135,27 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
         else cb(fmt::format("[{}] dtach binary: MISSING — will build", elapsed()));
     }
 
-    // Only load modules if we need to install something
     if (need_image || need_venv) {
         if (cb) cb(fmt::format("[{}] Loading Singularity/Apptainer module...", elapsed()));
         dtn_.run("module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true");
         if (cb) cb(fmt::format("[{}] Module loaded", elapsed()));
     }
 
-    // Pull container image if missing — runs on compute node via SSH hop
-    // through DTN. Compute node /tmp is large and not quota-limited, unlike
-    // DTN /tmp (often full) or home dir (30GB quota).
     if (need_image) {
-        if (cb) cb(fmt::format("[{}] Pulling container on {}: {} (this may take 5-15 min)...",
-                               elapsed(), compute_node, docker_uri));
-        dtn_.run(fmt::format("mkdir -p {}/images", cc));
-        std::string pull_cache = fmt::format("/tmp/{}/singularity-cache", username_);
-        std::string pull_tmp = fmt::format("/tmp/{}/singularity-tmp", username_);
-        std::string pull_cmd = fmt::format(
-            "ssh {} {} '"
-            "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
-            "mkdir -p {} {}; "
-            "SINGULARITY_CACHEDIR={} SINGULARITY_TMPDIR={} singularity pull {} {}; "
-            "rm -rf {} {}'",
-            SSH_OPTS, compute_node,
-            pull_cache, pull_tmp,
-            pull_cache, pull_tmp, image, docker_uri,
-            pull_cache, pull_tmp);
-        auto pull_result = dtn_.run(pull_cmd, CONTAINER_PULL_TIMEOUT_SECS);
-        if (pull_result.exit_code != 0 && !pull_result.stderr_data.empty()) {
-            throw std::runtime_error(fmt::format("Container pull failed ({}): {}",
-                                                 pull_result.stderr_data, pull_result.get_output()));
-        }
-        if (cb) cb(fmt::format("[{}] Container pull finished, verifying...", elapsed()));
-        // Verify the image was actually pulled (check from DTN — NFS-visible)
-        auto img_check = dtn_.run("test -f " + image + " && echo IMG_OK || echo IMG_FAIL");
-        if (img_check.stdout_data.find("IMG_FAIL") != std::string::npos) {
-            throw std::runtime_error(fmt::format("Container pull failed: {}", pull_result.get_output()));
-        }
-        // Report image size
-        auto sz = dtn_.run(fmt::format("du -sh {} 2>/dev/null | cut -f1", image));
-        std::string size_str = sz.stdout_data;
-        while (!size_str.empty() && (size_str.back() == '\n' || size_str.back() == '\r'))
-            size_str.pop_back();
-        if (cb) cb(fmt::format("[{}] Container image ready ({})", elapsed(), size_str.empty() ? "?" : size_str));
+        ensure_container(compute_node, env, image, cb);
     }
 
-    // Create venv if missing
     if (need_venv) {
-        if (cb) cb(fmt::format("[{}] Creating Python venv ({}site-packages)...",
-                               elapsed(), gpu ? "with system " : ""));
-        std::string base = persistent_base();
-        std::string venv_flags = gpu ? "--system-site-packages " : "";
-        // Do NOT use --nv for venv creation: it runs on the DTN which has no
-        // GPU driver, so singularity exec --nv would fail silently.
-        // CUDA is not needed just to create a venv.
-        std::string pip_tmp = fmt::format("/tmp/{}/tccp-pip-tmp", username_);
-        dtn_.run(fmt::format("mkdir -p {}", pip_tmp));
-        std::string venv_cmd = fmt::format(
-            "TMPDIR={} singularity exec --bind {}:{} {} python -m venv {}{}",
-            pip_tmp, base, base, image, venv_flags, venv);
-        auto venv_result = dtn_.run(venv_cmd);
-        if (venv_result.exit_code != 0) {
-            throw std::runtime_error(fmt::format(
-                "Failed to create venv: {}", venv_result.get_output()));
-        }
-        dtn_.run(fmt::format("rm -rf {} 2>/dev/null; true", pip_tmp));
-        if (cb) cb(fmt::format("[{}] Python venv created", elapsed()));
+        ensure_venv(env, image, venv, cb);
     }
 
-    // Build dtach if missing
     if (need_dtach) {
         if (cb) cb(fmt::format("[{}] Building dtach...", elapsed()));
         ensure_dtach(cb);
         if (cb) cb(fmt::format("[{}] dtach ready", elapsed()));
     }
 
-    // Mark as checked for this session
     environment_checked_ = true;
-
-    // Touch LRU timestamps on the container and env we just validated
     cache_.touch_used(image, env_dir());
 
     if (cb) cb(fmt::format("[{}] Environment ready", elapsed()));

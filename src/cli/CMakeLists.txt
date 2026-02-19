@@ -7,7 +7,6 @@ add_library(tccp_cli
     terminal_output.cpp
     terminal_ui.cpp
     job_view.cpp
-    commands/setup.cpp
     commands/connection.cpp
     commands/jobs.cpp
     commands/job_helpers.cpp
@@ -15,7 +14,6 @@ add_library(tccp_cli
     commands/job_logs.cpp
     commands/allocations.cpp
     commands/shell.cpp
-    commands/credentials.cpp
 )
 
 target_include_directories(tccp_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
