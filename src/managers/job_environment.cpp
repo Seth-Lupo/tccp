@@ -81,7 +81,9 @@ void JobManager::ensure_venv(const EnvironmentConfig& env,
     std::string venv_cmd = fmt::format(
         "TMPDIR={} singularity exec --bind {}:{} {} python -m venv {}{}",
         pip_tmp, base, base, image, venv_flags, venv);
-    auto venv_result = dtn_.run(venv_cmd);
+    // Explicit timeout: venv creation is silent and takes 20-30s.
+    // Without this, the 5s stall detection kills the read prematurely.
+    auto venv_result = dtn_.run(venv_cmd, 120);
     if (venv_result.exit_code != 0) {
         throw std::runtime_error(fmt::format(
             "Failed to create venv: {}", venv_result.get_output()));
@@ -137,7 +139,7 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
 
     if (need_image || need_venv) {
         if (cb) cb(fmt::format("[{}] Loading Singularity/Apptainer module...", elapsed()));
-        dtn_.run("module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true");
+        dtn_.run("module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true", 30);
         if (cb) cb(fmt::format("[{}] Module loaded", elapsed()));
     }
 
@@ -192,13 +194,13 @@ void JobManager::ensure_dtach(StatusCallback cb) {
     dtn_.run("mkdir -p " + tccp_home + "/bin");
     dtn_.run("rm -rf " + build_dir);
 
-    auto clone = dtn_.run("git clone https://github.com/crigler/dtach.git " + build_dir + " 2>&1");
+    auto clone = dtn_.run("git clone https://github.com/crigler/dtach.git " + build_dir + " 2>&1", 60);
     if (clone.exit_code != 0) {
         // git might not be available — try curl
         if (cb) cb("git not available, trying curl...");
         dtn_.run("mkdir -p " + build_dir);
         auto dl = dtn_.run("curl -sL https://github.com/crigler/dtach/archive/refs/heads/master.tar.gz "
-                           "| tar xz -C " + build_dir + " --strip-components=1 2>&1");
+                           "| tar xz -C " + build_dir + " --strip-components=1 2>&1", 60);
         if (dl.exit_code != 0) {
             throw std::runtime_error(fmt::format(
                 "Cannot download dtach source (no git or curl?): {}", dl.get_output()));
@@ -206,10 +208,10 @@ void JobManager::ensure_dtach(StatusCallback cb) {
     }
 
     if (cb) cb("Compiling dtach...");
-    auto build = dtn_.run("cd " + build_dir + " && cc -o dtach dtach.c master.c attach.c -lutil 2>&1");
+    auto build = dtn_.run("cd " + build_dir + " && cc -o dtach dtach.c master.c attach.c -lutil 2>&1", 60);
     if (build.exit_code != 0) {
         if (cb) cb("Direct compile failed, trying configure/make...");
-        auto build2 = dtn_.run("cd " + build_dir + " && ./configure && make 2>&1");
+        auto build2 = dtn_.run("cd " + build_dir + " && ./configure && make 2>&1", 120);
         if (build2.exit_code != 0) {
             throw std::runtime_error(fmt::format(
                 "Failed to compile dtach: {}", build2.get_output()));

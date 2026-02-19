@@ -105,7 +105,7 @@ void TCCPCLI::run_connected_repl() {
     std::cout << theme::section("Connecting");
 
     auto callback = [](const std::string& msg) {
-        std::cout << theme::dim("    " + msg) << "\n";
+        std::cout << theme::dim(msg) << "\n";
     };
 
     auto result = service.connect(callback);
@@ -200,7 +200,7 @@ void TCCPCLI::run_connected_repl() {
                 }
 
                 auto cb = [](const std::string& msg) {
-                    std::cout << theme::dim("    " + msg) << "\n";
+                    std::cout << theme::dim(msg) << "\n";
                 };
                 std::cout << "\n";
                 service.graceful_shutdown(cb);
@@ -225,7 +225,7 @@ void TCCPCLI::run_connected_repl() {
         int init_count = service.initializing_job_count();
         if (init_count > 0) {
             auto cb = [](const std::string& msg) {
-                std::cout << theme::dim("    " + msg) << "\n";
+                std::cout << theme::dim(msg) << "\n";
             };
             service.graceful_shutdown(cb);
         } else {
