@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>tccp - architecture</title>
+<title>tccp - how it works</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,13 +18,14 @@
 
 <h2>the problem</h2>
 <p>
-Running code on an HPC cluster normally requires: writing SLURM scripts,
-copying files via scp, managing Singularity containers, debugging module
-loads, watching squeue, and hoping your SSH session doesn't drop. Every
-SSH connection triggers a Duo MFA push. It's painful.
+Running anything on an HPC cluster usually means writing SLURM batch scripts,
+copying files with scp, loading the right modules, pulling containers,
+staring at squeue, and praying your SSH session doesn't die. And on this
+cluster, every new SSH connection means another Duo push on your phone.
+It's a lot of friction for "run my Python script on a GPU."
 </p>
 
-<h2>the solution</h2>
+<h2>the approach</h2>
 <pre>
 your laptop                 cluster
 +----------+     SSH     +---------+     SSH hop     +---------+
@@ -32,59 +33,58 @@ your laptop                 cluster
 | (local)  |  1 session  | (xfer)  |  internal auth | (GPU)   |
 +----------+  1 Duo push +---------+                +---------+
 </pre>
-
-<h2>single SSH session</h2>
 <p>
-tccp opens one libssh2 session to the data transfer node (DTN).
-One Duo push. Everything multiplexes on that session: file sync,
-SLURM commands, job launch, port forwarding, interactive shells.
+tccp opens a single libssh2 session to the data transfer node. One Duo push,
+that's it for the whole session. Everything runs over that one connection:
+file sync, SLURM commands, job launch, port forwarding, interactive shells.
 </p>
 <p>
-Compute nodes don't accept external SSH keys. tccp hops through
-the DTN using cluster-internal auth (GSSAPI/hostbased). Port
-forwarding uses SSH protocol-level <code>direct-tcpip</code>
-channels &mdash; no extra auth needed.
+Compute nodes don't accept SSH keys from outside the cluster, so tccp
+hops through the DTN using the cluster's internal auth. Port forwarding
+uses SSH protocol-level <code>direct-tcpip</code> channels, which don't
+need any extra authentication.
 </p>
 
-<h2>what happens on <code>run</code></h2>
+<h2>what happens when you type <code>run train</code></h2>
 <ol>
-<li><b>Allocate</b> &mdash; find or request a SLURM allocation (reuses idle ones)</li>
-<li><b>Environment</b> &mdash; pull container if missing, create venv if missing, build dtach if missing</li>
-<li><b>Sync</b> &mdash; tar your local code, pipe it through SSH to the compute node's scratch dir. Incremental: only changed files.</li>
-<li><b>Launch</b> &mdash; write a run script, scp it to the node, start it under dtach</li>
-<li><b>Attach</b> &mdash; connect to the dtach socket, stream output to your terminal</li>
+<li><b>Allocate</b> &mdash; tccp looks for an idle SLURM allocation it can reuse. If there isn't one, it requests a new one and waits for a node.</li>
+<li><b>Environment</b> &mdash; checks if the container, venv, and dtach are already set up. Pulls or builds whatever's missing.</li>
+<li><b>Sync</b> &mdash; tars up your local code and pipes it through SSH to the compute node. Only sends files that changed since the last sync.</li>
+<li><b>Launch</b> &mdash; generates a run script, copies it to the node, and starts it under dtach (a lightweight session manager).</li>
+<li><b>Attach</b> &mdash; connects to the dtach socket and streams the job output to your terminal.</li>
 </ol>
-<p>Steps 1-4 happen in a background thread. You can queue another job while the first initializes.</p>
+<p>All of this happens in a background thread, so you can keep using the REPL
+while the job initializes. You'll see notifications as each step finishes.</p>
 
-<h2>file layout</h2>
+<h2>where things live on the cluster</h2>
 <pre>
 NFS home (~/)
   tccp/
-    bin/dtach                    # compiled on first use
+    bin/dtach                    # built automatically on first use
   projects/{name}/
-    env/default/venv/            # persistent virtualenv
-    output/{job_id}/             # output files (synced back)
+    env/default/venv/            # your persistent virtualenv
+    output/{job_id}/             # output files (synced back to your laptop)
 
 Container cache (~/)
-  .tccp-cache/images/*.sif       # pulled containers (LRU managed)
+  .tccp-cache/images/*.sif       # pulled containers, managed by LRU
 
 Compute node /tmp/{user}/{project}/{job_id}/
-  (your synced code)             # scratch, ephemeral
-  cache/                         # bind-mounted shared cache
-  output -> NFS output dir       # symlink
-  tccp_run.sh                    # generated run script
-  tccp.log                       # job log (for viewer)
-  tccp.sock                      # dtach socket
+  (your code)                    # scratch copy, ephemeral
+  cache/                         # shared cache across jobs (bind-mounted)
+  output -> NFS output dir       # symlink to persistent storage
+  tccp_run.sh                    # the generated run script
+  tccp.log                       # log file for the job viewer
+  tccp.sock                      # dtach socket for attach/detach
 </pre>
 
-<h2>key design decisions</h2>
+<h2>design decisions</h2>
 <table>
-<tr><th>decision</th><th>why</th></tr>
-<tr><td>libssh2, not system ssh</td><td>Control over multiplexing. No extra Duo pushes.</td></tr>
-<tr><td>dtach, not tmux/screen</td><td>Minimal. Single-purpose. Easy to build from source on any node.</td></tr>
-<tr><td>Singularity, not Docker</td><td>HPC standard. Runs unprivileged. Binds NFS mounts.</td></tr>
-<tr><td>Tar pipe, not rsync/scp</td><td>Binary-clean over nested SSH hops. Incremental via local manifest diff.</td></tr>
-<tr><td>C++</td><td>Static binary. No runtime dependencies. Ships as one file.</td></tr>
+<tr><th>choice</th><th>reasoning</th></tr>
+<tr><td>libssh2 instead of system ssh</td><td>Full control over multiplexing. Avoids extra Duo pushes.</td></tr>
+<tr><td>dtach instead of tmux/screen</td><td>Does one thing. Tiny. Easy to compile from source on any node.</td></tr>
+<tr><td>Singularity instead of Docker</td><td>The HPC standard. Runs without root. Plays nice with NFS.</td></tr>
+<tr><td>Tar pipe instead of rsync/scp</td><td>Works cleanly over nested SSH hops. Incremental diff is done locally.</td></tr>
+<tr><td>C++</td><td>Ships as a single static binary. No Python, no runtime deps.</td></tr>
 </table>
 
 </body>

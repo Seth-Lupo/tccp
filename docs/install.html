@@ -16,12 +16,31 @@
 <a href="usage.html">usage</a>
 </nav>
 
-<h2>download</h2>
-<p>
-Pre-built binaries are attached to each
-<a href="https://github.com/sethlupo/tccp/releases/latest">GitHub release</a>.
-Pick your platform:
-</p>
+<h2>macOS / Linux</h2>
+<p>One command. Downloads the right binary for your platform and puts it
+in <code>/usr/local/bin</code>:</p>
+<pre>
+curl -fsSL https://sethlupo.github.io/tccp/install.sh | sh
+</pre>
+<p>That's it. Verify with:</p>
+<pre>
+tccp --version
+</pre>
+
+<h2>Windows</h2>
+<p>Open PowerShell and run:</p>
+<pre>
+irm https://sethlupo.github.io/tccp/install.ps1 | iex
+</pre>
+<p>This downloads the binary to <code>%LOCALAPPDATA%\tccp\</code> and adds
+it to your PATH. You'll need to restart your terminal after the first install.</p>
+<pre>
+tccp.exe --version
+</pre>
+
+<h2>manual download</h2>
+<p>If you'd rather do it yourself, grab the binary from the
+<a href="https://github.com/sethlupo/tccp/releases/latest">latest release</a>:</p>
 
 <table>
 <tr><th>platform</th><th>binary</th></tr>
@@ -39,38 +58,35 @@ Pick your platform:
 </tr>
 </table>
 
-<h2>install (macOS / Linux)</h2>
-<pre>
-# Download the binary for your platform
-curl -Lo tccp https://github.com/sethlupo/tccp/releases/latest/download/tccp-macos-arm64
-chmod +x tccp
-sudo mv tccp /usr/local/bin/
+<p>Put it somewhere on your PATH, make it executable (<code>chmod +x</code>
+on macOS/Linux), and you're good.</p>
 
-# Verify
-tccp --version
-</pre>
-
-<h2>install (Windows)</h2>
+<h2>after installing</h2>
+<p>Save your Tufts credentials (you only need to do this once):</p>
 <pre>
-# Download tccp-windows-x64.exe from the releases page
-# Move it somewhere on your PATH, or run it directly
-tccp.exe --version
-</pre>
-
-<h2>first-time setup</h2>
-<pre>
-# Store your Tufts cluster credentials
 tccp setup
 </pre>
 <p>
-This prompts for your Tufts username, password, and email.
-Credentials are stored in the system keychain (macOS) or
-<code>~/.tccp/credentials</code> (Linux/Windows).
+This asks for your username, password, and email. On macOS, credentials go
+into the system keychain. On Linux and Windows, they're stored in
+<code>~/.tccp/credentials</code>.
 </p>
-
-<h2>build from source</h2>
+<p>
+Then register your project:
+</p>
 <pre>
-git clone https://github.com/sethlupo/tccp.git
+cd my-project
+tccp register
+</pre>
+<p>And connect:</p>
+<pre>
+tccp
+</pre>
+
+<h2>building from source</h2>
+<p>If you'd rather build it yourself:</p>
+<pre>
+git clone --recursive https://github.com/sethlupo/tccp.git
 cd tccp
 cmake -B build -S . \
   -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake \
@@ -79,7 +95,10 @@ cmake -B build -S . \
 cmake --build build
 ./build/tccp --version
 </pre>
-<p>Dependencies (managed by vcpkg): libssh2, yaml-cpp, fmt, CLI11, replxx.</p>
+<p>
+Dependencies are handled by vcpkg: libssh2, yaml-cpp, fmt, CLI11, replxx.
+The <code>--recursive</code> clone pulls vcpkg as a submodule.
+</p>
 
 </body>
 </html>

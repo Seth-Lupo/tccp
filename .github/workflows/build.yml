@@ -37,12 +37,7 @@ jobs:
         additionalCachedPaths: ${{ github.workspace }}/build
 
     - name: Configure CMake
-      run: |
-        cmake -B build -S . \
-          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake \
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
-          -DTCCP_STATIC_BUILD=ON \
-          -DCMAKE_BUILD_TYPE=Release
+      run: cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DTCCP_STATIC_BUILD=ON -DCMAKE_BUILD_TYPE=Release
 
     - name: Build
       run: cmake --build build --config Release

@@ -16,116 +16,112 @@
 <a href="usage.html">usage</a>
 </nav>
 
-<h2>CLI commands (run outside the REPL)</h2>
+<p>
+tccp has two kinds of commands. A few run from your regular shell (for
+setup stuff), and the rest run inside the tccp REPL once you're connected.
+</p>
+
+<h2>shell commands</h2>
+<p>These run from your terminal, before you connect:</p>
 
 <h3><code>tccp setup</code></h3>
-<p>Store your Tufts credentials. Run once, or again to update.</p>
+<p>Save your Tufts credentials. You only need to do this once,
+but you can run it again if your password changes.</p>
 <pre>$ tccp setup</pre>
 
 <h3><code>tccp register [path]</code></h3>
-<p>Register a project directory. Walks you through creating <code>tccp.yaml</code>.</p>
+<p>Set up a project. This walks you through creating a <code>tccp.yaml</code>
+that tells tccp how to run your code.</p>
 <pre>
 $ cd my-project
 $ tccp register
 </pre>
-<p>Defaults to current directory. Pass a path to register elsewhere.</p>
 
 <h3><code>tccp new &lt;template&gt;</code></h3>
-<p>Scaffold a new project from a template.</p>
+<p>Start a fresh project from a template. Creates the config, a starter
+script, requirements.txt, and a .gitignore.</p>
 <pre>
 $ mkdir my-project && cd my-project
 $ tccp new python
-$ tccp new qwen
 </pre>
 
 <h3><code>tccp manual [topic]</code></h3>
-<p>Show the built-in manual. Topics: <code>python</code>, <code>python-pytorch</code>.</p>
+<p>Read the built-in guide for your project type.</p>
 <pre>$ tccp manual python-pytorch</pre>
 
 <hr>
 
-<h2>REPL commands (run inside tccp)</h2>
-<p>Start the REPL with <code>tccp</code> or <code>tccp connect</code>.</p>
+<h2>REPL commands</h2>
+<p>Once you're connected (<code>tccp</code> or <code>tccp connect</code>),
+these are available at the prompt:</p>
 
 <h3>jobs</h3>
 
 <table>
-<tr><th>command</th><th>description</th></tr>
-<tr><td class="cmd">run &lt;job&gt; [args]</td><td>Submit a job and attach to it. Starts init in background.</td></tr>
-<tr><td class="cmd">view [job]</td><td>Attach to a running job. Scrollable viewer for finished jobs.</td></tr>
-<tr><td class="cmd">restart [job]</td><td>Cancel then re-run a job.</td></tr>
-<tr><td class="cmd">jobs</td><td>List all tracked jobs with status, node, and duration.</td></tr>
-<tr><td class="cmd">cancel &lt;job&gt;</td><td>Cancel a running or initializing job.</td></tr>
-<tr><td class="cmd">return [job]</td><td>Download output from a completed job.</td></tr>
+<tr><th>command</th><th>what it does</th></tr>
+<tr><td class="cmd">run &lt;job&gt; [args]</td><td>Start a job. Allocates a node, syncs your code, and launches it. You can pass extra args that get appended to whatever's in the config.</td></tr>
+<tr><td class="cmd">view [job]</td><td>Attach to a running job's output. If the job already finished, opens it in a scrollable viewer.</td></tr>
+<tr><td class="cmd">restart [job]</td><td>Cancel the current run and start a fresh one.</td></tr>
+<tr><td class="cmd">jobs</td><td>Show all your tracked jobs &mdash; status, which node they're on, how long they've been running.</td></tr>
+<tr><td class="cmd">cancel &lt;job&gt;</td><td>Stop a job. Works whether it's still initializing or already running.</td></tr>
+<tr><td class="cmd">return [job]</td><td>Pull the output files from a finished job back to your laptop.</td></tr>
 </table>
 
 <pre>
-tccp> run train
 tccp> run train --lr 0.001 --epochs 50
 tccp> view train
 tccp> jobs
 tccp> cancel train
 </pre>
 
-<h3>output</h3>
+<h3>looking at output</h3>
 
 <table>
-<tr><th>command</th><th>description</th></tr>
-<tr><td class="cmd">logs [job]</td><td>Print job output to terminal.</td></tr>
-<tr><td class="cmd">tail [job] [n]</td><td>Print last N lines (default 30).</td></tr>
-<tr><td class="cmd">output [job]</td><td>Open full output in vim.</td></tr>
-<tr><td class="cmd">initlogs [job]</td><td>Print initialization logs (allocation, sync, env setup).</td></tr>
+<tr><th>command</th><th>what it does</th></tr>
+<tr><td class="cmd">logs [job]</td><td>Dump the job's output to your terminal.</td></tr>
+<tr><td class="cmd">tail [job] [n]</td><td>Show the last N lines of output (30 by default).</td></tr>
+<tr><td class="cmd">output [job]</td><td>Open the full output in vim.</td></tr>
+<tr><td class="cmd">initlogs [job]</td><td>Show the initialization logs &mdash; useful for debugging allocation or sync issues.</td></tr>
 </table>
 
 <pre>
-tccp> logs train
 tccp> tail train 100
 tccp> initlogs train
 </pre>
 
-<h3>remote</h3>
+<h3>getting on the node</h3>
 
 <table>
-<tr><th>command</th><th>description</th></tr>
-<tr><td class="cmd">ssh [job]</td><td>SSH to login node, or to a job's compute node.</td></tr>
-<tr><td class="cmd">open [job]</td><td>Interactive shell inside the job's container on the compute node.</td></tr>
-<tr><td class="cmd">exec &lt;cmd&gt;</td><td>Run a single command on the login node.</td></tr>
+<tr><th>command</th><th>what it does</th></tr>
+<tr><td class="cmd">ssh [job]</td><td>SSH to the login node, or if you give it a job name, straight to that job's compute node.</td></tr>
+<tr><td class="cmd">open [job]</td><td>Drop into a bash shell inside the Singularity container, with your code, venv, and env vars all set up.</td></tr>
+<tr><td class="cmd">exec &lt;cmd&gt;</td><td>Run a one-off command on the login node and print the result.</td></tr>
 </table>
 
 <pre>
-tccp> ssh train          # SSH to train's compute node
-tccp> open train         # shell inside singularity container
-tccp> exec squeue -u $USER
+tccp> open train
+train@c0001> python -c "import torch; print(torch.cuda.is_available())"
+True
 </pre>
 
 <h3>info</h3>
 
 <table>
-<tr><th>command</th><th>description</th></tr>
-<tr><td class="cmd">status</td><td>Connection and project status.</td></tr>
-<tr><td class="cmd">info [job]</td><td>Detailed job info: SLURM ID, node, times, exit code.</td></tr>
-<tr><td class="cmd">config</td><td>Show project configuration.</td></tr>
-<tr><td class="cmd">allocs</td><td>List SLURM allocations.</td></tr>
-<tr><td class="cmd">gpus</td><td>Show available GPU resources per partition.</td></tr>
+<tr><th>command</th><th>what it does</th></tr>
+<tr><td class="cmd">status</td><td>Check your connection and project state.</td></tr>
+<tr><td class="cmd">info [job]</td><td>Detailed breakdown: SLURM ID, node, timestamps, exit code.</td></tr>
+<tr><td class="cmd">config</td><td>Print your current project config.</td></tr>
+<tr><td class="cmd">allocs</td><td>List your SLURM allocations and what's using them.</td></tr>
+<tr><td class="cmd">gpus</td><td>See what GPUs are available across partitions.</td></tr>
 </table>
 
 <h3>housekeeping</h3>
 
 <table>
-<tr><th>command</th><th>description</th></tr>
-<tr><td class="cmd">dealloc [id|all]</td><td>Release SLURM allocations.</td></tr>
-<tr><td class="cmd">clean</td><td>Remove old output directories (keeps latest per job).</td></tr>
-<tr><td class="cmd">refresh</td><td>Reload tccp.yaml without reconnecting.</td></tr>
-</table>
-
-<h3>general</h3>
-
-<table>
-<tr><th>command</th><th>description</th></tr>
-<tr><td class="cmd">help</td><td>Show command list.</td></tr>
-<tr><td class="cmd">pwd</td><td>Print working directory.</td></tr>
-<tr><td class="cmd">clear</td><td>Clear screen.</td></tr>
-<tr><td class="cmd">quit</td><td>Exit.</td></tr>
+<tr><th>command</th><th>what it does</th></tr>
+<tr><td class="cmd">dealloc [id|all]</td><td>Let go of SLURM allocations you're not using. They burn SUs while idle.</td></tr>
+<tr><td class="cmd">clean</td><td>Delete old output directories, keeping only the latest run per job.</td></tr>
+<tr><td class="cmd">refresh</td><td>Reload your tccp.yaml without disconnecting.</td></tr>
 </table>
 
 </body>

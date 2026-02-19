@@ -1,46 +1,45 @@
 # tccp
 
-I wanted to write ML code like I write any other code. Locally. Open my editor, change a file, run it. No SLURM scripts, no scp, no SSH tunnels, no quota math, no environment debugging.
+I just wanted to code. Open my editor, tweak something, run it on a GPU. The same way I'd run anything locally. I didn't want to think about SLURM, or Singularity, or syncing files, or setting up environments on a cluster, or getting Duo-pushed five times in a row.
 
-The cluster should be invisible. tccp abstracts away the compute.
+So I built tccp. It makes the cluster disappear. You write code on your laptop, and tccp gets it running on a GPU. That's it.
 
 ```
-$ tccp setup              # store credentials (once)
-$ tccp register           # create tccp.yaml (once)
-$ tccp                    # connect
-tccp> run train           # that's it
+$ tccp setup              # save your credentials once
+$ tccp register           # set up your project once
+$ tccp                    # connect (one Duo push)
+tccp> run train           # go
 ```
 
-One SSH connection. One Duo push. Your code syncs, the container pulls, the venv builds, the job runs. Attach, detach, reattach. Jobs survive disconnects.
+Your code syncs, the container and venv get set up if needed, and the job runs. You can attach to it, detach, come back later. If your WiFi drops or your laptop sleeps, the job keeps going. Reconnect whenever and pick up where you left off.
 
 ## Install
 
-Download the latest binary from [releases](https://github.com/sethlupo/tccp/releases/latest):
-
-| Platform | Binary |
-|----------|--------|
-| macOS (Apple Silicon) | [tccp-macos-arm64](https://github.com/sethlupo/tccp/releases/latest/download/tccp-macos-arm64) |
-| Linux (x64) | [tccp-linux-x64](https://github.com/sethlupo/tccp/releases/latest/download/tccp-linux-x64) |
-| Windows (x64) | [tccp-windows-x64.exe](https://github.com/sethlupo/tccp/releases/latest/download/tccp-windows-x64.exe) |
-
+**macOS / Linux:**
 ```
-chmod +x tccp-macos-arm64
-sudo mv tccp-macos-arm64 /usr/local/bin/tccp
+curl -fsSL https://sethlupo.github.io/tccp/install.sh | sh
 ```
+
+**Windows (PowerShell):**
+```
+irm https://sethlupo.github.io/tccp/install.ps1 | iex
+```
+
+Or download binaries directly from [releases](https://github.com/sethlupo/tccp/releases/latest).
 
 ## Docs
 
-Full documentation: **[sethlupo.github.io/tccp](https://sethlupo.github.io/tccp)**
+Everything else lives at **[sethlupo.github.io/tccp](https://sethlupo.github.io/tccp)**:
 
-- [How it works](https://sethlupo.github.io/tccp/architecture.html) -- architecture, SSH topology, design decisions
-- [Commands](https://sethlupo.github.io/tccp/commands.html) -- every command with examples
-- [Usage](https://sethlupo.github.io/tccp/usage.html) -- VPN setup, tccp.yaml reference, interactivity, secrets
+- [How it works](https://sethlupo.github.io/tccp/architecture.html) -- what's happening under the hood
+- [Commands](https://sethlupo.github.io/tccp/commands.html) -- every command, with examples
+- [Usage guide](https://sethlupo.github.io/tccp/usage.html) -- config, secrets, interactivity, tips
 
 ## Network
 
-Requires Tufts network access:
-- **Cisco VPN** (recommended) -- no repeated Duo pushes
-- **Campus WiFi** -- works, but each session triggers a Duo push
+You need to be on the Tufts network. Either:
+- **Cisco VPN** (recommended) -- connect once, no repeated Duo pushes
+- **Campus WiFi** -- works fine, but you'll get a Duo push each time you start tccp
 
 ## License
 

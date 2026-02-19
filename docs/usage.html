@@ -16,35 +16,35 @@
 <a href="usage.html">usage</a>
 </nav>
 
-<h2>network requirements</h2>
+<h2>getting on the network</h2>
 <p class="note">
-You must be on the Tufts network to connect.
+You need to be on the Tufts network to use tccp.
 </p>
 <ul>
-<li><b>Cisco AnyConnect VPN</b> (recommended) &mdash; connect once, use tccp freely. No repeated Duo pushes.</li>
-<li><b>Tufts campus WiFi</b> &mdash; works, but every <code>tccp</code> session triggers a Duo push since it opens a new SSH connection.</li>
+<li><b>Cisco AnyConnect VPN</b> (recommended) &mdash; connect once and you're good. No repeated Duo pushes.</li>
+<li><b>Tufts campus WiFi</b> &mdash; works fine, but you'll get a Duo push every time you start tccp since it opens a fresh SSH connection.</li>
 </ul>
 
-<h2>setup</h2>
+<h2>first time</h2>
 <pre>
-# 1. Store credentials (once)
+# save your credentials (username, password, email)
 $ tccp setup
 
-# 2. Register your project
+# go to your project and register it
 $ cd my-ml-project
 $ tccp register
 
-# 3. Connect
+# connect
 $ tccp
 </pre>
 <p>
-<code>tccp setup</code> stores your Tufts username, password, and email.
-<code>tccp register</code> walks you through creating <code>tccp.yaml</code> in your project directory.
-Both are CLI-only &mdash; they run outside the REPL.
+<code>tccp setup</code> and <code>tccp register</code> are one-time things.
+After that, you just run <code>tccp</code> from your project directory to
+connect and start working.
 </p>
 
 <h2>tccp.yaml</h2>
-<p>This file lives in your project root. Minimal example:</p>
+<p>This lives in your project root. Here's a simple one:</p>
 <pre>
 type: python-pytorch
 gpu: t4
@@ -56,80 +56,87 @@ jobs:
   train:
     script: train.py
 </pre>
-<p>Per-job options (all optional):</p>
+<p>You can add more options per job. Everything here is optional &mdash;
+tccp has reasonable defaults for all of it:</p>
 <pre>
 jobs:
   train:
     script: train.py
-    time: "4:00:00"       # max walltime (default: 1:00:00)
-    args: "--lr 0.001"    # default CLI arguments
-    ports: [6006]         # port forwarding (tensorboard, jupyter)
-    memory: "16G"         # memory per node
-    gpu: a100             # override project-level GPU
-    gpu_count: 2          # number of GPUs
+    time: "4:00:00"       # walltime limit (default: 1:00:00)
+    args: "--lr 0.001"    # default arguments
+    ports: [6006]         # auto-forwarded (tensorboard, jupyter, etc.)
+    memory: "16G"         # per node
+    gpu: a100             # override the project-level GPU
+    gpu_count: 2          # more than one GPU
   eval:
     script: eval.py
     time: "0:30:00"
 </pre>
 
-<h2>secrets (.env)</h2>
+<h2>secrets</h2>
 <p>
-Create a <code>.env</code> file in your project root with <code>KEY=VALUE</code> lines.
-It is synced to the compute node automatically and never tracked by git.
+Put API keys and tokens in a <code>.env</code> file in your project root.
+tccp syncs it to the compute node automatically, and it's never tracked
+by git.
 </p>
 <pre>
 HF_TOKEN=hf_xxxxxxxxxxxxx
 WANDB_API_KEY=xxxxxxxxxx
 </pre>
-<p>Access them in your code with <code>os.environ</code> or <code>python-dotenv</code>.</p>
+<p>Use <code>os.environ["HF_TOKEN"]</code> or <code>python-dotenv</code>
+to read them in your code.</p>
 
 <h2>running jobs</h2>
 <pre>
 tccp> run train
 </pre>
-<p>This triggers a background init sequence:</p>
+<p>Behind the scenes, tccp:</p>
 <ol>
-<li>Find or allocate a SLURM compute node</li>
-<li>Check environment (container, venv, dtach)</li>
-<li>Sync your code to the compute node</li>
-<li>Launch the job under dtach</li>
+<li>Finds an idle allocation or requests a new one from SLURM</li>
+<li>Makes sure the container, venv, and dtach are all set up</li>
+<li>Syncs your code to the compute node (only files that changed)</li>
+<li>Launches the job and attaches you to the output</li>
 </ol>
-<p>You can keep using the REPL while init runs. Notifications appear when each step completes.</p>
+<p>This all happens in the background. You can keep typing commands while
+it sets up, and you'll get notified as each step finishes.</p>
 
 <pre>
-# Pass extra arguments
+# pass extra arguments to your script
 tccp> run train --epochs 100 --batch-size 64
 
-# Run multiple jobs
+# run multiple jobs at once
 tccp> run train
 tccp> run eval
 </pre>
 
 <h2>interactivity</h2>
 
-<h3>attach / detach</h3>
+<h3>attach and detach</h3>
 <p>
-<code>view</code> attaches you to a running job's terminal output.
-Press <code>Ctrl+C</code> to detach &mdash; the job keeps running.
-Run <code>view</code> again to reattach.
+<code>view</code> connects you to a running job's output stream. Hit
+<code>Ctrl+C</code> to detach &mdash; the job keeps running in the background.
+Come back anytime with <code>view</code> again.
 </p>
 <pre>
-tccp> view train         # attach to output stream
-(Ctrl+C to detach)
-tccp> view train         # reattach anytime
+tccp> view train
+... watching output ...
+(Ctrl+C)
+tccp> view train         # right back where you were
 </pre>
 
-<h3>scrollback</h3>
+<h3>scrolling through output</h3>
 <p>
-While viewing a job, press <code>Up/Down</code> or <code>PgUp/PgDn</code> to scroll
-through output history. Press <code>q</code> to exit scroll mode,
-<code>f</code> to follow live output again.
+While you're viewing a job, <code>Up/Down</code> and <code>PgUp/PgDn</code>
+let you scroll through everything the job has printed so far.
+<code>q</code> exits scroll mode, <code>f</code> jumps back to following
+live output.
 </p>
 
-<h3>interactive shell</h3>
+<h3>getting a shell</h3>
 <p>
-<code>open</code> drops you into a bash shell inside the Singularity container
-on the compute node. Your code, venv, and all env vars are available.
+<code>open</code> puts you inside a bash shell on the compute node, running
+inside the same Singularity container as your job. Your code is there, your
+venv is active, all your env vars are set.
 </p>
 <pre>
 tccp> open train
@@ -138,60 +145,61 @@ True
 train@c0001> exit
 </pre>
 
-<h2>jobs persist</h2>
+<h2>jobs survive disconnects</h2>
 <p>
-Jobs survive disconnects. If your laptop sleeps, WiFi drops, or you
-<code>quit</code> the REPL, running jobs continue on the compute node.
-Reconnect with <code>tccp</code> and your jobs are still there.
+If your laptop sleeps, your WiFi drops, or you just close the terminal,
+your jobs keep running on the cluster. Next time you run <code>tccp</code>,
+everything's still there.
 </p>
 <pre>
 $ tccp
-tccp> jobs               # shows your running jobs
-tccp> view train         # reattach
+tccp> jobs               # all your jobs, still going
+tccp> view train         # reattach like nothing happened
 </pre>
 <p>
-Output is automatically downloaded when a job completes. If you're
-disconnected when it finishes, it downloads on your next connect.
+When a job finishes, tccp downloads the output for you automatically. If
+you happen to be disconnected when it completes, it'll download next time
+you connect.
 </p>
 
-<h2>allocations</h2>
+<h2>allocation reuse</h2>
 <p>
-tccp reuses SLURM allocations across jobs. If you run
-<code>train</code>, cancel it, and run <code>eval</code> with the same
-resource requirements, it reuses the existing allocation &mdash; no waiting
-in the queue again.
+tccp doesn't throw away SLURM allocations when a job finishes. If you run
+another job that needs the same resources, it reuses the existing node
+instead of waiting in the queue again.
 </p>
 <pre>
-tccp> allocs             # see current allocations
-tccp> dealloc all        # release all idle allocations
+tccp> allocs             # see what you have
+tccp> dealloc all        # release everything when you're done for the day
 </pre>
 <p class="note">
-Idle allocations still consume SUs. Release them when you're done.
+Heads up: idle allocations still burn SUs. Don't forget to release them
+when you're done working.
 </p>
 
 <h2>port forwarding</h2>
 <p>
-Declare ports in <code>tccp.yaml</code> and they're forwarded automatically
-when the job starts.
+If your job runs a web server (TensorBoard, Jupyter, etc.), declare the
+ports in your config and they get forwarded to localhost automatically.
 </p>
 <pre>
 jobs:
   train:
     script: train.py
-    ports: [6006]        # tensorboard
+    ports: [6006]
 </pre>
 <p>
-Then open <code>http://localhost:6006</code> in your browser.
-Forwarding uses SSH protocol-level tunnels &mdash; no extra auth.
+Then just open <code>http://localhost:6006</code> in your browser. No
+SSH tunnel setup needed.
 </p>
 
-<h2>tips</h2>
+<h2>good to know</h2>
 <ul>
-<li><code>.gitignore</code> (or <code>.tccpignore</code>) controls what gets synced. Keep large files out.</li>
-<li><code>requirements.txt</code> is auto-installed on each run (cached by hash).</li>
-<li>Use <code>cache:</code> for data that should persist across jobs on the same node.</li>
-<li><code>output:</code> directory is synced back to your local machine after each job.</li>
-<li><code>refresh</code> reloads <code>tccp.yaml</code> without reconnecting.</li>
+<li>Your <code>.gitignore</code> (or <code>.tccpignore</code>) controls which files get synced. Keep large data files out of it.</li>
+<li>If you have a <code>requirements.txt</code>, tccp installs it automatically before each run. It caches by hash, so unchanged requirements are a no-op.</li>
+<li>The <code>cache</code> directory persists across jobs on the same node &mdash; good for downloaded datasets or model checkpoints.</li>
+<li>The <code>output</code> directory gets synced back to your laptop after each job.</li>
+<li>Changed your tccp.yaml? Type <code>refresh</code> in the REPL to pick up the changes without reconnecting.</li>
 </ul>
 
 </body>

@@ -18,47 +18,47 @@
 </nav>
 
 <div class="hero">
-<h2>motivation</h2>
+<h2>why this exists</h2>
 <p>
-I wanted to write ML code like I write any other code. Locally.
-Open my editor, change a file, run it. No SLURM scripts, no scp,
-no ssh tunnels, no quota math, no environment debugging.
+I just wanted to code. Open my editor, change a file, run it on a GPU.
+The same loop I'd have locally. I didn't want to write SLURM scripts, scp
+files around, manage containers, debug module loads, do quota math, or
+get Duo-pushed into oblivion.
 </p>
 <p>
-The cluster should be invisible. I should not have to think about
-allocations, Singularity containers, scratch directories, NFS mounts,
-or Duo pushes. I should type one command and my code runs on a GPU.
+The cluster should be invisible. Type one command, your code runs on a GPU.
+That was the whole idea.
 </p>
 <p>
-tccp abstracts away the compute. You code locally. tccp handles everything
-between your laptop and the GPU.
+tccp sits between your laptop and the compute node and handles all the
+stuff in between. You just write code.
 </p>
 </div>
 
-<h2>what it does</h2>
+<h2>what it handles for you</h2>
 <ul>
-<li>One SSH connection, one Duo push per session</li>
-<li>Syncs your code to the compute node automatically</li>
-<li>Pulls and caches Singularity containers</li>
-<li>Creates and manages Python virtualenvs</li>
-<li>Allocates and reuses SLURM compute nodes</li>
-<li>Attach/detach from running jobs (like tmux)</li>
-<li>Port forwarding for TensorBoard, Jupyter, etc.</li>
-<li>Auto-retrieves output when jobs finish</li>
+<li>Connects with a single SSH session and a single Duo push</li>
+<li>Syncs your code to the compute node when you run a job</li>
+<li>Pulls and caches Singularity containers as needed</li>
+<li>Sets up Python virtualenvs and installs your requirements.txt</li>
+<li>Finds or allocates SLURM compute nodes (and reuses them across jobs)</li>
+<li>Lets you attach and detach from running jobs, like tmux</li>
+<li>Forwards ports for things like TensorBoard and Jupyter</li>
+<li>Brings your output files back when the job finishes</li>
 </ul>
 
 <h2>quick start</h2>
 <pre>
-# 1. Install (see install page)
+# install the binary (see install page)
 
-# 2. Store your Tufts credentials
+# save your Tufts credentials once
 $ tccp setup
 
-# 3. Register your project
+# set up your project
 $ cd my-project
 $ tccp register
 
-# 4. Connect and run
+# connect and run
 $ tccp
 tccp> run train
 </pre>
