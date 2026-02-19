@@ -2,8 +2,8 @@
 
 // ── SSH options ─────────────────────────────────────────────
 // Standard options for SSH hops through DTN to compute nodes.
-constexpr const char* SSH_OPTS = "-o StrictHostKeyChecking=no -o BatchMode=yes";
-constexpr const char* SSH_OPTS_FAST = "-o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3";
+constexpr const char* SSH_OPTS = "-o StrictHostKeyChecking=no -o BatchMode=yes -o LogLevel=ERROR";
+constexpr const char* SSH_OPTS_FAST = "-o StrictHostKeyChecking=no -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=3";
 
 // ── Timeouts ────────────────────────────────────────────────
 constexpr int SSH_CMD_TIMEOUT_SECS       = 300;   // Max time for a single SSH command

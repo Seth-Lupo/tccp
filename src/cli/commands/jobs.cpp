@@ -154,7 +154,7 @@ void do_ssh(BaseCLI& cli, const std::string& arg) {
     if (remote_cmd.empty()) {
         // Interactive: DTN exec channel → SSH hop to compute node
         std::string cmd = fmt::format(
-            "ssh -t -o StrictHostKeyChecking=no {} '{}'",
+            "ssh -t -o StrictHostKeyChecking=no -o LogLevel=ERROR {} '{}'",
             tracked->compute_node, shell_cmd);
         interactive_relay(factory, cmd);
     } else {
@@ -177,7 +177,7 @@ void do_clusterssh(BaseCLI& cli, const std::string& arg) {
     auto& factory = *cli.service.cluster();
     std::string login_host = cli.service.config().login().host;
     std::string cmd = fmt::format(
-        "ssh -t -o StrictHostKeyChecking=no {}", login_host);
+        "ssh -t -o StrictHostKeyChecking=no -o LogLevel=ERROR {}", login_host);
     interactive_relay(factory, cmd);
 }
 

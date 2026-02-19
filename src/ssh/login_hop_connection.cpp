@@ -12,7 +12,7 @@ SSHResult LoginHopConnection::run(const std::string& command, int timeout_secs) 
     // Wrap command in SSH hop to login node via DTN shell.
     // </dev/null prevents SSH from consuming the next line in the TTY buffer
     // (the DONE marker), which SSHConnection::run() sends as a separate line.
-    std::string wrapped = "ssh -T -o StrictHostKeyChecking=no " +
+    std::string wrapped = "ssh -T -o StrictHostKeyChecking=no -o LogLevel=ERROR " +
                           login_host_ + " " + escape_for_ssh(command) + " </dev/null";
     return SSHConnection::run(wrapped, timeout_secs);
 }

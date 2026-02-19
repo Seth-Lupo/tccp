@@ -151,7 +151,7 @@ bool SyncManager::pipe_tar_to_node(const fs::path& tar_path,
     // Single command through primary shell: decode base64, pipe through SSH hop
     // to compute node where it's extracted. Verify with MD5 checksum.
     std::string cmd = fmt::format(
-        "base64 -d << 'TCCP_B64_EOF' | ssh -T {} {} '"
+        "base64 -d 2>/dev/null << 'TCCP_B64_EOF' | ssh -T {} {} '"
         "mkdir -p {} && cd {} && tar xf - 2>/dev/null; "
         "if [ -f {}/{} ]; then md5sum {}/{} | cut -d\" \" -f1; fi'\n"
         "{}TCCP_B64_EOF",
@@ -168,23 +168,30 @@ bool SyncManager::pipe_tar_to_node(const fs::path& tar_path,
             result.exit_code, result.stderr_data, result.stdout_data));
     }
 
-    // Verify MD5 checksum
-    std::string remote_md5 = result.stdout_data;
-    trim(remote_md5);
+    // Verify MD5 checksum — extract 32-char hex string from output,
+    // which may contain stray stderr (base64 warnings, SSH messages).
+    std::string remote_md5;
+    std::string output = result.stdout_data;
+    trim(output);
+    // Search for a 32-char hex string (the MD5) in the output
+    {
+        std::istringstream iss(output);
+        std::string line;
+        while (std::getline(iss, line)) {
+            trim(line);
+            if (line.size() == 32 &&
+                line.find_first_not_of("0123456789abcdef") == std::string::npos) {
+                remote_md5 = line;
+                break;
+            }
+        }
+    }
 
     if (remote_md5.empty()) {
         throw std::runtime_error(fmt::format(
-            "Sync verification failed: {} not found on compute node after extraction. "
-            "Expected MD5: {}. Command output was empty - tar may have failed to extract.",
-            probe_file, expected_md5));
-    }
-
-    // Validate MD5 format (should be 32 hex chars)
-    if (remote_md5.length() != 32) {
-        throw std::runtime_error(fmt::format(
-            "Invalid MD5 format from remote: '{}' (expected 32 hex chars). "
-            "Full command output: '{}'",
-            remote_md5, result.stdout_data));
+            "Sync verification failed: could not find MD5 in remote output. "
+            "Expected: {}. Full output: '{}'",
+            expected_md5, output));
     }
 
     if (remote_md5 != expected_md5) {
