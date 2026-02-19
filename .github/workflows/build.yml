@@ -15,9 +15,6 @@ jobs:
           - os: ubuntu-latest
             triplet: x64-linux
             artifact: tccp-linux-x64
-          - os: windows-latest
-            triplet: x64-windows-static
-            artifact: tccp-windows-x64.exe
           - os: macos-latest
             triplet: arm64-osx
             artifact: tccp-macos-arm64
@@ -41,30 +38,69 @@ jobs:
     - name: Build
       run: cmake --build build --config Release --parallel
 
-    - name: Strip binary (Unix)
-      if: runner.os != 'Windows'
+    - name: Strip binary
       run: strip build/tccp || true
 
     - name: Test binary
       run: ./build/tccp --version
-      shell: bash
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.artifact }}
-        path: build/tccp${{ runner.os == 'Windows' && '.exe' || '' }}
+        path: build/tccp
 
     - name: Rename binary for release
       if: github.event_name == 'release'
-      run: cp build/tccp${{ runner.os == 'Windows' && '.exe' || '' }} ${{ matrix.artifact }}
-      shell: bash
+      run: cp build/tccp ${{ matrix.artifact }}
 
     - name: Release binary
       if: github.event_name == 'release'
       uses: softprops/action-gh-release@v2
       with:
         files: ${{ matrix.artifact }}
+
+  build-windows:
+    runs-on: windows-latest
+    continue-on-error: true
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: Cache vcpkg installed packages
+      uses: actions/cache@v4
+      with:
+        path: build/vcpkg_installed
+        key: vcpkg-x64-windows-static-${{ hashFiles('vcpkg.json') }}
+
+    - name: Configure CMake
+      run: cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DTCCP_STATIC_BUILD=ON -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --config Release --parallel
+
+    - name: Test binary
+      run: ./build/Release/tccp.exe --version
+      shell: bash
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: tccp-windows-x64.exe
+        path: build/Release/tccp.exe
+
+    - name: Rename binary for release
+      if: github.event_name == 'release'
+      run: cp build/Release/tccp.exe tccp-windows-x64.exe
+      shell: bash
+
+    - name: Release binary
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: tccp-windows-x64.exe
 
   update-tap:
     if: github.event_name == 'release'
