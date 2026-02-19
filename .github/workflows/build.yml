@@ -1,26 +1,19 @@
-name: Build Binaries
+name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
-  release:
-    types: [created]
-
-permissions:
-  contents: write
 
 jobs:
-  build:
+  check:
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             triplet: x64-linux
-            artifact: tccp-linux-x64
           - os: macos-latest
             triplet: arm64-osx
-            artifact: tccp-macos-arm64
 
     runs-on: ${{ matrix.os }}
 
@@ -36,34 +29,15 @@ jobs:
         key: vcpkg-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json') }}
 
     - name: Configure CMake
-      run: cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DTCCP_STATIC_BUILD=ON -DCMAKE_BUILD_TYPE=Release
+      run: cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DCMAKE_BUILD_TYPE=Release
 
     - name: Build
       run: cmake --build build --config Release --parallel
 
-    - name: Strip binary
-      run: strip build/tccp || true
-
     - name: Test binary
       run: ./build/tccp --version
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.artifact }}
-        path: build/tccp
-
-    - name: Rename binary for release
-      if: github.event_name == 'release'
-      run: cp build/tccp ${{ matrix.artifact }}
-
-    - name: Release binary
-      if: github.event_name == 'release'
-      uses: softprops/action-gh-release@v2
-      with:
-        files: ${{ matrix.artifact }}
-
-  build-windows:
+  check-windows:
     runs-on: windows-latest
     continue-on-error: true
 
@@ -87,92 +61,3 @@ jobs:
     - name: Test binary
       run: ./build/Release/tccp.exe --version
       shell: bash
-
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: tccp-windows-x64.exe
-        path: build/Release/tccp.exe
-
-    - name: Rename binary for release
-      if: github.event_name == 'release'
-      run: cp build/Release/tccp.exe tccp-windows-x64.exe
-      shell: bash
-
-    - name: Release binary
-      if: github.event_name == 'release'
-      uses: softprops/action-gh-release@v2
-      with:
-        files: tccp-windows-x64.exe
-
-  update-tap:
-    if: github.event_name == 'release'
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-    - name: Get release info
-      id: release
-      run: |
-        VERSION="${GITHUB_REF#refs/tags/v}"
-        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-        MACOS_URL="https://github.com/Seth-Lupo/tccp/releases/download/v${VERSION}/tccp-macos-arm64"
-        LINUX_URL="https://github.com/Seth-Lupo/tccp/releases/download/v${VERSION}/tccp-linux-x64"
-
-        curl -fSL -o macos-bin "$MACOS_URL"
-        curl -fSL -o linux-bin "$LINUX_URL"
-
-        echo "macos_sha=$(sha256sum macos-bin | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-        echo "linux_sha=$(sha256sum linux-bin | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-    - name: Checkout tap
-      uses: actions/checkout@v4
-      with:
-        repository: Seth-Lupo/homebrew-tap
-        token: ${{ secrets.TAP_TOKEN }}
-
-    - name: Update formula
-      run: |
-        VERSION="${{ steps.release.outputs.version }}"
-        MACOS_SHA="${{ steps.release.outputs.macos_sha }}"
-        LINUX_SHA="${{ steps.release.outputs.linux_sha }}"
-
-        cat > Formula/tccp.rb << EOF
-        class Tccp < Formula
-          desc "CLI for running code on HPC clusters"
-          homepage "https://seth-lupo.github.io/tccp"
-          version "${VERSION}"
-          license "MIT"
-
-          on_macos do
-            on_arm do
-              url "https://github.com/Seth-Lupo/tccp/releases/download/v${VERSION}/tccp-macos-arm64"
-              sha256 "${MACOS_SHA}"
-            end
-          end
-
-          on_linux do
-            on_intel do
-              url "https://github.com/Seth-Lupo/tccp/releases/download/v${VERSION}/tccp-linux-x64"
-              sha256 "${LINUX_SHA}"
-            end
-          end
-
-          def install
-            binary = stable.url.split("/").last
-            bin.install binary => "tccp"
-          end
-
-          test do
-            assert_match "version", shell_output("#{bin}/tccp --version")
-          end
-        end
-        EOF
-
-    - name: Commit and push
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add Formula/tccp.rb
-        git commit -m "Update tccp to ${{ steps.release.outputs.version }}"
-        git push
