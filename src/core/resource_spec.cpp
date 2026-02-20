@@ -24,8 +24,13 @@ std::string generate_sbatch_resources(const SlurmDefaults& profile) {
     }
     s += fmt::format("#SBATCH --partition={}\n", partition);
 
-    int nodes = profile.nodes > 0 ? profile.nodes : 1;
-    s += fmt::format("#SBATCH --nodes={}\n", nodes);
+    // Explicitly set ntasks=1 so the scheduler knows the job shape.
+    // Only set --nodes when user explicitly requests >1 node;
+    // omitting it for single-node jobs lets backfill work more freely.
+    s += "#SBATCH --ntasks=1\n";
+    if (profile.nodes > 1) {
+        s += fmt::format("#SBATCH --nodes={}\n", profile.nodes);
+    }
 
     int cpus = profile.cpus_per_task > 0 ? profile.cpus_per_task : 1;
     s += fmt::format("#SBATCH --cpus-per-task={}\n", cpus);
@@ -38,12 +43,13 @@ std::string generate_sbatch_resources(const SlurmDefaults& profile) {
         s += fmt::format("#SBATCH --gres={}\n", gres);
     }
 
-    if (!profile.node_constraint.empty()) {
-        s += fmt::format("#SBATCH -w {}[001-999]\n", profile.node_constraint);
-    }
-
     if (!profile.exclude_nodes.empty()) {
         s += fmt::format("#SBATCH --exclude={}\n", profile.exclude_nodes);
+    }
+
+    // Preemptible jobs should auto-requeue when preempted
+    if (partition == "preempt") {
+        s += "#SBATCH --requeue\n";
     }
 
     if (!profile.mail_type.empty() && profile.mail_type != "NONE") {

@@ -105,7 +105,7 @@ void TCCPCLI::run_connected_repl() {
     std::cout << theme::section("Connecting");
 
     auto callback = [](const std::string& msg) {
-        std::cout << theme::dim(msg) << "\n";
+        std::cout << theme::dim("    " + msg) << "\n";
     };
 
     auto result = service.connect(callback);
@@ -284,16 +284,13 @@ void TCCPCLI::monitor_loop() {
         }
 
         // Local state diff to detect init-thread and completion transitions
-        std::vector<std::string> output_msgs;
         auto msgs = collect_job_events();
 
-        // Print notifications + output messages as a grouped block
-        if ((!msgs.empty() || !output_msgs.empty()) && rx_ptr_) {
+        // Print notifications as a grouped block via replxx (prompt-safe)
+        if (!msgs.empty() && rx_ptr_) {
             std::string output = "\r\033[2K";
             for (const auto& m : msgs)
                 output += theme::info(m);
-            for (const auto& m : output_msgs)
-                output += theme::step(m);
             rx_ptr_->write(output.c_str(), static_cast<int>(output.size()));
             rx_ptr_->set_prompt(current_prompt_);
         }
@@ -301,7 +298,15 @@ void TCCPCLI::monitor_loop() {
         // Fallback SSH poll every 60s (watcher died, stale state, etc.)
         if ((now - last_ssh_poll) >= std::chrono::seconds(60)) {
             last_ssh_poll = now;
-            poll_and_return_output();
+            std::vector<std::string> poll_msgs;
+            poll_and_return_output(&poll_msgs);
+            if (!poll_msgs.empty() && rx_ptr_) {
+                std::string output = "\r\033[2K";
+                for (const auto& m : poll_msgs)
+                    output += theme::step(m);
+                rx_ptr_->write(output.c_str(), static_cast<int>(output.size()));
+                rx_ptr_->set_prompt(current_prompt_);
+            }
         }
 
         // Sleep in small increments so stop_monitor() returns quickly

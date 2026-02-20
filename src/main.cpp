@@ -3,6 +3,8 @@
 #include <string>
 #include "cli/tccp_cli.hpp"
 #include "cli/theme.hpp"
+#include "platform/singleton.hpp"
+#include "platform/platform.hpp"
 
 void print_usage() {
     std::cout << theme::banner();
@@ -38,7 +40,21 @@ int main(int argc, char** argv) {
     try {
         TCCPCLI cli;
 
+        // Commands that need the singleton lock (REPL sessions)
+        auto require_singleton = [&]() -> bool {
+            static std::string lock_path =
+                (platform::home_dir() / ".tccp" / "tccp.lock").string();
+            static SingletonLock lock(lock_path);
+            if (!lock.held()) {
+                std::cout << theme::error("Another tccp session is already running.");
+                std::cout << theme::dim("Only one instance can run at a time.") << "\n";
+                return false;
+            }
+            return true;
+        };
+
         if (argc == 1) {
+            if (!require_singleton()) return 1;
             cli.run_connected_repl();
         } else {
             std::string cmd = argv[1];
@@ -52,6 +68,7 @@ int main(int argc, char** argv) {
                 print_usage();
                 return 0;
             } else if (cmd == "connect") {
+                if (!require_singleton()) return 1;
                 cli.run_connected_repl();
             } else if (cmd == "register") {
                 cli.run_register(argc >= 3 ? argv[2] : "");

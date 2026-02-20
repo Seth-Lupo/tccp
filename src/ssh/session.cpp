@@ -1,5 +1,6 @@
 #include "session.hpp"
 #include <platform/platform.hpp>
+#include <platform/terminal.hpp>
 #include <platform/socket_util.hpp>
 #include <libssh2.h>
 #ifdef _WIN32
@@ -205,8 +206,11 @@ SSHResult SessionManager::establish_connection(StatusCallback callback) {
         platform::sleep_ms(100);
     }
 
-    // Request PTY
-    while ((ret = libssh2_channel_request_pty(channel_, "xterm")) == LIBSSH2_ERROR_EAGAIN) {
+    // Request PTY with actual terminal dimensions
+    int tw = platform::term_width();
+    int th = platform::term_height();
+    while ((ret = libssh2_channel_request_pty_ex(
+                channel_, "xterm", 5, nullptr, 0, tw, th, 0, 0)) == LIBSSH2_ERROR_EAGAIN) {
         platform::sleep_ms(100);
     }
 

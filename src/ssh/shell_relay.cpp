@@ -129,6 +129,13 @@ void ShellRelay::run(const std::string& command) {
     platform::on_terminal_resize([] { g_relay_resize = 1; });
     platform::RawModeGuard raw(platform::RawModeGuard::kFullRaw);
 
+    // Set PTY to actual terminal size before entering the loop
+    {
+        std::lock_guard<std::mutex> lock(*io_mutex_);
+        libssh2_channel_request_pty_size(
+            ch_, platform::term_width(), platform::term_height());
+    }
+
     char rbuf[16384];
 
     while (!done_) {

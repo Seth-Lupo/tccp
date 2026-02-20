@@ -378,13 +378,8 @@ Result<AllocationState> AllocationManager::allocate(const SlurmDefaults& profile
         if (resolved.gpu_type.empty()) {
             resolved.gpu_type = match.gpu_type;
         }
-        if (!match.node_prefix.empty()) {
-            resolved.node_constraint = match.node_prefix;
-        }
-        if (cb) cb(fmt::format("Using partition '{}' (gpu:{}:{}{})",
-                               match.partition, match.gpu_type, match.gpu_per_node,
-                               match.node_prefix.empty() ? "" :
-                               fmt::format(" nodes={}*", match.node_prefix)));
+        if (cb) cb(fmt::format("Using partition '{}' (gpu:{}:{})",
+                               match.partition, match.gpu_type, match.gpu_per_node));
     }
 
     // Ensure base directories exist

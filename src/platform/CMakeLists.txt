@@ -4,6 +4,7 @@ add_library(tccp_platform
     socket_util.cpp
     process.cpp
     archive.cpp
+    singleton.cpp
 )
 
 target_include_directories(tccp_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
