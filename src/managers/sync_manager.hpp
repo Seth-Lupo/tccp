@@ -72,4 +72,16 @@ private:
     void cleanup_stale_scratches(const std::string& compute_node,
                                  const std::string& scratch_path,
                                  const std::set<std::string>& active_scratches);
+
+    // Verify scratch integrity: probe file MD5 matches AND remote file count
+    // is at least as large as the manifest. Catches both corruption and
+    // partial extraction from previous syncs.
+    bool verify_scratch_integrity(const std::string& compute_node,
+                                  const std::string& scratch_path,
+                                  const std::string& probe_file,
+                                  const std::string& expected_md5,
+                                  size_t expected_file_count);
+
+    // Extract a 32-char hex MD5 hash from noisy command output.
+    static std::string parse_md5_from_output(const std::string& output);
 };

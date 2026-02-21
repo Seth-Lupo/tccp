@@ -120,6 +120,12 @@ private:
     std::string container_cache() const;
     std::string scratch_dir(const std::string& job_id) const;
 
+    // Build an SSH command to run on a compute node via the DTN.
+    // The command body must not contain unescaped single quotes — use
+    // double quotes for any internal quoting needs. This ensures one
+    // clean layer of single-quote wrapping around the entire payload.
+    static std::string ssh_to_node(const std::string& node, const std::string& cmd);
+
     std::string generate_job_id(const std::string& job_name) const;
     void ensure_environment(const std::string& compute_node, StatusCallback cb);
     void ensure_container(const std::string& compute_node,
@@ -133,6 +139,13 @@ private:
     void ensure_dtach(StatusCallback cb);
     void ensure_dirs(const std::string& job_id, StatusCallback cb);
 
+    // Install requirements.txt into the venv on the compute node (via singularity).
+    // Runs after sync so requirements.txt is in scratch. Reports progress via cb.
+    // Throws on failure so the job doesn't launch with missing packages.
+    void ensure_requirements(const std::string& compute_node,
+                             const std::string& scratch,
+                             StatusCallback cb);
+
     // Resolved environment paths used for run scripts and shell commands.
     // Computed once via resolve_env_paths(), shared across launch/shell methods.
     struct JobEnvPaths {
@@ -140,14 +153,13 @@ private:
         std::string venv;           // venv directory
         std::string binds;          // singularity --bind flags (including --nv)
         std::string runtime_cache;  // temp dir for HOME/XDG/TMPDIR
-        std::string req_filter;     // bash snippet to filter requirements.txt
         std::string log;            // log file path
         bool has_python;            // environment has python
     };
     JobEnvPaths resolve_env_paths(const std::string& job_id,
                                   const std::string& scratch) const;
 
-    // Common environment preamble for run scripts (module load, cd, env vars, pip install).
+    // Common environment preamble for run scripts (module load, cd, env vars).
     std::string build_run_preamble(const JobEnvPaths& paths,
                                    const std::string& scratch) const;
 

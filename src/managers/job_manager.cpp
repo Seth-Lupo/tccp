@@ -108,6 +108,10 @@ std::string JobManager::scratch_dir(const std::string& job_id) const {
     return fmt::format(REMOTE_SCRATCH_DIR, username_, config_.project().name, job_id);
 }
 
+std::string JobManager::ssh_to_node(const std::string& node, const std::string& cmd) {
+    return fmt::format("ssh {} {} '{}'", SSH_OPTS, node, cmd);
+}
+
 bool JobManager::is_implicit_job(const std::string& job_name) {
     // Add new implicit job types here (e.g. "jupyter", "tensorboard")
     return job_name == "bash";
@@ -142,16 +146,6 @@ JobManager::JobEnvPaths JobManager::resolve_env_paths(const std::string& job_id,
         p.runtime_cache = scratch + "/.tccp-tmp";
     }
 
-    // GPU-aware requirements filter
-    if (env.gpu) {
-        p.req_filter =
-            "        TCCP_REQ_FILE=$(mktemp /tmp/tccp_req_XXXXXX.txt)\n"
-            "        grep -ivE '^(torch|torchvision|torchaudio|pytorch|nvidia-|triton)(\\s|[=><!~\\[]|$)' "
-            "requirements.txt > $TCCP_REQ_FILE\n";
-    } else {
-        p.req_filter = "        TCCP_REQ_FILE=requirements.txt\n";
-    }
-
     return p;
 }
 
@@ -179,22 +173,7 @@ std::string JobManager::build_run_preamble(const JobEnvPaths& paths,
         preamble += fmt::format("export {}='{}'\n", key, val);
     }
 
-    preamble += fmt::format(
-        "if [ -f requirements.txt ]; then\n"
-        "    REQ_HASH=$(md5sum requirements.txt 2>/dev/null | cut -d' ' -f1)\n"
-        "    STAMP={venv}/.req_installed\n"
-        "    if [ ! -f \"$STAMP\" ] || [ \"$(cat $STAMP 2>/dev/null)\" != \"$REQ_HASH\" ]; then\n"
-        "{req_filter}"
-        "        singularity exec {binds} {image} {venv}/bin/pip install -q -r $TCCP_REQ_FILE\n"
-        "        if [ \"$TCCP_REQ_FILE\" != \"requirements.txt\" ]; then rm -f $TCCP_REQ_FILE; fi\n"
-        "        echo \"$REQ_HASH\" > \"$STAMP\"\n"
-        "    fi\n"
-        "fi\n"
-        "printf '\\n__TCCP_JOB_START__\\n'\n",
-        fmt::arg("req_filter", paths.req_filter),
-        fmt::arg("binds", paths.binds),
-        fmt::arg("image", paths.image),
-        fmt::arg("venv", paths.venv));
+    preamble += "printf '\\n__TCCP_JOB_START__\\n'\n";
 
     return preamble;
 }
@@ -495,6 +474,14 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
 
         if (check_canceled()) {
             log_to_file("Canceled after sync");
+            throw std::runtime_error("Canceled during initialization");
+        }
+
+        // Install requirements into venv (on NFS, via compute node)
+        log_to_file("Checking requirements");
+        ensure_requirements(alloc->node, scratch, log_to_file);
+
+        if (check_canceled()) {
             throw std::runtime_error("Canceled during initialization");
         }
 

@@ -37,16 +37,14 @@ void JobManager::ensure_container(const std::string& compute_node,
     dtn_.run(fmt::format("mkdir -p {}/images", cc));
     std::string pull_cache = fmt::format("/tmp/{}/singularity-cache", username_);
     std::string pull_tmp = fmt::format("/tmp/{}/singularity-tmp", username_);
-    std::string pull_cmd = fmt::format(
-        "ssh {} {} '"
+    std::string pull_cmd = ssh_to_node(compute_node, fmt::format(
         "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
         "mkdir -p {} {}; "
         "SINGULARITY_CACHEDIR={} SINGULARITY_TMPDIR={} singularity pull {} {}; "
-        "rm -rf {} {}'",
-        SSH_OPTS, compute_node,
+        "rm -rf {} {}",
         pull_cache, pull_tmp,
         pull_cache, pull_tmp, image, docker_uri,
-        pull_cache, pull_tmp);
+        pull_cache, pull_tmp));
     auto pull_result = dtn_.run(pull_cmd, CONTAINER_PULL_TIMEOUT_SECS);
     if (pull_result.exit_code != 0) {
         throw std::runtime_error(fmt::format("Container pull failed ({}): {}",
@@ -230,6 +228,103 @@ void JobManager::ensure_dtach(StatusCallback cb) {
     }
 }
 
+// ── Requirements ──────────────────────────────────────────
+
+void JobManager::ensure_requirements(const std::string& compute_node,
+                                      const std::string& scratch,
+                                      StatusCallback cb) {
+    const auto& env = get_environment(config_.project().type);
+    std::string venv = env_dir() + "/default/venv";
+    std::string cc = container_cache();
+    std::string image = cc + "/images/" + env.sif_filename;
+    std::string nv_flag = env.gpu ? "--nv " : "";
+    std::string stamp_path = venv + "/.req_installed";
+    std::string pip_tmp = fmt::format("/tmp/{}/tccp-pip-tmp", username_);
+
+    // Check if requirements.txt exists on compute node (scratch is on /tmp, not NFS)
+    auto check = dtn_.run(ssh_to_node(compute_node, fmt::format(
+        "test -f {}/requirements.txt "
+        "&& md5sum {}/requirements.txt | cut -d' ' -f1 "
+        "|| echo NO_REQ", scratch, scratch)));
+
+    std::string req_hash = check.stdout_data;
+    while (!req_hash.empty() && (req_hash.back() == '\n' || req_hash.back() == '\r'))
+        req_hash.pop_back();
+
+    if (req_hash == "NO_REQ" || req_hash.empty()) {
+        return;
+    }
+
+    // Stamp is on NFS — read directly from DTN (no SSH hop).
+    // Format: "v2:<md5>" to version-gate against stale stamps.
+    auto stamp_result = dtn_.run(fmt::format(
+        "cat {} 2>/dev/null || echo NO_STAMP", stamp_path));
+    std::string stamp = stamp_result.stdout_data;
+    while (!stamp.empty() && (stamp.back() == '\n' || stamp.back() == '\r'))
+        stamp.pop_back();
+
+    std::string expected_stamp = "v2:" + req_hash;
+    if (stamp == expected_stamp) {
+        if (cb) cb("Requirements already installed");
+        return;
+    }
+
+    if (cb) cb("Installing requirements...");
+
+    // GPU environments: filter out torch/nvidia packages (container provides them).
+    // Build the filter + pip commands as separate strings, then join.
+    // This avoids nested quote issues by keeping the SSH payload in a single
+    // layer of single quotes with only double quotes inside.
+    std::string filter_step;
+    std::string req_file = fmt::format("{}/requirements.txt", scratch);
+    if (env.gpu) {
+        req_file = pip_tmp + "/tccp_req_filtered.txt";
+        filter_step = fmt::format(
+            "grep -ivE "
+            "\"^(torch|torchvision|torchaudio|pytorch|nvidia-|triton)([ \\t]|[=><!~\\[]|$)\" "
+            "{}/requirements.txt > {} || true; ",
+            scratch, req_file);
+    }
+
+    // Build the full remote command (runs inside ssh '...' single quotes)
+    std::string remote_cmd = fmt::format(
+        "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
+        "mkdir -p {pip_tmp}; "
+        "{filter}"
+        "TMPDIR={pip_tmp} PIP_CACHE_DIR={pip_tmp} "
+        "singularity exec {nv}--bind {scratch}:{scratch} --bind {venv}:{venv} {image} "
+        "{venv}/bin/pip install -q -r {req_file}",
+        fmt::arg("pip_tmp", pip_tmp),
+        fmt::arg("filter", filter_step),
+        fmt::arg("nv", nv_flag),
+        fmt::arg("scratch", scratch),
+        fmt::arg("venv", venv),
+        fmt::arg("image", image),
+        fmt::arg("req_file", req_file));
+
+    auto pip_result = dtn_.run(ssh_to_node(compute_node, remote_cmd), 600);
+
+    // Log pip summary
+    if (cb) {
+        std::string pip_out = pip_result.stdout_data;
+        if (!pip_out.empty()) {
+            if (pip_out.size() > 1500) pip_out = "..." + pip_out.substr(pip_out.size() - 1500);
+            cb(fmt::format("[pip] {}", pip_out));
+        }
+    }
+
+    if (pip_result.exit_code != 0) {
+        std::string output = pip_result.get_output();
+        if (output.size() > 500) output = "..." + output.substr(output.size() - 500);
+        throw std::runtime_error(fmt::format(
+            "pip install failed (exit {}):\n{}", pip_result.exit_code, output));
+    }
+
+    // Write versioned stamp on success (NFS — no SSH hop needed)
+    dtn_.run(fmt::format("echo 'v2:{}' > {}", req_hash, stamp_path));
+    if (cb) cb("Requirements installed");
+}
+
 // ── Launch job on compute node ─────────────────────────────
 
 Result<void> JobManager::launch_on_node(const std::string& job_id,
@@ -265,27 +360,26 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
     dtn_.run("rm -f " + dtn_script);
 
     // Create output symlink
-    r = dtn_.run(fmt::format("ssh {} {} 'ln -sfn {} {}/output'",
-                             SSH_OPTS, compute_node, out_dir, scratch));
+    r = dtn_.run(ssh_to_node(compute_node,
+        fmt::format("ln -sfn {} {}/output", out_dir, scratch)));
     tccp_log_ssh("launch:output-symlink", "ln -sfn", r);
 
     // Create shared cache directory
     if (!proj.cache.empty()) {
         std::string shared_cache = fmt::format("/tmp/{}/{}/.tccp-cache",
                                                username_, proj.name);
-        r = dtn_.run(fmt::format("ssh {} {} 'mkdir -p {}'",
-                                 SSH_OPTS, compute_node, shared_cache));
+        r = dtn_.run(ssh_to_node(compute_node,
+            fmt::format("mkdir -p {}", shared_cache)));
         tccp_log_ssh("launch:cache-dir", "mkdir cache", r);
     }
 
     // Remove stale socket and log from previous run (if scratch was reused)
-    dtn_.run(fmt::format("ssh {} {} 'rm -f {} {}'",
-                         SSH_OPTS, compute_node, sock, paths.log));
+    dtn_.run(ssh_to_node(compute_node,
+        fmt::format("rm -f {} {}", sock, paths.log)));
 
     // Launch dtach
-    std::string launch_cmd = fmt::format(
-        "ssh {} {} '$HOME/tccp/bin/dtach -n {} {}/tccp_run.sh'",
-        SSH_OPTS, compute_node, sock, scratch);
+    std::string launch_cmd = ssh_to_node(compute_node,
+        fmt::format("$HOME/tccp/bin/dtach -n {} {}/tccp_run.sh", sock, scratch));
     r = dtn_.run(launch_cmd);
     tccp_log_ssh("launch:dtach", launch_cmd, r);
 

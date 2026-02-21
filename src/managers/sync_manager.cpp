@@ -111,13 +111,55 @@ void SyncManager::diff_manifests(const std::vector<SyncManifestEntry>& current,
     }
 }
 
-// ── Tar + transfer ─────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────
 
 static fs::path create_local_tar(const fs::path& project_dir,
                                   const std::vector<std::string>& rel_paths) {
     fs::path tar_path = platform::temp_dir() / fmt::format("tccp_sync_{}.tar", std::time(nullptr));
     platform::create_tar(tar_path, project_dir, rel_paths);
     return tar_path;
+}
+
+std::string SyncManager::parse_md5_from_output(const std::string& output) {
+    std::string trimmed = output;
+    trim(trimmed);
+    std::istringstream iss(trimmed);
+    std::string line;
+    while (std::getline(iss, line)) {
+        trim(line);
+        if (line.size() == 32 &&
+            line.find_first_not_of("0123456789abcdef") == std::string::npos) {
+            return line;
+        }
+    }
+    return "";
+}
+
+bool SyncManager::verify_scratch_integrity(const std::string& compute_node,
+                                            const std::string& scratch_path,
+                                            const std::string& probe_file,
+                                            const std::string& expected_md5,
+                                            size_t expected_file_count) {
+    // Single SSH: check probe MD5 and count project files (exclude runtime artifacts)
+    auto result = dtn_.run(fmt::format(
+        "ssh {} {} 'cd {} && "
+        "md5sum {} 2>/dev/null | cut -d\" \" -f1; "
+        "echo FILE_COUNT=$(find . -type f "
+        "! -path \"./.tccp-tmp/*\" ! -name \"tccp.log\" "
+        "! -name \"tccp.sock\" ! -name \"tccp_run.sh\" "
+        "| wc -l)'",
+        SSH_OPTS, compute_node, scratch_path, probe_file));
+
+    std::string output = result.stdout_data;
+
+    // Check probe MD5
+    if (parse_md5_from_output(output) != expected_md5) return false;
+
+    // Check file count — if remote has fewer files than manifest, scratch is incomplete
+    auto pos = output.find("FILE_COUNT=");
+    if (pos == std::string::npos) return false;
+    int remote_count = std::atoi(output.c_str() + pos + 11);
+    return static_cast<size_t>(remote_count) >= expected_file_count;
 }
 
 // Pipe tar to compute node via exec channel with raw binary stdin.
@@ -159,30 +201,13 @@ bool SyncManager::pipe_tar_to_node(const fs::path& tar_path,
             result.exit_code, result.stderr_data, result.stdout_data));
     }
 
-    // Verify MD5 checksum — extract 32-char hex string from output,
-    // which may contain stray stderr (SSH messages, etc.).
-    std::string remote_md5;
-    std::string output = result.stdout_data;
-    trim(output);
-    // Search for a 32-char hex string (the MD5) in the output
-    {
-        std::istringstream iss(output);
-        std::string line;
-        while (std::getline(iss, line)) {
-            trim(line);
-            if (line.size() == 32 &&
-                line.find_first_not_of("0123456789abcdef") == std::string::npos) {
-                remote_md5 = line;
-                break;
-            }
-        }
-    }
+    std::string remote_md5 = parse_md5_from_output(result.stdout_data);
 
     if (remote_md5.empty()) {
         throw std::runtime_error(fmt::format(
             "Sync verification failed: could not find MD5 in remote output. "
             "Expected: {}. Full output: '{}'",
-            expected_md5, output));
+            expected_md5, result.stdout_data));
     }
 
     if (remote_md5 != expected_md5) {
@@ -371,11 +396,11 @@ void SyncManager::sync_to_scratch(const std::string& compute_node,
 
     // Decide sync strategy: incremental or full.
     // For incremental, we need a previous manifest from the same node AND
-    // a successful reuse (we skip the separate verify — pipe_tar_to_node
-    // does built-in MD5 verification in the same SSH command).
+    // a successful reuse with intact files on the remote.
     bool verified = false;
     if (reused && !state.last_sync_manifest.empty() &&
-        state.last_sync_node == compute_node) {
+        state.last_sync_node == compute_node &&
+        verify_scratch_integrity(compute_node, scratch_path, probe_file, expected_md5, local_manifest.size())) {
 
         std::vector<std::string> changed, deleted;
         diff_manifests(local_manifest, state.last_sync_manifest, changed, deleted);
@@ -385,10 +410,10 @@ void SyncManager::sync_to_scratch(const std::string& compute_node,
                                         changed, deleted, probe_file, expected_md5, cb);
         } else {
             if (cb) cb("All files up to date");
-            // Quick verify with a lightweight check built into next command,
-            // or trust the reuse since we just moved/copied the scratch.
             verified = true;
         }
+    } else if (reused) {
+        if (cb) cb("Scratch integrity check failed, performing full sync...");
     }
 
     if (!verified) {
