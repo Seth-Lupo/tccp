@@ -441,7 +441,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
         }
 
         // Poll for recently completed jobs so their allocations become free
-        poll(nullptr);
+        poll();
 
         // Find or create allocation
         AllocationState* alloc = allocs_.claim_free(job_minutes, profile, job_id, log_to_file);

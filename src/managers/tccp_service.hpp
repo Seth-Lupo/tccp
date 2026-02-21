@@ -79,8 +79,8 @@ public:
     // Get a snapshot of all tracked jobs as UI-ready summaries.
     std::vector<JobSummary> list_jobs();
 
-    // Poll for completed jobs (calls on_complete for each newly finished job).
-    void poll_jobs(std::function<void(const TrackedJob&)> on_complete);
+    // Poll for job state changes (init transitions, completions).
+    PollResult poll_jobs();
 
     // Prune old terminated jobs, keeping only the latest per job name.
     void prune_old_jobs();

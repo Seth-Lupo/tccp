@@ -152,14 +152,16 @@ std::vector<JobSummary> TccpService::list_jobs() {
     return summaries;
 }
 
-void TccpService::poll_jobs(std::function<void(const TrackedJob&)> on_complete) {
+PollResult TccpService::poll_jobs() {
+    PollResult result;
     if (jobs_) {
-        jobs_->poll(on_complete);
+        result = jobs_->poll();
     }
     // Release idle allocations that can no longer fit any configured job
     if (allocs_ && config_) {
         allocs_->reap_expired_idle(config_.value());
     }
+    return result;
 }
 
 void TccpService::prune_old_jobs() {

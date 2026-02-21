@@ -31,6 +31,7 @@ struct TrackedJob {
     // Init tracking (for background initialization)
     bool init_complete = false;      // true when job is launched on compute node
     std::string init_error;           // error message if init failed
+    bool init_announced = false;     // true after monitor has notified user of init transition
 
     // Output tracking
     bool output_returned = false;    // true if output was downloaded and remote cleaned
@@ -43,6 +44,18 @@ struct TrackedJob {
     std::string submit_time;          // ISO timestamp when job was first submitted
     std::string start_time;           // ISO timestamp when job started running (init_complete)
     std::string end_time;             // ISO timestamp when job completed
+};
+
+struct PollResult {
+    struct Event {
+        std::string job_id;
+        std::string job_name;
+        std::string compute_node;
+        enum Type { STARTED, COMPLETED, FAILED, CANCELED, INIT_ERROR } type;
+        int exit_code = 0;
+        std::string error;
+    };
+    std::vector<Event> events;
 };
 
 class JobManager {
@@ -68,7 +81,8 @@ public:
     Result<void> cancel_job(const std::string& job_name, StatusCallback cb = nullptr);
     Result<void> cancel_job_by_id(const std::string& job_id, StatusCallback cb = nullptr);
     Result<void> return_output(const std::string& job_id, StatusCallback cb = nullptr);
-    void poll(std::function<void(const TrackedJob&)> on_complete);
+    PollResult poll();
+    void mark_all_announced();
     const std::vector<TrackedJob>& tracked_jobs() const;
     std::vector<TrackedJob> tracked_jobs_copy() const;
     TrackedJob* find_by_name(const std::string& job_name);

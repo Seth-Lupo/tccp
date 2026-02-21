@@ -7,6 +7,7 @@
 #include <fmt/format.h>
 #include <filesystem>
 #include <replxx.hxx>
+#include <managers/job_manager.hpp>
 
 TCCPCLI::TCCPCLI() : BaseCLI() {
     register_all_commands();
@@ -262,14 +263,14 @@ void TCCPCLI::stop_monitor() {
 }
 
 void TCCPCLI::monitor_loop() {
-    auto last_ssh_poll = std::chrono::steady_clock::now();
+    auto last_poll = std::chrono::steady_clock::now();
     auto last_health_check = std::chrono::steady_clock::now();
 
     while (monitor_running_) {
         auto now = std::chrono::steady_clock::now();
 
-        // Health check every 10s
-        if ((now - last_health_check) >= std::chrono::seconds(10)) {
+        // Health check every 30s
+        if ((now - last_health_check) >= std::chrono::seconds(30)) {
             last_health_check = now;
 
             if (!service.check_alive() || !service.check_slurm_health()) {
@@ -283,163 +284,53 @@ void TCCPCLI::monitor_loop() {
             }
         }
 
-        // Local state diff to detect init-thread and completion transitions
-        auto msgs = collect_job_events();
+        // Poll every 10s — SSH check for completions + local init transitions
+        if ((now - last_poll) >= std::chrono::seconds(10)) {
+            last_poll = now;
 
-        // Print notifications as a grouped block via replxx (prompt-safe)
-        if (!msgs.empty() && rx_ptr_) {
-            std::string output = "\r\033[2K";
-            for (const auto& m : msgs)
-                output += theme::info(m);
-            rx_ptr_->write(output.c_str(), static_cast<int>(output.size()));
-            rx_ptr_->set_prompt(current_prompt_);
-        }
+            auto result = service.poll_jobs();
 
-        // Fallback SSH poll every 60s (watcher died, stale state, etc.)
-        if ((now - last_ssh_poll) >= std::chrono::seconds(60)) {
-            last_ssh_poll = now;
-            std::vector<std::string> poll_msgs;
-            poll_and_return_output(&poll_msgs);
-            if (!poll_msgs.empty() && rx_ptr_) {
+            if (!result.events.empty() && rx_ptr_) {
                 std::string output = "\r\033[2K";
-                for (const auto& m : poll_msgs)
-                    output += theme::step(m);
+                for (const auto& ev : result.events) {
+                    switch (ev.type) {
+                    case PollResult::Event::STARTED:
+                        output += theme::info(fmt::format(
+                            "Job '{}' is now running on {}", ev.job_name, ev.compute_node));
+                        break;
+                    case PollResult::Event::COMPLETED:
+                        output += theme::info(fmt::format(
+                            "Job '{}' completed", ev.job_name));
+                        break;
+                    case PollResult::Event::FAILED:
+                        output += theme::info(fmt::format(
+                            "Job '{}' failed (exit {})", ev.job_name, ev.exit_code));
+                        break;
+                    case PollResult::Event::CANCELED:
+                        output += theme::info(fmt::format(
+                            "Job '{}' canceled", ev.job_name));
+                        break;
+                    case PollResult::Event::INIT_ERROR:
+                        output += theme::info(fmt::format(
+                            "Job '{}' aborted: {}", ev.job_name, ev.error));
+                        break;
+                    }
+                }
                 rx_ptr_->write(output.c_str(), static_cast<int>(output.size()));
                 rx_ptr_->set_prompt(current_prompt_);
             }
         }
 
         // Sleep in small increments so stop_monitor() returns quickly
-        for (int i = 0; i < 20 && monitor_running_; ++i) {
+        for (int i = 0; i < 10 && monitor_running_; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
 }
 
-// Collect notification strings from job state transitions.
-// Thread-safe: uses tracked_jobs_copy() and snapshot_mutex_.
-std::vector<std::string> TCCPCLI::collect_job_events() {
-    std::vector<std::string> notifications;
-    if (!service.job_manager()) return notifications;
-
-    auto jobs = service.job_manager()->tracked_jobs_copy();
-    std::lock_guard<std::mutex> lock(snapshot_mutex_);
-
-    for (const auto& tj : jobs) {
-        auto prev_it = job_snapshots_.find(tj.job_id);
-        if (prev_it == job_snapshots_.end()) {
-            // First time seeing this job — seed baseline, no notification
-            job_snapshots_[tj.job_id] = {
-                tj.init_complete, tj.completed, tj.canceled,
-                !tj.init_error.empty(), tj.output_returned
-            };
-            continue;
-        }
-
-        const JobSnapshot& prev = prev_it->second;
-
-        // Detect: init just completed (job started running)
-        if (tj.init_complete && !prev.init_complete && tj.init_error.empty() && !tj.canceled) {
-            notifications.push_back(fmt::format(
-                "Job '{}' is now running on {}", tj.job_name, tj.compute_node));
-        }
-
-        // Detect: init failed (aborted)
-        if (!tj.init_error.empty() && !prev.has_init_error) {
-            notifications.push_back(fmt::format(
-                "Job '{}' aborted: {}", tj.job_name, tj.init_error));
-        }
-
-        // Detect: canceled during init (aborted)
-        if (tj.canceled && !prev.canceled && !tj.init_complete) {
-            notifications.push_back(fmt::format(
-                "Job '{}' aborted (canceled during init)", tj.job_name));
-        }
-
-        // Detect: canceled while running
-        if (tj.canceled && !prev.canceled && tj.init_complete && tj.init_error.empty()) {
-            notifications.push_back(fmt::format(
-                "Job '{}' canceled", tj.job_name));
-        }
-
-        // Detect: completed (set by poll or by attach_to_job)
-        if (tj.completed && !prev.completed && !tj.canceled) {
-            if (tj.exit_code == 0) {
-                notifications.push_back(fmt::format(
-                    "Job '{}' completed", tj.job_name));
-            } else {
-                notifications.push_back(fmt::format(
-                    "Job '{}' failed (exit {})", tj.job_name, tj.exit_code));
-            }
-        }
-
-        // Update snapshot
-        job_snapshots_[tj.job_id] = {
-            tj.init_complete, tj.completed, tj.canceled,
-            !tj.init_error.empty(), tj.output_returned
-        };
-    }
-
-    // Clean up snapshots for pruned jobs
-    for (auto it = job_snapshots_.begin(); it != job_snapshots_.end(); ) {
-        bool found = false;
-        for (const auto& tj : jobs) {
-            if (tj.job_id == it->first) { found = true; break; }
-        }
-        if (!found) {
-            it = job_snapshots_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
-    return notifications;
-}
-
-// Sync snapshots to current state without generating notifications.
+// Mark current tracked jobs as announced so the monitor
+// doesn't re-notify after user-initiated actions.
 void TCCPCLI::sync_snapshots() {
     if (!service.job_manager()) return;
-
-    auto jobs = service.job_manager()->tracked_jobs_copy();
-    std::lock_guard<std::mutex> lock(snapshot_mutex_);
-
-    for (const auto& tj : jobs) {
-        job_snapshots_[tj.job_id] = {
-            tj.init_complete, tj.completed, tj.canceled,
-            !tj.init_error.empty(), tj.output_returned
-        };
-    }
-}
-
-// Full SSH poll + auto-return output for newly completed jobs.
-// If out_msgs is provided, collect output messages instead of printing directly.
-void TCCPCLI::poll_and_return_output(std::vector<std::string>* out_msgs) {
-    if (!service.job_manager()) return;
-
-    service.poll_jobs(nullptr);
-
-    // Return output for newly completed jobs
-    auto jobs = service.job_manager()->tracked_jobs_copy();
-    {
-        std::lock_guard<std::mutex> lock(snapshot_mutex_);
-        for (const auto& tj : jobs) {
-            if (tj.completed && !tj.canceled && !tj.output_returned) {
-                auto it = job_snapshots_.find(tj.job_id);
-                if (it != job_snapshots_.end() && !it->second.output_returned) {
-                    if (out_msgs) {
-                        auto cb = [out_msgs](const std::string& msg) {
-                            out_msgs->push_back(msg);
-                        };
-                        service.return_output(tj.job_id, cb);
-                    } else {
-                        auto cb = [](const std::string& msg) {
-                            std::cout << theme::dim(msg) << "\n";
-                        };
-                        service.return_output(tj.job_id, cb);
-                    }
-                    it->second.output_returned = true;
-                }
-            }
-        }
-    }
+    service.job_manager()->mark_all_announced();
 }

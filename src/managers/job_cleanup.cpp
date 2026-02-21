@@ -148,60 +148,139 @@ JobManager::SlurmJobState JobManager::query_alloc_state(const std::string& slurm
     return state;
 }
 
-void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
-    // Phase 1: Detect completed jobs while holding the lock.
-    std::vector<TrackedJob> newly_completed;
+PollResult JobManager::poll() {
+    PollResult result;
+
+    // ── Phase 1 (brief lock): Copy jobs that need checking + detect init transitions ──
+    struct CheckTarget {
+        std::string job_id;
+        std::string job_name;
+        std::string slurm_id;
+        std::string compute_node;
+        std::string scratch_path;
+        bool init_complete;
+    };
+    std::vector<CheckTarget> to_check;
 
     {
         std::lock_guard<std::mutex> lock(tracked_mutex_);
         for (auto& tj : tracked_) {
-            if (tj.completed) continue;
-            if (!tj.init_complete) continue;
+            // Detect init transitions (local-only, no SSH needed)
+            if (!tj.init_announced) {
+                if (tj.init_complete && tj.init_error.empty() && !tj.canceled && !tj.completed) {
+                    result.events.push_back({tj.job_id, tj.job_name, tj.compute_node,
+                                             PollResult::Event::STARTED, 0, ""});
+                    tj.init_announced = true;
+                } else if (!tj.init_error.empty()) {
+                    result.events.push_back({tj.job_id, tj.job_name, "",
+                                             PollResult::Event::INIT_ERROR, 0, tj.init_error});
+                    tj.init_announced = true;
+                } else if (tj.canceled && !tj.init_complete) {
+                    result.events.push_back({tj.job_id, tj.job_name, "",
+                                             PollResult::Event::CANCELED, 130, ""});
+                    tj.init_announced = true;
+                }
+            }
 
-            if (!tj.compute_node.empty()) {
-                std::string sock = tj.scratch_path + "/tccp.sock";
-                auto check = dtn_.run(fmt::format("ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
-                                                  SSH_OPTS_FAST, tj.compute_node, sock));
+            // Collect running jobs that need SSH checking
+            if (tj.completed || !tj.init_complete) continue;
+            to_check.push_back({tj.job_id, tj.job_name, tj.slurm_id,
+                                tj.compute_node, tj.scratch_path, tj.init_complete});
+        }
+    }
 
-                if (check.stdout_data.find("DONE") != std::string::npos) {
-                    tj.completed = true;
-                    tj.exit_code = 0;
-                    tj.end_time = now_iso();
-                    newly_completed.push_back(tj);
-                } else if (check.stdout_data.find("RUNNING") == std::string::npos) {
-                    auto alloc_state = query_alloc_state(tj.slurm_id);
-                    if (alloc_state.state.empty() || alloc_state.state == "COMPLETED" ||
-                        alloc_state.state == "FAILED" || alloc_state.state == "CANCELLED") {
-                        tj.completed = true;
-                        tj.exit_code = -1;
-                        tj.end_time = now_iso();
-                        newly_completed.push_back(tj);
-                        tccp_log(fmt::format("poll: allocation {} gone ({}), marking job {} complete",
-                                             tj.slurm_id, alloc_state.state, tj.job_id));
+    // ── Phase 2 (no lock): SSH checks for each job ──
+    struct CompletionResult {
+        std::string job_id;
+        std::string job_name;
+        std::string compute_node;
+        std::string slurm_id;
+        int exit_code;
+    };
+    std::vector<CompletionResult> completions;
+
+    for (const auto& target : to_check) {
+        if (!target.compute_node.empty()) {
+            std::string sock = target.scratch_path + "/tccp.sock";
+            auto check = dtn_.run(fmt::format("ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
+                                              SSH_OPTS_FAST, target.compute_node, sock));
+
+            if (check.stdout_data.find("DONE") != std::string::npos) {
+                completions.push_back({target.job_id, target.job_name, target.compute_node,
+                                       target.slurm_id, 0});
+            } else if (check.stdout_data.find("RUNNING") == std::string::npos) {
+                auto alloc_state = query_alloc_state(target.slurm_id);
+                if (alloc_state.state.empty() || alloc_state.state == "COMPLETED" ||
+                    alloc_state.state == "FAILED" || alloc_state.state == "CANCELLED") {
+                    completions.push_back({target.job_id, target.job_name, target.compute_node,
+                                           target.slurm_id, -1});
+                    tccp_log(fmt::format("poll: allocation {} gone ({}), marking job {} complete",
+                                         target.slurm_id, alloc_state.state, target.job_id));
+                }
+            }
+        } else {
+            auto alloc_state = query_alloc_state(target.slurm_id);
+            if (alloc_state.state == "RUNNING" && !alloc_state.node.empty()) {
+                // Node assigned — update tracked job
+                std::lock_guard<std::mutex> lock(tracked_mutex_);
+                for (auto& tj : tracked_) {
+                    if (tj.job_id == target.job_id) {
+                        tj.compute_node = alloc_state.node;
+                        break;
                     }
                 }
-            } else {
-                auto alloc_state = query_alloc_state(tj.slurm_id);
-                if (alloc_state.state == "RUNNING" && !alloc_state.node.empty()) {
-                    tj.compute_node = alloc_state.node;
-                } else if (alloc_state.state.empty() || alloc_state.state == "COMPLETED" ||
-                           alloc_state.state == "FAILED" || alloc_state.state == "CANCELLED") {
+            } else if (alloc_state.state.empty() || alloc_state.state == "COMPLETED" ||
+                       alloc_state.state == "FAILED" || alloc_state.state == "CANCELLED") {
+                completions.push_back({target.job_id, target.job_name, target.compute_node,
+                                       target.slurm_id, -1});
+            }
+        }
+    }
+
+    // ── Phase 3 (brief lock): Apply completion results back to tracked_ ──
+    {
+        std::lock_guard<std::mutex> lock(tracked_mutex_);
+        for (const auto& c : completions) {
+            for (auto& tj : tracked_) {
+                if (tj.job_id == c.job_id) {
                     tj.completed = true;
-                    tj.exit_code = -1;
+                    tj.exit_code = c.exit_code;
                     tj.end_time = now_iso();
-                    newly_completed.push_back(tj);
+                    break;
                 }
             }
         }
     }
 
-    // Phase 2: Process completions without the lock held.
-    for (auto& tj : newly_completed) {
+    // ── Phase 4 (no lock): Post-completion work ──
+    // Copy completed jobs out so we can do SSH cleanup without holding tracked_mutex_.
+    // cleanup_compute_node/persist/try_return_output only read from the TrackedJob
+    // (mark_output_returned locks tracked_mutex_ internally to update the real entry).
+    std::vector<TrackedJob> completed_copies;
+    if (!completions.empty()) {
+        std::lock_guard<std::mutex> lock(tracked_mutex_);
+        for (const auto& c : completions) {
+            for (const auto& tj : tracked_) {
+                if (tj.job_id == c.job_id) {
+                    completed_copies.push_back(tj);
+                    break;
+                }
+            }
+        }
+    }
+
+    for (auto& tj : completed_copies) {
+        // Build event
         if (tj.exit_code == 0) {
+            result.events.push_back({tj.job_id, tj.job_name, tj.compute_node,
+                                     PollResult::Event::COMPLETED, 0, ""});
             append_job_log(tj.job_id, "Job completed (exit 0)");
         } else {
+            result.events.push_back({tj.job_id, tj.job_name, tj.compute_node,
+                                     PollResult::Event::FAILED, tj.exit_code, ""});
             append_job_log(tj.job_id, fmt::format("Job completed (exit {})", tj.exit_code));
         }
+
         allocs_.release_job(tj.slurm_id);
         cleanup_compute_node(tj);
         persist_job_state(tj);
@@ -209,13 +288,17 @@ void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
     }
 
     // Prune once after all completions
-    if (!newly_completed.empty()) {
+    if (!completions.empty()) {
         prune_completed_jobs();
     }
 
-    // Phase 3: User callbacks
-    for (const auto& tj : newly_completed) {
-        if (on_complete) on_complete(tj);
+    return result;
+}
+
+void JobManager::mark_all_announced() {
+    std::lock_guard<std::mutex> lock(tracked_mutex_);
+    for (auto& tj : tracked_) {
+        tj.init_announced = true;
     }
 }
 
