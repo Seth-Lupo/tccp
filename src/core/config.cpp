@@ -296,6 +296,7 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
                 jc.package = jnode["package"].as<std::string>("");
                 jc.args = jnode["args"].as<std::string>("");
                 jc.time = jnode["time"].as<std::string>("");
+                jc.exp_time = jnode["exp_time"].as<std::string>("");
 
                 auto ports_node = jnode["ports"] ? jnode["ports"] : jnode["port"];
                 if (ports_node) {

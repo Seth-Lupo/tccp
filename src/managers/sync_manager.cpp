@@ -22,14 +22,9 @@ SyncManager::SyncManager(const Config& config, SSHConnection& dtn)
 // ── Manifest ───────────────────────────────────────────────
 
 std::vector<SyncManifestEntry> SyncManager::build_local_manifest() {
-    try {
-        auto proj_mtime = fs::last_write_time(config_.project_dir()).time_since_epoch().count();
-        if (!cached_manifest_.empty() && proj_mtime == cached_manifest_mtime_) {
-            return cached_manifest_;
-        }
-        cached_manifest_mtime_ = proj_mtime;
-    } catch (...) {}
-
+    // No caching — always rescan. The project dir mtime doesn't change when
+    // files inside subdirectories are edited, so a cache based on dir mtime
+    // would miss changes and cause "All files up to date" false positives.
     std::vector<SyncManifestEntry> manifest;
     std::set<std::string> seen;
 
@@ -77,7 +72,6 @@ std::vector<SyncManifestEntry> SyncManager::build_local_manifest() {
         }
     }
 
-    cached_manifest_ = manifest;
     return manifest;
 }
 

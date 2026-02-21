@@ -80,11 +80,11 @@ struct LoginConfig {
 struct SlurmDefaults {
     std::string partition;
     std::string time;
-    int nodes;
-    int cpus_per_task;
+    int nodes = -1;           // -1 = not set (distinguishes from explicit 0)
+    int cpus_per_task = -1;   // -1 = not set
     std::string memory;
     std::string gpu_type;
-    int gpu_count;
+    int gpu_count = -1;       // -1 = not set (0 = explicitly no GPU)
     std::string mail_type;
     std::string exclude_nodes;    // nodes to exclude via --exclude
 };
@@ -93,7 +93,9 @@ struct JobConfig {
     std::string script;                          // python script to run (e.g. "train.py")
     std::string package;                         // python package to run with -m (e.g. "myapp")
     std::string args;
-    std::string time;                            // job time limit, default "1:00:00"
+    std::string time;                            // SLURM allocation duration (e.g. "4:00:00")
+    std::string exp_time;                        // expected runtime (default "0:05:00") — used to
+                                                 // decide if an allocation has enough time left
     std::optional<SlurmDefaults> slurm;          // per-job SLURM overrides
     std::vector<int> ports;                      // localhost ports to forward to compute node
 };

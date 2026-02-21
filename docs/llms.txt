@@ -233,6 +233,33 @@ Once connected (`tccp`), these are available:
 
 ---
 
+## Expected timing
+
+When you `run <job>`, initialization happens in the background. Here's what
+each stage typically takes:
+
+| Stage                      | First run      | Subsequent runs  |
+|----------------------------|----------------|------------------|
+| SLURM allocation           | 10-120s        | 0s (reuses existing) |
+| Container pull             | 5-15 min       | 0s (cached on NFS) |
+| Python venv creation       | 20-30s         | 0s (cached on NFS) |
+| dtach/uv install           | 5-15s          | 0s (cached on NFS) |
+| File sync (full)           | 2-30s          | —                |
+| File sync (incremental)    | —              | 1-3s             |
+| Requirements install (uv)  | 5-30s          | 0s (cached by hash) |
+| Requirements install (pip) | 30-300s        | 0s (cached by hash) |
+| Job launch                 | 1-2s           | 1-2s             |
+| **Total (first run)**      | **~1-20 min**  | —                |
+| **Total (re-run, same alloc)** | —          | **3-10s**        |
+
+The first run for a new project is slow because the container image (~5-10 GB)
+must be pulled and the venv created. After that, everything is cached on NFS
+and subsequent runs only sync changed files + launch.
+
+Use `initlogs <job>` to see real-time progress of each stage.
+
+---
+
 ## File sync behavior
 
 - Respects `.gitignore` (or `.tccpignore`). Auto-excludes `.git/`,

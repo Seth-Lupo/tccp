@@ -137,6 +137,7 @@ private:
                      const std::string& venv_path,
                      StatusCallback cb);
     void ensure_dtach(StatusCallback cb);
+    void ensure_uv(StatusCallback cb);
     void ensure_dirs(const std::string& job_id, StatusCallback cb);
 
     // Install requirements.txt into the venv on the compute node (via singularity).

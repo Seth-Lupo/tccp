@@ -156,6 +156,27 @@ jobs:
     ports: [6006]
 </pre>
 
+<h2>expected timing</h2>
+<p>
+When you <code>run &lt;job&gt;</code>, initialization happens in the background.
+The first run for a new project is the slowest because the container image and
+environment must be set up. After that, everything is cached and re-runs are fast.
+</p>
+<table>
+<tr><th>Stage</th><th>First run</th><th>Re-runs</th></tr>
+<tr><td>SLURM allocation</td><td>10&ndash;120s</td><td>0s (reused)</td></tr>
+<tr><td>Container pull</td><td>5&ndash;15 min</td><td>0s (cached)</td></tr>
+<tr><td>Venv creation</td><td>20&ndash;30s</td><td>0s (cached)</td></tr>
+<tr><td>Tool install (uv, dtach)</td><td>5&ndash;15s</td><td>0s (cached)</td></tr>
+<tr><td>File sync</td><td>2&ndash;30s (full)</td><td>1&ndash;3s (incremental)</td></tr>
+<tr><td>Requirements (uv)</td><td>5&ndash;30s</td><td>0s (cached by hash)</td></tr>
+<tr><td>Job launch</td><td>1&ndash;2s</td><td>1&ndash;2s</td></tr>
+<tr><td><b>Total</b></td><td><b>~1&ndash;20 min</b></td><td><b>3&ndash;10s</b></td></tr>
+</table>
+<p>
+Use <code>initlogs &lt;job&gt;</code> to see real-time progress of each stage.
+</p>
+
 <h2>good to know</h2>
 <p>
 Your <code>.gitignore</code> (or <code>.tccpignore</code>) controls which

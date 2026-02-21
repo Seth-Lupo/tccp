@@ -391,13 +391,20 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
             throw std::runtime_error("Canceled during initialization");
         }
 
-        // Resolve SLURM profile and job time
+        // Resolve SLURM profile and expected job runtime.
+        // exp_time = how long the job is expected to run (for allocation matching).
+        // time = how long to request from SLURM (allocation duration).
+        // If exp_time is not set, fall back to DEFAULT_JOB_TIME (5 min).
         auto profile = allocs_.resolve_profile(job_name);
         const auto& proj = config_.project();
         auto it = proj.jobs.find(job_name);
-        std::string job_time = (it != proj.jobs.end() && !it->second.time.empty())
-                               ? it->second.time : DEFAULT_JOB_TIME;
-        int job_minutes = AllocationManager::parse_time_minutes(job_time);
+        std::string exp_time;
+        if (it != proj.jobs.end() && !it->second.exp_time.empty()) {
+            exp_time = it->second.exp_time;
+        } else {
+            exp_time = DEFAULT_JOB_TIME;
+        }
+        int job_minutes = AllocationManager::parse_time_minutes(exp_time);
 
         // Resolve GPU partition early
         bool needs_gpu = profile.gpu_count > 0 || !profile.gpu_type.empty();

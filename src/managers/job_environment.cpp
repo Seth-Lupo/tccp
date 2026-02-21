@@ -112,17 +112,21 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
     std::string tccp_home = fmt::format(REMOTE_TCCP_HOME, username_);
     std::string dtach_bin = tccp_home + "/bin/dtach";
 
-    // Single check for all three components
+    std::string uv_bin = tccp_home + "/bin/uv";
+
+    // Single check for all four components
     std::string check_all = fmt::format(
         "test -f {} && echo IMAGE_OK || echo IMAGE_MISSING; "
         "( test -f {}/bin/python || test -L {}/bin/python ) && echo VENV_OK || echo VENV_MISSING; "
-        "test -x {} && echo DTACH_OK || echo DTACH_MISSING",
-        image, venv, venv, dtach_bin);
+        "test -x {} && echo DTACH_OK || echo DTACH_MISSING; "
+        "test -x {} && echo UV_OK || echo UV_MISSING",
+        image, venv, venv, dtach_bin, uv_bin);
 
     auto result = dtn_.run(check_all);
     bool need_image = result.stdout_data.find("IMAGE_MISSING") != std::string::npos;
     bool need_venv = result.stdout_data.find("VENV_MISSING") != std::string::npos;
     bool need_dtach = result.stdout_data.find("DTACH_MISSING") != std::string::npos;
+    bool need_uv = result.stdout_data.find("UV_MISSING") != std::string::npos;
 
     if (cb) {
         if (!need_image) cb(fmt::format("[{}] Container image ({}): found", elapsed(), env.sif_filename));
@@ -133,6 +137,9 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
 
         if (!need_dtach) cb(fmt::format("[{}] dtach binary: found", elapsed()));
         else cb(fmt::format("[{}] dtach binary: MISSING — will build", elapsed()));
+
+        if (!need_uv) cb(fmt::format("[{}] uv: found", elapsed()));
+        else cb(fmt::format("[{}] uv: MISSING — will install", elapsed()));
     }
 
     if (need_image || need_venv) {
@@ -153,6 +160,12 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
         if (cb) cb(fmt::format("[{}] Building dtach...", elapsed()));
         ensure_dtach(cb);
         if (cb) cb(fmt::format("[{}] dtach ready", elapsed()));
+    }
+
+    if (need_uv) {
+        if (cb) cb(fmt::format("[{}] Installing uv...", elapsed()));
+        ensure_uv(cb);
+        if (cb) cb(fmt::format("[{}] uv ready", elapsed()));
     }
 
     environment_checked_ = true;
@@ -228,6 +241,43 @@ void JobManager::ensure_dtach(StatusCallback cb) {
     }
 }
 
+void JobManager::ensure_uv(StatusCallback cb) {
+    std::string tccp_home = fmt::format(REMOTE_TCCP_HOME, username_);
+    std::string bin = tccp_home + "/bin/uv";
+
+    auto check = dtn_.run("test -x " + bin + " && echo UV_OK || echo UV_MISSING");
+    if (check.stdout_data.find("UV_OK") != std::string::npos) {
+        return;
+    }
+
+    dtn_.run("mkdir -p " + tccp_home + "/bin");
+
+    // Download uv static binary (single file, no dependencies)
+    if (cb) cb("Downloading uv...");
+    auto dl = dtn_.run(fmt::format(
+        "curl -fsSL https://github.com/astral-sh/uv/releases/latest/download/"
+        "uv-x86_64-unknown-linux-gnu.tar.gz | tar xz --strip-components=1 -C {} "
+        "uv-x86_64-unknown-linux-gnu/uv 2>&1",
+        tccp_home + "/bin"), 120);
+
+    if (dl.exit_code != 0) {
+        // Fallback: try the install script
+        if (cb) cb("Direct download failed, trying install script...");
+        dl = dtn_.run(fmt::format(
+            "curl -LsSf https://astral.sh/uv/install.sh | "
+            "UV_INSTALL_DIR={} sh 2>&1",
+            tccp_home + "/bin"), 120);
+    }
+
+    auto verify = dtn_.run("test -x " + bin + " && echo UV_OK || echo UV_FAIL");
+    if (verify.stdout_data.find("UV_OK") != std::string::npos) {
+        if (cb) cb("uv installed");
+    } else {
+        // Non-fatal: fall back to pip if uv can't be installed
+        if (cb) cb("Warning: could not install uv, will use pip instead");
+    }
+}
+
 // ── Requirements ──────────────────────────────────────────
 
 void JobManager::ensure_requirements(const std::string& compute_node,
@@ -271,53 +321,84 @@ void JobManager::ensure_requirements(const std::string& compute_node,
 
     if (cb) cb("Installing requirements...");
 
-    // GPU environments: filter out torch/nvidia packages (container provides them).
-    // Build the filter + pip commands as separate strings, then join.
-    // This avoids nested quote issues by keeping the SSH payload in a single
-    // layer of single quotes with only double quotes inside.
-    std::string filter_step;
-    std::string req_file = fmt::format("{}/requirements.txt", scratch);
+    // Copy requirements.txt from compute node scratch to NFS so we can
+    // run the install directly on the DTN (no SSH hop, no tmux stalling).
+    std::string nfs_req = pip_tmp + "/requirements.txt";
+    dtn_.run(fmt::format("mkdir -p {}", pip_tmp));
+    dtn_.run(fmt::format("scp {} {}:{}/requirements.txt {}",
+                          SSH_OPTS, compute_node, scratch, nfs_req));
+
+    // GPU environments: filter out torch/nvidia packages (container provides them)
+    std::string req_file = nfs_req;
     if (env.gpu) {
-        req_file = pip_tmp + "/tccp_req_filtered.txt";
-        filter_step = fmt::format(
+        std::string filtered = pip_tmp + "/tccp_req_filtered.txt";
+        dtn_.run(fmt::format(
             "grep -ivE "
-            "\"^(torch|torchvision|torchaudio|pytorch|nvidia-|triton)([ \\t]|[=><!~\\[]|$)\" "
-            "{}/requirements.txt > {} || true; ",
-            scratch, req_file);
+            "'^(torch|torchvision|torchaudio|pytorch|nvidia-|triton)([[:space:]]|[=><!~\\[]|$)' "
+            "{} > {} || true",
+            nfs_req, filtered));
+        req_file = filtered;
     }
 
-    // Build the full remote command (runs inside ssh '...' single quotes)
-    std::string remote_cmd = fmt::format(
-        "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
-        "mkdir -p {pip_tmp}; "
-        "{filter}"
-        "TMPDIR={pip_tmp} PIP_CACHE_DIR={pip_tmp} "
-        "singularity exec {nv}--bind {scratch}:{scratch} --bind {venv}:{venv} {image} "
-        "{venv}/bin/pip install -q -r {req_file}",
-        fmt::arg("pip_tmp", pip_tmp),
-        fmt::arg("filter", filter_step),
-        fmt::arg("nv", nv_flag),
-        fmt::arg("scratch", scratch),
-        fmt::arg("venv", venv),
-        fmt::arg("image", image),
-        fmt::arg("req_file", req_file));
+    // Determine installer: uv (fast) or pip (fallback)
+    std::string tccp_home = fmt::format(REMOTE_TCCP_HOME, username_);
+    std::string uv_bin = tccp_home + "/bin/uv";
+    auto uv_check = dtn_.run("test -x " + uv_bin + " && echo UV_OK || echo UV_MISSING");
+    bool have_uv = uv_check.stdout_data.find("UV_OK") != std::string::npos;
 
-    auto pip_result = dtn_.run(ssh_to_node(compute_node, remote_cmd), 600);
+    // Build install command — runs directly on DTN via exec channel.
+    // No SSH hop needed: venv + image are on NFS, visible from DTN.
+    std::string full_cmd;
+    if (have_uv) {
+        // uv is a standalone binary, but the venv's python is a symlink to
+        // the container's Python (e.g. /opt/conda/bin/python) which doesn't
+        // exist on the DTN. So we run uv inside singularity to resolve it.
+        // No --nv needed — just need the container's Python visible.
+        full_cmd = fmt::format(
+            "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
+            "TMPDIR={tmp} singularity exec --bind {venv}:{venv} {image} "
+            "{uv} pip install --python {venv}/bin/python -r {req} 2>&1",
+            fmt::arg("tmp", pip_tmp),
+            fmt::arg("uv", uv_bin),
+            fmt::arg("venv", venv),
+            fmt::arg("image", image),
+            fmt::arg("req", req_file));
+    } else {
+        // pip lives inside the container — need singularity
+        full_cmd = fmt::format(
+            "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
+            "mkdir -p {tmp}; "
+            "TMPDIR={tmp} PIP_CACHE_DIR={tmp} "
+            "singularity exec --bind {venv}:{venv} {image} "
+            "{venv}/bin/pip install -q -r {req} 2>&1",
+            fmt::arg("tmp", pip_tmp),
+            fmt::arg("venv", venv),
+            fmt::arg("image", image),
+            fmt::arg("req", req_file));
+    }
 
-    // Log pip summary
+    if (cb) cb(fmt::format("Installing requirements ({})...", have_uv ? "uv" : "pip"));
+    if (cb) cb(fmt::format("[req] cmd: {}", full_cmd));
+
+    // Use exec channel (bypasses tmux entirely) — reliable for long-running commands.
+    // 2>&1 merges stderr into stdout so we capture all pip/uv output.
+    auto result = dtn_.run_with_input(full_cmd, nullptr, 0, 600);
+
+    // Always log exit code + output for robust debugging
     if (cb) {
-        std::string pip_out = pip_result.stdout_data;
-        if (!pip_out.empty()) {
-            if (pip_out.size() > 1500) pip_out = "..." + pip_out.substr(pip_out.size() - 1500);
-            cb(fmt::format("[pip] {}", pip_out));
+        cb(fmt::format("[req] exit={}", result.exit_code));
+        std::string out = result.stdout_data;
+        if (!out.empty()) {
+            if (out.size() > 2000) out = "..." + out.substr(out.size() - 2000);
+            cb(fmt::format("[req] {}", out));
         }
     }
 
-    if (pip_result.exit_code != 0) {
-        std::string output = pip_result.get_output();
+    if (result.exit_code != 0) {
+        std::string output = result.get_output();
         if (output.size() > 500) output = "..." + output.substr(output.size() - 500);
         throw std::runtime_error(fmt::format(
-            "pip install failed (exit {}):\n{}", pip_result.exit_code, output));
+            "Package install failed (exit {}):\n{}", result.exit_code, output));
     }
 
     // Write versioned stamp on success (NFS — no SSH hop needed)

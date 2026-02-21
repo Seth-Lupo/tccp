@@ -24,10 +24,6 @@ private:
     SSHConnection& dtn_;
     std::string username_;
 
-    // Manifest cache to avoid rescanning unchanged directories
-    std::vector<SyncManifestEntry> cached_manifest_;
-    int64_t cached_manifest_mtime_ = 0;
-
     // Build manifest of all local files to sync (project + rodata + env)
     std::vector<SyncManifestEntry> build_local_manifest();
 

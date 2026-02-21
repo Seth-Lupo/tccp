@@ -313,11 +313,11 @@ SlurmDefaults AllocationManager::resolve_profile(const std::string& job_name) co
         const auto& ps = proj.slurm.value();
         if (!ps.partition.empty()) profile.partition = ps.partition;
         if (!ps.time.empty()) profile.time = ps.time;
-        if (ps.nodes > 0) profile.nodes = ps.nodes;
-        if (ps.cpus_per_task > 0) profile.cpus_per_task = ps.cpus_per_task;
+        if (ps.nodes >= 0) profile.nodes = ps.nodes;
+        if (ps.cpus_per_task >= 0) profile.cpus_per_task = ps.cpus_per_task;
         if (!ps.memory.empty()) profile.memory = ps.memory;
         if (!ps.gpu_type.empty()) profile.gpu_type = ps.gpu_type;
-        if (ps.gpu_count > 0) profile.gpu_count = ps.gpu_count;
+        if (ps.gpu_count >= 0) profile.gpu_count = ps.gpu_count;
         if (!ps.exclude_nodes.empty()) profile.exclude_nodes = ps.exclude_nodes;
     }
 
@@ -327,11 +327,11 @@ SlurmDefaults AllocationManager::resolve_profile(const std::string& job_name) co
         const auto& js = it->second.slurm.value();
         if (!js.partition.empty()) profile.partition = js.partition;
         if (!js.time.empty()) profile.time = js.time;
-        if (js.nodes > 0) profile.nodes = js.nodes;
-        if (js.cpus_per_task > 0) profile.cpus_per_task = js.cpus_per_task;
+        if (js.nodes >= 0) profile.nodes = js.nodes;
+        if (js.cpus_per_task >= 0) profile.cpus_per_task = js.cpus_per_task;
         if (!js.memory.empty()) profile.memory = js.memory;
         if (!js.gpu_type.empty()) profile.gpu_type = js.gpu_type;
-        if (js.gpu_count > 0) profile.gpu_count = js.gpu_count;
+        if (js.gpu_count >= 0) profile.gpu_count = js.gpu_count;
         if (!js.exclude_nodes.empty()) profile.exclude_nodes = js.exclude_nodes;
     }
 
