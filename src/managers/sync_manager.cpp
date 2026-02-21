@@ -120,9 +120,11 @@ static fs::path create_local_tar(const fs::path& project_dir,
     return tar_path;
 }
 
-// Pipe tar to compute node via base64 heredoc through the primary shell channel.
-// This avoids opening an exec channel (which triggers Duo re-auth on some clusters).
-// Includes mkdir, tar extract, and MD5 verification in one round-trip.
+// Pipe tar to compute node via exec channel with raw binary stdin.
+// Uses run_with_input() to open a fresh exec channel on the same SSH session
+// (no new connection, no Duo re-auth) and pipe raw tar bytes directly via
+// libssh2_channel_write(), bypassing tmux entirely. This is binary-clean and
+// reliable for large payloads.
 // Returns true if probe file MD5 matches expected_md5 after extraction.
 bool SyncManager::pipe_tar_to_node(const fs::path& tar_path,
                                     const std::string& compute_node,
@@ -140,28 +142,17 @@ bool SyncManager::pipe_tar_to_node(const fs::path& tar_path,
     tar_file.read(tar_data.data(), file_size);
     tar_file.close();
 
-    // Base64-encode the tar for binary-safe transfer through the PTY shell channel.
-    // Split into 76-char lines (standard base64 line length).
-    std::string encoded = base64_encode(tar_data);
-    std::string b64_lines;
-    for (size_t i = 0; i < encoded.size(); i += 76) {
-        b64_lines += encoded.substr(i, 76) + "\n";
-    }
-
-    // Single command through primary shell: decode base64, pipe through SSH hop
-    // to compute node where it's extracted. Verify with MD5 checksum.
-    std::string cmd = fmt::format(
-        "base64 -d 2>/dev/null << 'TCCP_B64_EOF' | ssh -T {} {} '"
-        "mkdir -p {} && cd {} && tar xf - 2>/dev/null; "
-        "if [ -f {}/{} ]; then md5sum {}/{} | cut -d\" \" -f1; fi'\n"
-        "{}TCCP_B64_EOF",
+    // SSH command to run on the DTN: hop to compute node, extract tar from
+    // stdin, then print the MD5 of the probe file for verification.
+    std::string ssh_cmd = fmt::format(
+        "ssh -T {} {} '"
+        "mkdir -p {} && cd {} && tar xf -; "
+        "if [ -f {} ]; then md5sum {} | cut -d\" \" -f1; fi'",
         SSH_OPTS, compute_node,
         scratch_path, scratch_path,
-        scratch_path, probe_file,
-        scratch_path, probe_file,
-        b64_lines);
+        probe_file, probe_file);
 
-    auto result = dtn_.run(cmd, 120);
+    auto result = dtn_.run_with_input(ssh_cmd, tar_data.data(), tar_data.size(), 120);
     if (result.failed()) {
         throw std::runtime_error(fmt::format(
             "File sync failed (exit code {}): {}. stdout: {}",
@@ -169,7 +160,7 @@ bool SyncManager::pipe_tar_to_node(const fs::path& tar_path,
     }
 
     // Verify MD5 checksum — extract 32-char hex string from output,
-    // which may contain stray stderr (base64 warnings, SSH messages).
+    // which may contain stray stderr (SSH messages, etc.).
     std::string remote_md5;
     std::string output = result.stdout_data;
     trim(output);
