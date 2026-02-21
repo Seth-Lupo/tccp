@@ -1,0 +1,475 @@
+# tccp — run Python on an HPC cluster without learning HPC
+
+tccp is a CLI tool that lets users run Python scripts on a SLURM-based HPC
+cluster (Tufts) by writing a simple YAML config and typing `run <job>`. It
+handles SSH connections, SLURM allocations, containerized environments, file
+sync, port forwarding, and output retrieval automatically.
+
+Your job: help the user write their tccp.yaml, project scripts, and
+requirements.txt so they can run their code on the cluster.
+
+---
+
+## Quick start
+
+```
+tccp setup            # save credentials (once)
+cd my-project
+tccp register         # creates tccp.yaml + scaffold
+tccp                  # connect to cluster
+tccp> run train       # submit and attach to job
+tccp> view train      # reattach later
+```
+
+---
+
+## tccp.yaml reference
+
+Lives in the project root. All fields are optional — tccp has defaults for
+everything. The simplest valid config is just:
+
+```yaml
+script: train.py
+```
+
+### Full example
+
+```yaml
+type: python-pytorch        # "python" or "python-pytorch"
+gpu: a100                   # GPU type (see GPU guide below)
+env: .env                   # synced even if gitignored — put API keys here
+output: output              # directory downloaded when job finishes
+cache: .hf_cache            # persists across jobs on the same node
+rodata:                     # read-only data dirs, synced once per allocation
+  - data
+
+environment:                # env vars exported before job runs
+  WANDB_PROJECT: my-experiment
+
+jobs:
+  train:
+    script: train.py
+    args: "--epochs 100 --lr 0.001"
+    time: "8:00:00"
+    gpu: a100-80gb
+    gpu_count: 2
+    memory: "64G"
+    cpus: 8
+    ports: [6006]           # forwarded to localhost automatically
+
+  eval:
+    script: eval.py
+    args: "--checkpoint best.pt"
+    time: "1:00:00"
+```
+
+### Project-level fields
+
+| Field         | Default        | Description |
+|---------------|----------------|-------------|
+| name          | dir name       | Project name |
+| type          | python         | `python` (CPU) or `python-pytorch` (GPU + PyTorch 2.6 + CUDA 12.4) |
+| script        | main.py        | Default script — creates implicit "main" job if no `jobs:` block |
+| args          | (none)         | Default CLI args |
+| env           | .env           | Env file with secrets, always synced (bypasses .gitignore) |
+| output        | output         | Dir downloaded to laptop when job finishes |
+| cache         | cache          | Shared across jobs on same node (model weights, datasets) |
+| rodata        | (none)         | Read-only data dirs, synced once per allocation |
+| environment   | (none)         | Map of env vars exported before job |
+| ports         | (none)         | Ports forwarded to localhost (applies to all jobs without own ports) |
+
+### Resource fields (project-level or per-job)
+
+| Field         | Default        | Description |
+|---------------|----------------|-------------|
+| gpu           | (none)         | GPU type, e.g. `a100`, `v100`, `t4`, `none`. Use `a100:2` for count. |
+| gpu_count     | 0              | Alternative to colon syntax |
+| memory        | 4G             | RAM. Auto-bumps to 32G (or 64G for 80GB GPUs) when GPU requested. |
+| cpus          | 1              | CPUs. Auto-bumps to 4 when GPU requested. |
+| time          | 1:00:00        | Walltime limit (HH:MM:SS) |
+| partition     | (auto)         | SLURM partition. Auto-selects `gpu` when GPU requested. |
+| exclude_nodes | (none)         | Comma-separated nodes to avoid |
+
+### Per-job fields
+
+| Field   | Description |
+|---------|-------------|
+| script  | Python script to run → `python <script> <args>` |
+| package | Python package → `python -m <package> <args>` (can't mix with script) |
+| args    | CLI arguments for this job |
+| time    | Job-specific walltime override |
+| ports   | Job-specific port forwarding |
+| (any resource field) | Per-job override of gpu, memory, cpus, partition, etc. |
+
+Job shorthand — if a job only needs a script:
+```yaml
+jobs:
+  train: train.py
+  eval: eval.py
+```
+
+### Setting precedence (later wins)
+
+1. Global defaults (~/.tccp/config.yaml)
+2. Project-level (top of tccp.yaml)
+3. Job-level (inside `jobs:`)
+
+---
+
+## Environments
+
+| type             | Container                                   | Includes |
+|------------------|---------------------------------------------|----------|
+| python           | python:3.11-slim                            | Python 3.11 stdlib |
+| python-pytorch   | pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime | PyTorch 2.6, CUDA 12.4, cuDNN 9, torchvision, torchaudio |
+
+- `python-pytorch` creates a venv with `--system-site-packages` so the
+  container's PyTorch is available. It also auto-filters `torch`,
+  `torchvision`, `torchaudio`, `nvidia-*`, and `triton` from
+  `requirements.txt` to avoid conflicts.
+- `requirements.txt` in the project root is auto-installed into the venv on
+  first run and cached by hash — unchanged deps are a no-op.
+
+---
+
+## GPU guide
+
+Available GPU types on the cluster, from least to most powerful:
+
+| GPU           | VRAM   | Best for                        | Notes |
+|---------------|--------|---------------------------------|-------|
+| t4            | 16 GB  | Inference, light training       | Oldest Turing card. Slow FP32 but decent FP16. Good for small models and debugging. |
+| p100          | 16 GB  | Legacy workloads                | Pascal generation. No tensor cores. Mainly useful when nothing else is free. |
+| rtx_6000      | 24 GB  | Medium training                 | Turing with tensor cores. Decent for mid-size models. |
+| v100          | 32 GB  | General training                | Volta. First-gen tensor cores. Solid all-rounder, good FP16 throughput. |
+| a100-40gb     | 40 GB  | Large model training            | Ampere. 3rd-gen tensor cores, TF32, BF16. Fast interconnect. Great price/perf. |
+| rtx_a5000     | 24 GB  | Medium training, multi-GPU      | Ampere workstation GPU. 8 per node — good for data-parallel training. |
+| l40           | 48 GB  | Large models, fine-tuning       | Ada Lovelace. Good VRAM for big batch sizes or large models. |
+| rtx_a6000     | 48 GB  | Large models                    | Ampere workstation. 48 GB VRAM, 8 per node. |
+| rtx_6000ada   | 48 GB  | Large models, fast training     | Ada Lovelace workstation. Newer arch than rtx_a6000. |
+| a100-80gb     | 80 GB  | LLMs, very large models         | The workhorse. 80 GB VRAM handles most LLM fine-tuning. High bandwidth. |
+| l40s          | 48 GB  | Fast training, inference        | Ada Lovelace server GPU. Better FP8 than L40. Newer generation. |
+| h100          | 80 GB  | LLMs, fastest training          | Hopper. 4th-gen tensor cores, FP8, Transformer Engine. Top-tier throughput. |
+
+### GPU selection rules of thumb
+
+- **Debugging / small models (<1B params):** `t4` — cheapest, 16 GB is enough
+- **Standard training (1-7B params):** `v100` or `a100-40gb`
+- **Large models / fine-tuning (7-13B):** `a100-80gb` or `l40s`
+- **LLM fine-tuning (13B+):** `a100-80gb` or `h100`, possibly multi-GPU
+- **Multi-GPU data parallel:** `rtx_a5000` (8 per node) or `a100-80gb:2`
+- **Just need lots of VRAM:** `l40` / `rtx_a6000` / `rtx_6000ada` (all 48 GB)
+- **No GPU needed:** set `gpu: none` or omit it entirely with `type: python`
+
+### VRAM estimation for common tasks
+
+| Task                          | Approx VRAM needed | Suggested GPU |
+|-------------------------------|-------------------|---------------|
+| ResNet/EfficientNet training  | 4-8 GB            | t4            |
+| BERT fine-tuning              | 8-12 GB           | t4, v100      |
+| GPT-2 (124M) training        | 8-12 GB           | t4, v100      |
+| Stable Diffusion fine-tuning  | 16-24 GB          | v100, rtx_6000 |
+| LLaMA 7B LoRA fine-tuning    | 16-24 GB          | v100, a100-40gb |
+| LLaMA 7B full fine-tuning    | 32-40 GB          | a100-40gb     |
+| LLaMA 13B LoRA fine-tuning   | 32-40 GB          | a100-40gb, a100-80gb |
+| LLaMA 13B full fine-tuning   | 60-80 GB          | a100-80gb     |
+| LLaMA 70B LoRA (QLoRA 4-bit) | 40-48 GB          | a100-80gb, l40s |
+| Inference (any model, quantized) | Model size / quant bits | varies |
+
+---
+
+## REPL commands
+
+Once connected (`tccp`), these are available:
+
+### Running jobs
+
+| Command               | Description |
+|-----------------------|-------------|
+| run <job> [args]      | Start a job. Extra args appended to config args. |
+| view [job]            | Attach to running job output. Ctrl+\ to detach, Ctrl+C to cancel. |
+| restart [job]         | Cancel and re-run. |
+| cancel <job>          | Stop a job (works during init or while running). |
+| jobs                  | List all tracked jobs with status, node, duration. |
+
+### Viewing output
+
+| Command               | Description |
+|-----------------------|-------------|
+| logs [job]            | Print job output to terminal. |
+| tail [job] [N]        | Last N lines of output (default 30). |
+| output [job]          | Open output in vim/editor. |
+| initlogs [job]        | Show initialization/setup logs. |
+
+### Interactive access
+
+| Command               | Description |
+|-----------------------|-------------|
+| open [job]            | Bash shell on compute node inside container with venv + env vars. |
+| ssh [job] [cmd]       | SSH to job's compute node. Optional one-off command. |
+| exec <cmd>            | Run command on login node. |
+| clusterssh            | SSH to login node. |
+
+### Info & resources
+
+| Command               | Description |
+|-----------------------|-------------|
+| info [job]            | Detailed job info: SLURM ID, node, timestamps, exit code. |
+| config                | Print current project config. |
+| status                | Connection and project state. |
+| gpus                  | Available GPU resources by partition. |
+| gpus <type>           | Per-node detail for a GPU type. |
+| gpus info             | GPU guide (works offline). |
+| allocs                | List SLURM allocations. |
+
+### Housekeeping
+
+| Command               | Description |
+|-----------------------|-------------|
+| dealloc [id\|all]     | Release SLURM allocations. No arg = release all idle. |
+| clean [job]           | Delete old output, keep latest per job. |
+| return [job]          | Download output from finished job. |
+| refresh               | Reload tccp.yaml without reconnecting. |
+
+---
+
+## File sync behavior
+
+- Respects `.gitignore` (or `.tccpignore`). Auto-excludes `.git/`,
+  `__pycache__/`, `.venv/`, `node_modules/`.
+- Only changed files are sent (incremental sync by content hash).
+- The `env` file is always synced, even if gitignored.
+- `requirements.txt` is auto-installed and cached by hash.
+- Remote directory structure mirrors local exactly:
+  ```
+  local ./data/train.csv  →  remote <scratch>/data/train.csv
+  local ./train.py        →  remote <scratch>/train.py
+  ```
+
+---
+
+## Project structure conventions
+
+A typical tccp project looks like:
+
+```
+my-project/
+  tccp.yaml              # project config
+  requirements.txt       # auto-installed into container venv
+  .env                   # API keys, secrets (auto-synced, gitignored)
+  .gitignore
+  train.py               # your scripts
+  eval.py
+  data/                  # rodata — synced once per allocation
+    train.csv
+    val.csv
+  output/                # downloaded from cluster when job finishes
+    train/
+      latest -> 2026-02-15T.../
+    eval/
+      latest -> 2026-02-15T.../
+```
+
+---
+
+## Example: simple CPU project
+
+```yaml
+# tccp.yaml
+type: python
+script: main.py
+```
+
+```
+# requirements.txt
+pandas
+scikit-learn
+matplotlib
+```
+
+```python
+# main.py
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+import os
+
+df = pd.read_csv("data/dataset.csv")
+X_train, X_test, y_train, y_test = train_test_split(df.drop("target", axis=1), df["target"])
+model = RandomForestClassifier(n_estimators=100)
+model.fit(X_train, y_train)
+print(f"Accuracy: {model.score(X_test, y_test):.4f}")
+```
+
+## Example: PyTorch GPU training
+
+```yaml
+# tccp.yaml
+type: python-pytorch
+gpu: a100
+output: checkpoints
+env: .env
+
+environment:
+  WANDB_PROJECT: my-experiment
+
+jobs:
+  train:
+    script: train.py
+    args: "--epochs 50 --lr 3e-4"
+    time: "4:00:00"
+    memory: "32G"
+    cpus: 4
+    ports: [6006]
+
+  eval:
+    script: eval.py
+    args: "--checkpoint checkpoints/best.pt"
+    time: "1:00:00"
+```
+
+```
+# requirements.txt
+wandb
+transformers
+datasets
+accelerate
+tensorboard
+```
+
+```python
+# train.py
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+import argparse, os
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--epochs", type=int, default=50)
+parser.add_argument("--lr", type=float, default=3e-4)
+args = parser.parse_args()
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# ... model, dataset, training loop ...
+# Save to output dir — tccp downloads it when the job finishes
+os.makedirs("checkpoints", exist_ok=True)
+torch.save(model.state_dict(), "checkpoints/best.pt")
+```
+
+## Example: LLM fine-tuning with LoRA
+
+```yaml
+# tccp.yaml
+type: python-pytorch
+gpu: a100-80gb
+output: output
+cache: .hf_cache
+env: .env
+
+environment:
+  HF_HOME: cache/.hf_cache
+  WANDB_PROJECT: llm-finetune
+
+jobs:
+  finetune:
+    script: finetune.py
+    args: "--model meta-llama/Llama-2-7b-hf --epochs 3"
+    time: "12:00:00"
+    memory: "64G"
+    cpus: 8
+```
+
+```
+# requirements.txt
+transformers
+datasets
+peft
+bitsandbytes
+accelerate
+wandb
+trl
+```
+
+## Example: Jupyter notebook server
+
+```yaml
+# tccp.yaml
+type: python-pytorch
+gpu: v100
+ports: [8888]
+
+jobs:
+  notebook:
+    script: start_jupyter.py
+    time: "8:00:00"
+```
+
+```python
+# start_jupyter.py
+import subprocess
+subprocess.run([
+    "jupyter", "notebook",
+    "--ip=0.0.0.0", "--port=8888",
+    "--no-browser", "--NotebookApp.token=''"
+])
+```
+
+Then open http://localhost:8888 in your browser.
+
+## Example: multi-GPU training
+
+```yaml
+# tccp.yaml
+type: python-pytorch
+gpu: a100-80gb:2
+output: output
+
+environment:
+  NCCL_DEBUG: INFO
+
+jobs:
+  train:
+    script: train_ddp.py
+    args: "--batch-size 64"
+    time: "8:00:00"
+    memory: "128G"
+    cpus: 16
+```
+
+```python
+# train_ddp.py — use torchrun or accelerate for multi-GPU
+# tccp sets up the node; you handle the distributed launcher in your script
+import subprocess, os
+n_gpus = torch.cuda.device_count()
+subprocess.run([
+    "torchrun", f"--nproc_per_node={n_gpus}",
+    "train_worker.py", *sys.argv[1:]
+])
+```
+
+---
+
+## Key things to remember when designing projects
+
+1. **script vs package**: Use `script: train.py` for a script, `package: myapp`
+   for `python -m myapp`. Never both.
+2. **requirements.txt**: Put it in project root. PyTorch is pre-installed in
+   `python-pytorch` — don't list torch/torchvision/torchaudio.
+3. **Output**: Write outputs to the `output` directory (or whatever you set).
+   tccp downloads it automatically when the job finishes.
+4. **Cache**: Use `cache` for downloaded models/datasets that shouldn't
+   re-download every run. Set `HF_HOME`, `TRANSFORMERS_CACHE`, etc. to point
+   into the cache dir.
+5. **Env vars**: Put secrets in `.env`, not in code. Set non-secret env vars
+   in the `environment:` block.
+6. **GPU auto-defaults**: When you set a GPU, memory auto-bumps to 32G (64G
+   for 80GB GPUs) and cpus to 4. Override if you need more.
+7. **.gitignore matters**: tccp respects it. Keep large data out of sync by
+   gitignoring it and using `rodata:` for data dirs instead.
+8. **Ports**: Declare them in config and they forward automatically. No SSH
+   tunnel setup needed. Good for TensorBoard (6006), Jupyter (8888), etc.
+9. **Time limits**: Set realistic `time:` values. The allocation holds the
+   node for the full duration, burning compute credits even if the job
+   finishes early. Use `dealloc` to release idle allocations.
+10. **Incremental sync**: Only changed files are re-synced, so re-running
+    after a code edit is fast.
