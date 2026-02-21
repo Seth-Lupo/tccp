@@ -66,7 +66,7 @@ static void do_dealloc(BaseCLI& cli, const std::string& arg) {
     if (!cli.service.alloc_manager()) return;
 
     auto cb = [](const std::string& msg) {
-        std::cout << theme::dim(msg);
+        std::cout << theme::dim(msg) << "\n";
     };
 
     if (arg.empty() || arg == "all") {

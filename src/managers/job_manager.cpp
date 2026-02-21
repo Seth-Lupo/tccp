@@ -554,6 +554,9 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
             allocs_.persist();
         }
 
+        // New job is running — update watcher targets
+        refresh_watcher_targets();
+
         tccp_log(fmt::format("INIT THREAD COMPLETE: job_id={}", job_id));
 
         {

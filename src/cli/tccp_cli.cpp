@@ -265,6 +265,13 @@ void TCCPCLI::monitor_loop() {
     auto last_ssh_poll = std::chrono::steady_clock::now();
     auto last_health_check = std::chrono::steady_clock::now();
 
+    // Start persistent poll watcher for fast (~2s) job completion detection
+    bool watcher_started = false;
+    if (service.job_manager()) {
+        service.job_manager()->start_poll_watcher();
+        watcher_started = true;
+    }
+
     while (monitor_running_) {
         auto now = std::chrono::steady_clock::now();
 
@@ -295,8 +302,9 @@ void TCCPCLI::monitor_loop() {
             rx_ptr_->set_prompt(current_prompt_);
         }
 
-        // Fallback SSH poll every 60s (watcher died, stale state, etc.)
-        if ((now - last_ssh_poll) >= std::chrono::seconds(60)) {
+        // Fallback SSH poll every 120s (watcher handles fast path; this covers
+        // jobs without nodes yet, SLURM queries, watcher failures)
+        if ((now - last_ssh_poll) >= std::chrono::seconds(120)) {
             last_ssh_poll = now;
             std::vector<std::string> poll_msgs;
             poll_and_return_output(&poll_msgs);
@@ -313,6 +321,11 @@ void TCCPCLI::monitor_loop() {
         for (int i = 0; i < 20 && monitor_running_; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+    }
+
+    // Stop poll watcher when monitor exits
+    if (watcher_started && service.job_manager()) {
+        service.job_manager()->stop_poll_watcher();
     }
 }
 

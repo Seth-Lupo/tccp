@@ -15,6 +15,7 @@
 #include "sync_manager.hpp"
 #include "cache_manager.hpp"
 #include "port_forwarder.hpp"
+#include "job_poll_watcher.hpp"
 
 struct TrackedJob {
     std::string job_id;       // YYYY-MM-DDTHH-MM-SS-mmm__<job-name>
@@ -86,6 +87,11 @@ public:
     // NFS output directory for a job (accessible from DTN after job ends)
     std::string job_output_dir(const std::string& job_id) const;
 
+    // Persistent poll watcher for fast (~2s) job completion detection
+    void start_poll_watcher();
+    void stop_poll_watcher();
+    void refresh_watcher_targets();
+
 private:
     const Config& config_;
     ConnectionFactory& factory_;
@@ -103,6 +109,10 @@ private:
     std::atomic<bool> shutdown_{false};        // signals init threads to exit
     bool environment_checked_ = false;  // Cache: only check environment once per session
     PortForwarder port_fwd_;
+    std::unique_ptr<JobPollWatcher> poll_watcher_;
+
+    // Callback from poll watcher when a job completes
+    void on_watcher_completion(const std::string& job_id);
 
     // Path helpers (new directory structure)
     std::string persistent_base() const;

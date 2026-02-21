@@ -70,6 +70,9 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
         allocs_.persist();
     }
 
+    // Update watcher targets (job removed)
+    refresh_watcher_targets();
+
     return Result<void>::Ok();
 }
 
@@ -217,6 +220,9 @@ void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
     for (const auto& tj : newly_completed) {
         if (on_complete) on_complete(tj);
     }
+
+    // Update watcher targets after completions
+    refresh_watcher_targets();
 }
 
 // ── Cleanup helpers ────────────────────────────────────────
