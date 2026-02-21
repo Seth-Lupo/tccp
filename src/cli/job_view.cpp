@@ -4,10 +4,10 @@
 #include <platform/platform.hpp>
 #include <platform/terminal.hpp>
 #include <platform/socket_util.hpp>
-#include <ssh/shell_relay.hpp>
+#include <ssh/multiplexed_shell.hpp>
+#include <ssh/session_multiplexer.hpp>
 #include <ssh/connection_factory.hpp>
 #include <iostream>
-#include <libssh2.h>
 #include <fmt/format.h>
 #ifdef _WIN32
 #  include <io.h>
@@ -94,10 +94,8 @@ void JobView::draw_header(bool terminated, int exit_code, bool canceled) {
 
 // ── relay_loop ──────────────────────────────────────────────────
 
-Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
-    LIBSSH2_CHANNEL* ch = relay.channel();
-    auto io_mtx = relay.io_mutex();
-    int sock = relay.socket();
+Result<int> JobView::relay_loop(MultiplexedShell& shell, RelayState& state) {
+    int sock = shell.socket();
 
     char buf[16384];
     std::string input_buffer;
@@ -107,6 +105,9 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
 
     bool user_detached = false;
     bool write_error = false;
+
+    auto& mux = shell.multiplexer();
+    int ch_id = shell.channel_id();
 
     auto process_job_start = [&](std::string& display) {
         if (job_started) return;
@@ -122,21 +123,7 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
         display.erase(start, end - start);
     };
 
-    while (!write_error && !user_detached && !relay.done()) {
-        bool stdin_ready = false;
-        bool sock_ready = false;
-#ifdef _WIN32
-        stdin_ready = platform::poll_stdin(0);
-        sock_ready = platform::poll_socket(sock, POLLIN, stdin_ready ? 0 : 100) & POLLIN;
-#else
-        struct pollfd fds[2];
-        fds[0] = {STDIN_FILENO, POLLIN, 0};
-        fds[1] = {sock, POLLIN, 0};
-        poll(fds, 2, 100);
-        stdin_ready = fds[0].revents & POLLIN;
-        sock_ready = fds[1].revents & POLLIN;
-#endif
-
+    while (!write_error && !user_detached && !shell.done()) {
         // Handle window resize
         if (g_need_resize) {
             g_need_resize = 0;
@@ -148,13 +135,20 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
             std::string sr = fmt::format("\033[1;{}r", new_pty);
             write(STDOUT_FILENO, sr.data(), sr.size());
             draw_header();
-            {
-                std::lock_guard<std::mutex> lock(*io_mtx);
-                libssh2_channel_request_pty_size(ch, new_cols, new_pty);
-            }
+            mux.resize(ch_id, new_cols, new_pty);
         }
 
         // ── stdin → remote ──────────────────────────────────────
+
+        bool stdin_ready = false;
+#ifdef _WIN32
+        stdin_ready = platform::poll_stdin(0);
+#else
+        struct pollfd fds[1];
+        fds[0] = {STDIN_FILENO, POLLIN, 0};
+        poll(fds, 1, 0);
+        stdin_ready = fds[0].revents & POLLIN;
+#endif
 
         if (stdin_ready) {
             int n = read(STDIN_FILENO, buf, sizeof(buf));
@@ -203,19 +197,8 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
                     pending_suppress = input_buffer + "\r\n";
                     input_buffer += '\n';
 
-                    const char* send_buf = input_buffer.c_str();
-                    int send_len = static_cast<int>(input_buffer.size());
-                    int sent = 0;
-                    while (sent < send_len) {
-                        int w;
-                        {
-                            std::lock_guard<std::mutex> lock(*io_mtx);
-                            w = libssh2_channel_write(ch, send_buf + sent, send_len - sent);
-                        }
-                        if (w == LIBSSH2_ERROR_EAGAIN) continue;
-                        if (w < 0) { write_error = true; break; }
-                        sent += w;
-                    }
+                    mux.send_input(ch_id, input_buffer.c_str(),
+                                   static_cast<int>(input_buffer.size()));
                     input_buffer.clear();
                     cursor_pos = 0;
                     continue;
@@ -235,22 +218,17 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
 
         // ── remote → display ────────────────────────────────────
 
-        if (sock_ready) {
+        std::string raw_output = shell.read_output();
+        if (!raw_output.empty()) {
             bool got_output = false;
-            for (;;) {
-                int n;
-                {
-                    std::lock_guard<std::mutex> lock(*io_mtx);
-                    n = libssh2_channel_read(ch, buf, sizeof(buf));
-                }
-                if (n <= 0) break;
 
-                // ShellRelay handles echo skip + done marker
-                std::string text = relay.feed(buf, n);
-                if (text.empty()) continue;
-
+            // Feed through shell protocol (echo skip + done marker)
+            std::string text = shell.feed(raw_output.data(),
+                                          static_cast<int>(raw_output.size()));
+            if (!text.empty()) {
                 // Strip ANSI for display
-                std::string plain = TerminalOutput::strip_ansi(text.data(), static_cast<int>(text.size()));
+                std::string plain = TerminalOutput::strip_ansi(text.data(),
+                                                               static_cast<int>(text.size()));
                 TerminalOutput::suppress_noise(plain);
 
                 // Echo suppression for user-typed input
@@ -266,17 +244,15 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
                     }
                 }
 
-                if (plain.empty()) continue;
-
-                // Job start marker detection
-                process_job_start(plain);
-
                 if (!plain.empty()) {
-                    write(STDOUT_FILENO, plain.data(), plain.size());
-                    got_output = true;
-                }
+                    // Job start marker detection
+                    process_job_start(plain);
 
-                if (relay.done()) break;
+                    if (!plain.empty()) {
+                        write(STDOUT_FILENO, plain.data(), plain.size());
+                        got_output = true;
+                    }
+                }
             }
 
             if (got_output) {
@@ -287,20 +263,18 @@ Result<int> JobView::relay_loop(ShellRelay& relay, RelayState& state) {
             }
         }
 
-        {
-            bool eof;
-            {
-                std::lock_guard<std::mutex> lock(*io_mtx);
-                eof = libssh2_channel_eof(ch);
-            }
-            if (eof) break;
-        }
+        // Check if multiplexer is still alive
+        if (!mux.is_running()) break;
+
+        // Brief sleep if no activity
+        if (!stdin_ready && raw_output.empty())
+            platform::sleep_ms(5);
     }
 
     if (user_detached)
         return Result<int>::Ok(kDetached);
 
-    return Result<int>::Ok(relay.done() ? 0 : -1);
+    return Result<int>::Ok(shell.done() ? 0 : -1);
 }
 
 // ── attach ──────────────────────────────────────────────────────
@@ -335,12 +309,15 @@ Result<int> JobView::attach(bool skip_remote_replay) {
         "if [ -e {} ]; then $HOME/tccp/bin/dtach -a {} -r none; fi'",
         compute_node_, log_path, log_path, dtach_socket_, dtach_socket_);
 
-    // ShellRelay handles: lock session, drain stale data, send command + done marker
-    ShellRelay relay(factory_);
-    if (!relay.start(cmd)) {
+    // MultiplexedShell handles: open channel, send command + done marker
+    MultiplexedShell shell(factory_);
+    if (!shell.start(cmd)) {
         write(STDOUT_FILENO, "\033[r", 3);
-        return Result<int>::Err("No primary channel available");
+        return Result<int>::Err("No multiplexer available");
     }
+
+    // Resize the channel to match terminal
+    shell.multiplexer().resize(shell.channel_id(), cols, pty_rows);
 
     // Setup terminal raw mode + resize handler
     platform::on_terminal_resize([] { g_need_resize = 1; });
@@ -350,9 +327,9 @@ Result<int> JobView::attach(bool skip_remote_replay) {
     cleanup.has_resize = true;
 
     RelayState state{cols, pty_rows, skip_remote_replay};
-    auto result = relay_loop(relay, state);
+    auto result = relay_loop(shell, state);
 
-    // ShellRelay::stop() handles: Ctrl+C if still running, drain, unlock
-    relay.stop();
+    // MultiplexedShell::stop() handles: Ctrl+C if still running, close channel
+    shell.stop();
     return result;
 }

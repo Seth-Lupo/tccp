@@ -4,7 +4,7 @@
 #include <core/utils.hpp>
 #include <core/time_utils.hpp>
 #include <managers/job_log.hpp>
-#include <ssh/shell_relay.hpp>
+#include <ssh/multiplexed_shell.hpp>
 #include <ssh/connection_factory.hpp>
 #include <platform/terminal.hpp>
 #include <platform/platform.hpp>
@@ -110,8 +110,8 @@ static void do_return(BaseCLI& cli, const std::string& arg) {
 }
 
 static void interactive_relay(ConnectionFactory& factory, const std::string& command) {
-    ShellRelay relay(factory);
-    relay.run(command);
+    MultiplexedShell shell(factory);
+    shell.run(command);
 }
 
 void do_ssh(BaseCLI& cli, const std::string& arg) {

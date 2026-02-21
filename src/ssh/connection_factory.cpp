@@ -1,5 +1,8 @@
 #include "connection_factory.hpp"
-#include "shell_relay.hpp"
+#include "session_multiplexer.hpp"
+#include "multiplexed_connection.hpp"
+#include "multiplexed_login_hop.hpp"
+#include "multiplexed_shell.hpp"
 #include <libssh2.h>
 #include <platform/platform.hpp>
 #include <core/credentials.hpp>
@@ -18,24 +21,60 @@ SSHResult ConnectionFactory::connect(StatusCallback callback) {
     auto result = connect_session(callback);
     if (result.failed()) return result;
 
-    // Create shared cmd_mutex for primary channel
-    primary_cmd_mutex_ = std::make_shared<std::mutex>();
-
-    // DTN connection: wraps the primary shell channel
-    dtn_ = std::make_unique<SSHConnection>(
+    // Start the session multiplexer (tmux -CC on primary channel)
+    mux_ = std::make_unique<SessionMultiplexer>(
         session_->get_channel(),
         session_->get_raw_session(),
         session_->io_mutex(),
-        session_->get_socket(),
-        primary_cmd_mutex_);
+        session_->get_socket());
 
-    // Login hop: shares primary shell channel, prefixes commands with SSH hop
-    login_ = std::make_unique<LoginHopConnection>(
-        session_->get_channel(),
+    auto mux_result = mux_->start();
+    if (mux_result.failed()) {
+        std::string err = "Failed to start session multiplexer";
+        if (!mux_result.stderr_data.empty())
+            err += ": " + mux_result.stderr_data;
+        if (!mux_result.stdout_data.empty())
+            err += " [output: " + mux_result.stdout_data + "]";
+        mux_.reset();
+        session_->close();
+        session_.reset();
+        return SSHResult{-1, "", err};
+    }
+
+    if (callback)
+        callback("[cluster] Session multiplexer started");
+
+    // DTN connection: dedicated multiplexed channel for DTN commands
+    int dtn_ch = mux_->open_channel();
+    if (dtn_ch < 0) {
+        mux_->stop();
+        mux_.reset();
+        session_->close();
+        session_.reset();
+        return SSHResult{-1, "", "Failed to open DTN channel"};
+    }
+
+    dtn_ = std::make_unique<MultiplexedConnection>(
+        *mux_, dtn_ch,
+        session_->get_raw_session(),
+        session_->io_mutex(),
+        session_->get_socket());
+
+    // Login hop: dedicated multiplexed channel (parallel with DTN commands)
+    int login_ch = mux_->open_channel();
+    if (login_ch < 0) {
+        mux_->stop();
+        mux_.reset();
+        session_->close();
+        session_.reset();
+        return SSHResult{-1, "", "Failed to open login channel"};
+    }
+
+    login_ = std::make_unique<MultiplexedLoginHop>(
+        *mux_, login_ch,
         session_->get_raw_session(),
         session_->io_mutex(),
         session_->get_socket(),
-        primary_cmd_mutex_,
         config_.login().host);
 
     if (callback)
@@ -47,6 +86,10 @@ SSHResult ConnectionFactory::connect(StatusCallback callback) {
 SSHResult ConnectionFactory::disconnect() {
     login_.reset();
     dtn_.reset();
+    if (mux_) {
+        mux_->stop();
+        mux_.reset();
+    }
     if (session_) {
         session_->close();
         session_.reset();
@@ -56,6 +99,7 @@ SSHResult ConnectionFactory::disconnect() {
 
 bool ConnectionFactory::is_connected() const {
     return session_ && session_->is_active() &&
+           mux_ && mux_->is_running() &&
            dtn_ && dtn_->is_active();
 }
 
@@ -73,8 +117,8 @@ void ConnectionFactory::send_keepalive() {
 SSHConnection& ConnectionFactory::dtn() { return *dtn_; }
 SSHConnection& ConnectionFactory::login() { return *login_; }
 
-ShellRelay ConnectionFactory::shell() {
-    return ShellRelay(*this);
+MultiplexedShell ConnectionFactory::shell() {
+    return MultiplexedShell(*this);
 }
 
 // ── Channel grants ─────────────────────────────────────────────
@@ -137,8 +181,8 @@ std::shared_ptr<std::mutex> ConnectionFactory::io_mutex() {
     return session_ ? session_->io_mutex() : nullptr;
 }
 
-std::shared_ptr<std::mutex> ConnectionFactory::primary_cmd_mutex() {
-    return primary_cmd_mutex_;
+SessionMultiplexer* ConnectionFactory::multiplexer() {
+    return mux_.get();
 }
 
 // ── Internal ───────────────────────────────────────────────────

@@ -8,17 +8,23 @@
 #include "connection.hpp"
 #include "login_hop_connection.hpp"
 
-class ShellRelay;
+class MultiplexedShell;
+class SessionMultiplexer;
 
 // ConnectionFactory: single SSH session, multiplexed connections.
 //
 // One Duo push authenticates the session. All connections granted by this
 // factory share that session — consumers don't know about multiplexing.
 //
+// Internally uses tmux -CC to multiplex the primary shell channel into
+// independent virtual channels. Each dtn()/login() call gets its own
+// multiplexed channel; interactive shells get dedicated channels that
+// don't block programmatic commands.
+//
 // Connection types:
-//   dtn()          — non-interactive commands on DTN
-//   login()        — non-interactive commands on login node (auto SSH hop)
-//   shell()        — interactive relay on primary channel (has Kerberos)
+//   dtn()          — non-interactive commands on DTN (multiplexed channel)
+//   login()        — non-interactive commands on login node (multiplexed + SSH hop)
+//   shell()        — interactive relay on dedicated channel (has Kerberos)
 //   exec_channel() — raw exec channel (no PTY, no Duo, no Kerberos)
 //   tunnel()       — direct-tcpip channel (port forwarding)
 
@@ -35,12 +41,12 @@ public:
 
     // ── Connection grants ──────────────────────────────────────
 
-    // Non-interactive command execution (serialized on primary shell channel)
+    // Non-interactive command execution (multiplexed — no global blocking)
     SSHConnection& dtn();
     SSHConnection& login();
 
-    // Interactive relay on primary shell channel (has Kerberos for SSH hops)
-    ShellRelay shell();
+    // Interactive relay on a dedicated multiplexed channel (has Kerberos)
+    MultiplexedShell shell();
 
     // ── Channel grants ─────────────────────────────────────────
 
@@ -56,14 +62,14 @@ public:
     LIBSSH2_SESSION* raw_session();
     int raw_socket();
     std::shared_ptr<std::mutex> io_mutex();
-    std::shared_ptr<std::mutex> primary_cmd_mutex();
+    SessionMultiplexer* multiplexer();
 
 private:
     const Config& config_;
     std::unique_ptr<SessionManager> session_;
+    std::unique_ptr<SessionMultiplexer> mux_;
     std::unique_ptr<SSHConnection> dtn_;
-    std::unique_ptr<LoginHopConnection> login_;
-    std::shared_ptr<std::mutex> primary_cmd_mutex_;
+    std::unique_ptr<SSHConnection> login_;
 
     SSHResult connect_session(StatusCallback callback);
 };

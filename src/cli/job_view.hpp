@@ -4,7 +4,7 @@
 #include <core/types.hpp>
 #include <ssh/connection_factory.hpp>
 
-class ShellRelay;
+class MultiplexedShell;
 
 class JobView {
 public:
@@ -32,7 +32,7 @@ private:
         bool skip_remote_replay;
     };
 
-    Result<int> relay_loop(ShellRelay& relay, RelayState& state);
+    Result<int> relay_loop(MultiplexedShell& shell, RelayState& state);
     ConnectionFactory& factory_;
     std::string compute_node_;
     std::string username_;

@@ -5,7 +5,11 @@ add_library(tccp_ssh
     expect.cpp
     connection_factory.cpp
     login_hop_connection.cpp
-    shell_relay.cpp
+    marker_protocol.cpp
+    session_multiplexer.cpp
+    multiplexed_connection.cpp
+    multiplexed_login_hop.cpp
+    multiplexed_shell.cpp
 )
 
 target_include_directories(tccp_ssh PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

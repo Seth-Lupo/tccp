@@ -1,4 +1,5 @@
 #include "shell_channel.hpp"
+#include "marker_protocol.hpp"
 #include <core/constants.hpp>
 #include <core/utils.hpp>
 #include <platform/platform.hpp>
@@ -60,16 +61,7 @@ SSHResult ShellChannel::run(const std::string& command, int timeout_secs) {
     }
 
     // Send command wrapped in BEGIN/DONE markers.
-    std::string begin_marker = "__TCCP_BEGIN__";
-    std::string done_marker  = "__TCCP_DONE__";
-    std::string full_cmd;
-    if (command.find('\n') == std::string::npos) {
-        full_cmd = "echo __TCCP_BEG''IN__; " + command +
-                   "; echo __TCCP_DO''NE__ $?\n";
-    } else {
-        full_cmd = "echo __TCCP_BEG''IN__; " + command +
-                   "\necho __TCCP_DO''NE__ $?\n";
-    }
+    std::string full_cmd = build_marker_command(command);
 
     // Write command with brief io_mutex_ holds
     int total = full_cmd.length();
@@ -111,59 +103,9 @@ SSHResult ShellChannel::run(const std::string& command, int timeout_secs) {
         if (n > 0) {
             consecutive_eagain = 0;
             output.append(buf, n);
-            // Check if DONE marker has arrived
-            auto done_pos = output.find(done_marker);
-            if (done_pos != std::string::npos) {
-                // Parse exit code after DONE marker
-                int exit_code = 0;
-                auto code_start = done_pos + done_marker.length();
-                if (code_start < output.length()) {
-                    std::string code_str = output.substr(code_start);
-                    auto num_start = code_str.find_first_of("0123456789");
-                    if (num_start != std::string::npos) {
-                        exit_code = safe_stoi(code_str.substr(num_start), 0);
-                    }
-                }
-
-                // Extract text between BEGIN and DONE markers.
-                std::string clean;
-                auto begin_pos = output.find(begin_marker);
-                if (begin_pos != std::string::npos) {
-                    auto content_start = begin_pos + begin_marker.length();
-                    if (content_start < output.length() && output[content_start] == '\r')
-                        content_start++;
-                    if (content_start < output.length() && output[content_start] == '\n')
-                        content_start++;
-                    clean = output.substr(content_start, done_pos - content_start);
-                } else {
-                    clean = output.substr(0, done_pos);
-                }
-
-                // Strip trailing whitespace
-                while (!clean.empty() && (clean.back() == '\n' || clean.back() == '\r'
-                                       || clean.back() == ' ' || clean.back() == '\t'))
-                    clean.pop_back();
-
-                // Strip trailing prompt echo of the sentinel command
-                auto last_nl = clean.rfind('\n');
-                if (last_nl != std::string::npos) {
-                    auto trailing = clean.substr(last_nl + 1);
-                    if (trailing.find("__TCCP_DO") != std::string::npos) {
-                        clean = clean.substr(0, last_nl);
-                    }
-                } else if (clean.find("__TCCP_DO") != std::string::npos) {
-                    clean.clear();
-                }
-
-                // Trim remaining trailing whitespace
-                auto last_content = clean.find_last_not_of(" \t\r\n");
-                if (last_content != std::string::npos) {
-                    clean = clean.substr(0, last_content + 1);
-                } else {
-                    clean.clear();
-                }
-
-                return SSHResult{exit_code, clean, ""};
+            auto parsed = parse_marker_output(output);
+            if (parsed.found) {
+                return SSHResult{parsed.exit_code, parsed.output, ""};
             }
         } else if (n == LIBSSH2_ERROR_EAGAIN || n == 0) {
             if (timeout_secs == 0 && ++consecutive_eagain > 500) {

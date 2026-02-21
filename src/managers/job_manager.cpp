@@ -69,10 +69,12 @@ JobManager::~JobManager() {
         }
     }
 
-    // Join all joinable threads (with a short timeout via detach fallback)
+    // Join all init threads — they check shutdown_ flag and will exit promptly.
+    // Must complete before ConnectionFactory is destroyed, or they'll segfault
+    // on dangling dtn_/login_ references.
     for (auto& t : init_threads_) {
         if (t.joinable()) {
-            t.detach();  // Can't block indefinitely; threads check shutdown_ flag
+            t.join();
         }
     }
     init_threads_.clear();
