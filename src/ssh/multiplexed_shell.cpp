@@ -115,13 +115,10 @@ void MultiplexedShell::stop() {
     if (!started_) return;
 
     if (mux_ && channel_id_ >= 0) {
-        if (!done_) {
-            // Send Ctrl+C to kill running command
-            mux_->send_special_key(channel_id_, "C-c");
-            platform::sleep_ms(100);
-        }
-
         mux_->clear_output_callback(channel_id_);
+        // close_channel kills the tmux pane, which terminates the SSH viewer
+        // process. The actual job lives in dtach and survives independently.
+        // No Ctrl+C needed — that would kill the remote job on detach/view.
         mux_->close_channel(channel_id_);
     }
 
