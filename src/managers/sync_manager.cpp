@@ -4,10 +4,8 @@
 #include <core/constants.hpp>
 #include <core/utils.hpp>
 #include <platform/platform.hpp>
-#include <platform/archive.hpp>
 #include <fmt/format.h>
 #include <filesystem>
-#include <fstream>
 #include <set>
 #include <sstream>
 #include <map>
@@ -15,16 +13,14 @@
 
 namespace fs = std::filesystem;
 
-SyncManager::SyncManager(const Config& config, SSHConnection& dtn)
-    : config_(config), dtn_(dtn), username_(get_cluster_username()) {
+SyncManager::SyncManager(const Config& config, ConnectionFactory& cluster, SSHConnection& dtn)
+    : config_(config), dtn_(dtn), username_(get_cluster_username()),
+      tunnel_transfer_(cluster, dtn) {
 }
 
 // ── Manifest ───────────────────────────────────────────────
 
 std::vector<SyncManifestEntry> SyncManager::build_local_manifest() {
-    // No caching — always rescan. The project dir mtime doesn't change when
-    // files inside subdirectories are edited, so a cache based on dir mtime
-    // would miss changes and cause "All files up to date" false positives.
     std::vector<SyncManifestEntry> manifest;
     std::set<std::string> seen;
 
@@ -107,13 +103,6 @@ void SyncManager::diff_manifests(const std::vector<SyncManifestEntry>& current,
 
 // ── Helpers ─────────────────────────────────────────────────
 
-static fs::path create_local_tar(const fs::path& project_dir,
-                                  const std::vector<std::string>& rel_paths) {
-    fs::path tar_path = platform::temp_dir() / fmt::format("tccp_sync_{}.tar", std::time(nullptr));
-    platform::create_tar(tar_path, project_dir, rel_paths);
-    return tar_path;
-}
-
 std::string SyncManager::parse_md5_from_output(const std::string& output) {
     std::string trimmed = output;
     trim(trimmed);
@@ -156,63 +145,6 @@ bool SyncManager::verify_scratch_integrity(const std::string& compute_node,
     return static_cast<size_t>(remote_count) >= expected_file_count;
 }
 
-// Pipe tar to compute node via exec channel with raw binary stdin.
-// Uses run_with_input() to open a fresh exec channel on the same SSH session
-// (no new connection, no Duo re-auth) and pipe raw tar bytes directly via
-// libssh2_channel_write(), bypassing tmux entirely. This is binary-clean and
-// reliable for large payloads.
-// Returns true if probe file MD5 matches expected_md5 after extraction.
-bool SyncManager::pipe_tar_to_node(const fs::path& tar_path,
-                                    const std::string& compute_node,
-                                    const std::string& scratch_path,
-                                    const std::string& probe_file,
-                                    const std::string& expected_md5) {
-    // Read the tar file into memory
-    std::ifstream tar_file(tar_path, std::ios::binary | std::ios::ate);
-    if (!tar_file) {
-        throw std::runtime_error("Cannot open tar file: " + tar_path.string());
-    }
-    auto file_size = tar_file.tellg();
-    tar_file.seekg(0);
-    std::string tar_data(static_cast<size_t>(file_size), '\0');
-    tar_file.read(tar_data.data(), file_size);
-    tar_file.close();
-
-    // SSH command to run on the DTN: hop to compute node, extract tar from
-    // stdin, then print the MD5 of the probe file for verification.
-    std::string ssh_cmd = fmt::format(
-        "ssh -T {} {} '"
-        "mkdir -p {} && cd {} && tar xf -; "
-        "if [ -f {} ]; then md5sum {} | cut -d\" \" -f1; fi'",
-        SSH_OPTS, compute_node,
-        scratch_path, scratch_path,
-        probe_file, probe_file);
-
-    auto result = dtn_.run_with_input(ssh_cmd, tar_data.data(), tar_data.size(), 120);
-    if (result.failed()) {
-        throw std::runtime_error(fmt::format(
-            "File sync failed (exit code {}): {}. stdout: {}",
-            result.exit_code, result.stderr_data, result.stdout_data));
-    }
-
-    std::string remote_md5 = parse_md5_from_output(result.stdout_data);
-
-    if (remote_md5.empty()) {
-        throw std::runtime_error(fmt::format(
-            "Sync verification failed: could not find MD5 in remote output. "
-            "Expected: {}. Full output: '{}'",
-            expected_md5, result.stdout_data));
-    }
-
-    if (remote_md5 != expected_md5) {
-        throw std::runtime_error(fmt::format(
-            "Sync corruption detected: {} MD5 mismatch (expected: {}, got: {})",
-            probe_file, expected_md5, remote_md5));
-    }
-
-    return true;
-}
-
 // ── Sync strategies ────────────────────────────────────────
 
 bool SyncManager::full_sync(const std::string& compute_node,
@@ -235,11 +167,15 @@ bool SyncManager::full_sync(const std::string& compute_node,
         }
     }
 
-    fs::path tar_path = create_local_tar(config_.project_dir(), rel_paths);
-    bool verified = pipe_tar_to_node(tar_path, compute_node, scratch_path, probe_file, expected_md5);
-    fs::remove(tar_path);
+    auto result = tunnel_transfer_.send_files(
+        compute_node, scratch_path, config_.project_dir(),
+        rel_paths, probe_file, expected_md5);
 
-    return verified;
+    if (!result.verified && !result.error.empty()) {
+        throw std::runtime_error(result.error);
+    }
+
+    return result.verified;
 }
 
 bool SyncManager::incremental_sync(const std::string& compute_node,
@@ -274,11 +210,15 @@ bool SyncManager::incremental_sync(const std::string& compute_node,
     }
     if (existing.empty()) return true;
 
-    fs::path tar_path = create_local_tar(config_.project_dir(), existing);
-    bool verified = pipe_tar_to_node(tar_path, compute_node, scratch_path, probe_file, expected_md5);
-    fs::remove(tar_path);
+    auto result = tunnel_transfer_.send_files(
+        compute_node, scratch_path, config_.project_dir(),
+        existing, probe_file, expected_md5);
 
-    return verified;
+    if (!result.verified && !result.error.empty()) {
+        throw std::runtime_error(result.error);
+    }
+
+    return result.verified;
 }
 
 // ── Scratch reuse + cleanup ────────────────────────────────

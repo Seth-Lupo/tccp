@@ -9,8 +9,23 @@ GitignoreParser::GitignoreParser(const fs::path& project_dir)
     load_gitignore();
 }
 
+void GitignoreParser::add_pattern(const std::string& raw, bool is_negation) {
+    Pattern pat;
+    pat.raw = raw;
+    pat.is_negation = is_negation;
+    pat.is_dir = !raw.empty() && raw.back() == '/';
+    pat.has_glob = raw.find('*') != std::string::npos || raw.find('?') != std::string::npos;
+    if (pat.has_glob) {
+        try {
+            pat.compiled = std::regex(glob_to_regex(raw));
+        } catch (...) {
+            pat.has_glob = false; // fallback to string matching
+        }
+    }
+    patterns_.push_back(std::move(pat));
+}
+
 void GitignoreParser::add_default_patterns() {
-    // Common patterns to always ignore
     std::vector<std::string> defaults = {
         ".git/",
         ".gitignore",
@@ -41,7 +56,7 @@ void GitignoreParser::add_default_patterns() {
     };
 
     for (const auto& pattern : defaults) {
-        patterns_.push_back({pattern, false});
+        add_pattern(pattern, false);
     }
 }
 
@@ -62,19 +77,17 @@ void GitignoreParser::load_gitignore() {
     while (std::getline(file, line)) {
         trim(line);
 
-        // Skip empty lines and comments
         if (line.empty() || line[0] == '#') {
             continue;
         }
 
-        // Handle negation
         bool is_negation = false;
         if (line[0] == '!') {
             is_negation = true;
             line = line.substr(1);
         }
 
-        patterns_.push_back({line, is_negation});
+        add_pattern(line, is_negation);
     }
 }
 
@@ -84,19 +97,41 @@ bool GitignoreParser::is_ignored(const std::string& path) const {
 
 bool GitignoreParser::is_ignored(const fs::path& path) const {
     std::string rel_path = get_relative_path(path).string();
-
-    // Normalize path separators for pattern matching
     std::replace(rel_path.begin(), rel_path.end(), '\\', '/');
 
     bool ignored = false;
-
-    // Process patterns in order (later patterns override earlier ones)
-    for (const auto& [pattern, is_negation] : patterns_) {
-        if (matches_pattern(rel_path, pattern)) {
-            ignored = !is_negation;
+    for (const auto& pat : patterns_) {
+        if (matches_pattern(rel_path, pat)) {
+            ignored = !pat.is_negation;
         }
     }
+    return ignored;
+}
 
+bool GitignoreParser::is_dir_ignored(const std::string& rel_dir) const {
+    // Check if a directory component matches any ignore pattern.
+    // Used for pruning: skip descending into ignored directories entirely.
+    bool ignored = false;
+    for (const auto& pat : patterns_) {
+        if (pat.is_negation) {
+            if (matches_pattern(rel_dir, pat)) ignored = false;
+            continue;
+        }
+        // For dir patterns like "build/", check if dir name matches
+        if (pat.is_dir) {
+            std::string pat_name = pat.raw.substr(0, pat.raw.size() - 1);
+            if (rel_dir == pat_name || rel_dir.find(pat_name + "/") == 0 ||
+                rel_dir.find("/" + pat_name) != std::string::npos) {
+                ignored = true;
+            }
+        }
+        // Also check non-dir patterns that match directory names
+        if (!pat.is_dir && !pat.has_glob) {
+            if (rel_dir == pat.raw || rel_dir.find("/" + pat.raw) != std::string::npos) {
+                ignored = true;
+            }
+        }
+    }
     return ignored;
 }
 
@@ -104,9 +139,7 @@ fs::path GitignoreParser::get_relative_path(const fs::path& full_path) const {
     if (full_path.is_relative()) {
         return full_path;
     }
-
-    auto rel = fs::relative(full_path, project_dir_);
-    return rel;
+    return fs::relative(full_path, project_dir_);
 }
 
 std::vector<fs::path> GitignoreParser::collect_files() const {
@@ -116,48 +149,45 @@ std::vector<fs::path> GitignoreParser::collect_files() const {
         return files;
     }
 
-    for (const auto& entry : fs::recursive_directory_iterator(project_dir_)) {
-        if (!entry.is_regular_file()) {
-            continue;
-        }
+    // Use non-recursive iterator + manual stack to prune ignored directories
+    std::vector<fs::path> dirs_to_visit;
+    dirs_to_visit.push_back(project_dir_);
 
-        if (is_ignored(entry.path())) {
-            continue;
-        }
+    while (!dirs_to_visit.empty()) {
+        fs::path dir = std::move(dirs_to_visit.back());
+        dirs_to_visit.pop_back();
 
-        files.push_back(entry.path());
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            if (entry.is_directory()) {
+                std::string rel = fs::relative(entry.path(), project_dir_).string();
+                std::replace(rel.begin(), rel.end(), '\\', '/');
+                if (!is_dir_ignored(rel)) {
+                    dirs_to_visit.push_back(entry.path());
+                }
+            } else if (entry.is_regular_file()) {
+                if (!is_ignored(entry.path())) {
+                    files.push_back(entry.path());
+                }
+            }
+        }
     }
 
-    // Sort for consistent ordering
     std::sort(files.begin(), files.end());
-
     return files;
 }
 
-bool GitignoreParser::matches_pattern(const std::string& path, const std::string& pattern) const {
-    // Handle directory patterns (ending with /)
-    bool is_dir_pattern = pattern.back() == '/';
+bool GitignoreParser::matches_pattern(const std::string& path, const Pattern& pat) const {
+    if (pat.has_glob) {
+        return std::regex_search(path, pat.compiled);
+    }
 
-    // Simple fnmatch-like matching
-    // This is a basic implementation; production would use full gitignore semantics
+    const std::string& pattern = pat.raw;
 
     if (pattern == "*") {
         return true;
     }
 
-    if (pattern.find('*') != std::string::npos) {
-        // Convert glob to regex
-        std::string regex_pattern = glob_to_regex(pattern);
-        try {
-            std::regex re(regex_pattern);
-            return std::regex_search(path, re);
-        } catch (...) {
-            return false;
-        }
-    }
-
-    // Exact match or prefix match
-    if (is_dir_pattern) {
+    if (pat.is_dir) {
         std::string pattern_without_slash = pattern.substr(0, pattern.length() - 1);
         return path == pattern_without_slash || path.find(pattern_without_slash + "/") == 0;
     }
@@ -165,7 +195,7 @@ bool GitignoreParser::matches_pattern(const std::string& path, const std::string
     return path == pattern || path.find("/" + pattern) != std::string::npos;
 }
 
-std::string GitignoreParser::glob_to_regex(const std::string& glob) const {
+std::string GitignoreParser::glob_to_regex(const std::string& glob) {
     std::string regex;
     bool escape = false;
 
@@ -178,10 +208,9 @@ std::string GitignoreParser::glob_to_regex(const std::string& glob) const {
         } else if (c == '\\') {
             escape = true;
         } else if (c == '*') {
-            // Check for **
             if (i + 1 < glob.length() && glob[i + 1] == '*') {
                 regex += ".*";
-                i++; // Skip next *
+                i++;
             } else {
                 regex += "[^/]*";
             }

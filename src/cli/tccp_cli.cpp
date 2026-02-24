@@ -206,9 +206,6 @@ void TCCPCLI::run_connected_repl() {
                 service.graceful_shutdown(cb);
                 std::cout << "\n";
             } else {
-                if (service.alloc_manager()) {
-                    service.alloc_manager()->deallocate_all_idle(nullptr);
-                }
                 std::cout << theme::dim("Disconnecting...") << "\n";
                 service.disconnect();
             }

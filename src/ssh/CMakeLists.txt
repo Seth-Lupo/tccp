@@ -10,6 +10,7 @@ add_library(tccp_ssh
     multiplexed_connection.cpp
     multiplexed_login_hop.cpp
     multiplexed_shell.cpp
+    tunnel_transfer.cpp
 )
 
 target_include_directories(tccp_ssh PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

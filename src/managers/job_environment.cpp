@@ -329,6 +329,7 @@ void JobManager::ensure_requirements(const std::string& compute_node,
                           SSH_OPTS, compute_node, scratch, nfs_req));
 
     // GPU environments: filter out torch/nvidia packages (container provides them)
+    // Also generate an overrides file so uv won't pull them as transitive deps.
     std::string req_file = nfs_req;
     if (env.gpu) {
         std::string filtered = pip_tmp + "/tccp_req_filtered.txt";
@@ -338,6 +339,31 @@ void JobManager::ensure_requirements(const std::string& compute_node,
             "{} > {} || true",
             nfs_req, filtered));
         req_file = filtered;
+
+        // Create stub .dist-info dirs in the venv for container-provided packages.
+        // This makes uv/pip see torch, nvidia, triton, etc. as already installed
+        // so they're skipped entirely — no download, no disk usage.
+        // The venv was created with --system-site-packages, but uv doesn't
+        // check system site-packages when determining what's installed.
+        std::string site_pkg_dir = venv + "/lib/python*/site-packages";
+        dtn_.run(fmt::format(
+            "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
+            "singularity exec {image} python3 -c \""
+            "import importlib.metadata,pathlib,os\\n"
+            "pkgs=[(d.name,d.version) for d in importlib.metadata.distributions() "
+            "if any(d.name.lower().startswith(p) for p in "
+            "['torch','nvidia-','triton','cuda-','sympy','numpy'])]\\n"
+            "sp=next(pathlib.Path('{venv}/lib').glob('python*/site-packages'))\\n"
+            "for name,ver in pkgs:\\n"
+            "  di=sp/f'{{name.replace(chr(45),chr(95))}}-{{ver}}.dist-info'\\n"
+            "  if di.exists(): continue\\n"
+            "  di.mkdir(parents=True,exist_ok=True)\\n"
+            "  (di/'METADATA').write_text(f'Metadata-Version: 2.1\\\\nName: {{name}}\\\\nVersion: {{ver}}\\\\n')\\n"
+            "  (di/'INSTALLER').write_text('tccp-stub')\\n"
+            "  (di/'RECORD').write_text('')\\n"
+            "\" 2>/dev/null || true",
+            fmt::arg("image", image),
+            fmt::arg("venv", venv)));
     }
 
     // Determine installer: uv (fast) or pip (fallback)
@@ -357,7 +383,8 @@ void JobManager::ensure_requirements(const std::string& compute_node,
         full_cmd = fmt::format(
             "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
             "TMPDIR={tmp} singularity exec --bind {venv}:{venv} {image} "
-            "{uv} pip install --python {venv}/bin/python -r {req} 2>&1",
+            "{uv} pip install --link-mode=copy --python {venv}/bin/python "
+            "-r {req} 2>&1",
             fmt::arg("tmp", pip_tmp),
             fmt::arg("uv", uv_bin),
             fmt::arg("venv", venv),

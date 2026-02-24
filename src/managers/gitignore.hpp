@@ -15,6 +15,9 @@ public:
     bool is_ignored(const std::string& path) const;
     bool is_ignored(const fs::path& path) const;
 
+    // Check if a directory name should be pruned (not descended into)
+    bool is_dir_ignored(const std::string& rel_dir) const;
+
     // Collect all non-ignored files recursively
     std::vector<fs::path> collect_files() const;
 
@@ -23,10 +26,19 @@ public:
 
 private:
     fs::path project_dir_;
-    std::vector<std::pair<std::string, bool>> patterns_;  // (pattern, is_negation)
+
+    struct Pattern {
+        std::string raw;
+        bool is_negation;
+        bool is_dir;        // pattern ends with /
+        bool has_glob;      // contains * or ?
+        std::regex compiled; // pre-compiled regex (only if has_glob)
+    };
+    std::vector<Pattern> patterns_;
 
     void load_gitignore();
     void add_default_patterns();
-    bool matches_pattern(const std::string& path, const std::string& pattern) const;
-    std::string glob_to_regex(const std::string& glob) const;
+    void add_pattern(const std::string& raw, bool is_negation);
+    bool matches_pattern(const std::string& path, const Pattern& pat) const;
+    static std::string glob_to_regex(const std::string& glob);
 };

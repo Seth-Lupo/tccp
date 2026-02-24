@@ -260,12 +260,6 @@ void TccpService::cancel_initializing_jobs(StatusCallback cb) {
     for (const auto& [job_id, slurm_id] : to_cancel) {
         if (cb) cb(fmt::format("Canceling initializing job '{}'", job_id));
         jobs_->cancel_job_by_id(job_id, nullptr);
-
-        // Deallocate the allocation this job was using
-        if (!slurm_id.empty() && allocs_) {
-            if (cb) cb(fmt::format("Releasing allocation {}", slurm_id));
-            allocs_->deallocate(slurm_id, nullptr);
-        }
     }
 }
 
@@ -300,7 +294,7 @@ void TccpService::init_managers() {
         allocs_ = std::make_unique<AllocationManager>(
             config_.value(), cluster_->dtn(), cluster_->login(), *state_store_);
         allocs_->reconcile();
-        sync_ = std::make_unique<SyncManager>(config_.value(), cluster_->dtn());
+        sync_ = std::make_unique<SyncManager>(config_.value(), *cluster_, cluster_->dtn());
         cache_ = std::make_unique<CacheManager>(cluster_->dtn(), get_cluster_username());
         jobs_ = std::make_unique<JobManager>(
             config_.value(), *cluster_, *allocs_, *sync_, *cache_);
