@@ -1,4 +1,5 @@
 #include "tunnel_transfer.hpp"
+#include "compute_hop.hpp"
 #include <core/constants.hpp>
 #include <core/utils.hpp>
 #include <platform/platform.hpp>
@@ -114,13 +115,13 @@ TransferResult TunnelTransfer::send_files(const std::string& compute_node,
 
     // Stream tar through tunnel using libarchive callback
     bool write_ok = true;
-    auto write_fn = [&](const void* buf, size_t len) -> ssize_t {
+    auto write_fn = [&](const void* buf, size_t len) -> int64_t {
         if (!write_ok) return -1;
         if (!channel_write_all(tunnel, buf, len)) {
             write_ok = false;
             return -1;
         }
-        return static_cast<ssize_t>(len);
+        return static_cast<int64_t>(len);
     };
 
     try {
@@ -163,9 +164,10 @@ TransferResult TunnelTransfer::send_files(const std::string& compute_node,
     }
 
     // Verify MD5 on compute node
-    auto verify = dtn_.run(fmt::format(
-        "ssh {} {} 'cd {} && md5sum {} 2>/dev/null | cut -d\" \" -f1'",
-        SSH_OPTS, compute_node, scratch_path, probe_file), 30);
+    ComputeHop compute(dtn_, compute_node);
+    auto verify = compute.run(fmt::format(
+        "cd {} && md5sum {} 2>/dev/null | cut -d\" \" -f1",
+        scratch_path, probe_file), 30);
 
     std::string remote_md5 = parse_md5(verify.stdout_data);
 

@@ -28,6 +28,7 @@ struct TrackedJob {
     std::string output_file;  // local path to captured output
     std::string scratch_path; // /tmp/{user}/{project}/{job_id}
     std::string extra_args;   // runtime args from CLI (appended to config args)
+    std::string partition;    // SLURM partition (for recovery allocations)
 
     // Init tracking (for background initialization)
     bool init_complete = false;      // true when job is launched on compute node
@@ -107,7 +108,7 @@ private:
     std::set<std::string> cancel_requested_;  // job_ids marked for cancellation during init
     std::mutex cancel_mutex_;
     std::atomic<bool> shutdown_{false};        // signals init threads to exit
-    bool environment_checked_ = false;  // Cache: only check environment once per session
+    std::string environment_checked_node_;  // Cache: compute node where environment was verified
     PortForwarder port_fwd_;
     std::unique_ptr<JobPollWatcher> poll_watcher_;
 
@@ -120,19 +121,14 @@ private:
     std::string container_cache() const;
     std::string scratch_dir(const std::string& job_id) const;
 
-    // Build an SSH command to run on a compute node via the DTN.
-    // The command body must not contain unescaped single quotes — use
-    // double quotes for any internal quoting needs. This ensures one
-    // clean layer of single-quote wrapping around the entire payload.
-    static std::string ssh_to_node(const std::string& node, const std::string& cmd);
-
     std::string generate_job_id(const std::string& job_name) const;
     void ensure_environment(const std::string& compute_node, StatusCallback cb);
     void ensure_container(const std::string& compute_node,
                           const EnvironmentConfig& env,
                           const std::string& image_path,
                           StatusCallback cb);
-    void ensure_venv(const EnvironmentConfig& env,
+    void ensure_venv(const std::string& compute_node,
+                     const EnvironmentConfig& env,
                      const std::string& image_path,
                      const std::string& venv_path,
                      StatusCallback cb);
@@ -200,13 +196,23 @@ private:
     // Shared: persist tracked job fields to state store
     void persist_job_state(const TrackedJob& tj);
 
-    // Auto-return output and clean remote
-    void try_return_output(TrackedJob& tj);
+    // Auto-return output from compute node. allow_recovery=true permits
+    // submitting a short recovery allocation if the node is unreachable.
+    void try_return_output(TrackedJob& tj, bool allow_recovery = false);
 
     // Mark a job's output as returned in tracked + persisted state
     void mark_output_returned(const std::string& job_id);
 
-    // Download output files from remote. Returns file count, -1 on error.
-    int download_remote_output(const std::string& job_id,
-                               const std::string& remote_output);
+    // Download output files from compute node via SSH hop.
+    Result<int> download_remote_output(const std::string& job_id,
+                                       const std::string& remote_output,
+                                       const std::string& compute_node);
+
+    // Submit a minimal short-lived allocation pinned to a node for output recovery.
+    std::string allocate_recovery(const std::string& compute_node,
+                                  const std::string& partition,
+                                  StatusCallback cb = nullptr);
+
+    // Wait for a recovery allocation to start. Returns true if running.
+    bool wait_recovery_allocation(const std::string& slurm_id);
 };

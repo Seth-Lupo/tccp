@@ -16,4 +16,5 @@ cmake-build-release/
 vcpkg_installed/
 .cache/
 prompts
+test-results/
 

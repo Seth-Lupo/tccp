@@ -10,6 +10,7 @@ add_library(tccp_ssh
     multiplexed_connection.cpp
     multiplexed_login_hop.cpp
     multiplexed_shell.cpp
+    compute_hop.cpp
     tunnel_transfer.cpp
 )
 

@@ -117,6 +117,10 @@ void ConnectionFactory::send_keepalive() {
 SSHConnection& ConnectionFactory::dtn() { return *dtn_; }
 SSHConnection& ConnectionFactory::login() { return *login_; }
 
+ComputeHop ConnectionFactory::compute(const std::string& node) {
+    return ComputeHop(*dtn_, node);
+}
+
 MultiplexedShell ConnectionFactory::shell() {
     return MultiplexedShell(*this);
 }

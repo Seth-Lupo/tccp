@@ -19,6 +19,9 @@ int safe_stoi(const std::string& s, int fallback = 0);
 // Base64-encode binary data (for binary-safe transfer over PTY channels).
 std::string base64_encode(const std::string& input);
 
+// Base64-decode data.
+std::string base64_decode(const std::string& input);
+
 // Compute MD5 checksum of a file.
 std::string compute_file_md5(const std::filesystem::path& path);
 

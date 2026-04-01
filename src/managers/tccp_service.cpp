@@ -91,11 +91,6 @@ std::vector<JobSummary> TccpService::list_jobs() {
     std::vector<JobSummary> summaries;
     if (!jobs_) return summaries;
 
-    // Reconcile allocation state first for accuracy
-    if (allocs_) {
-        allocs_->reconcile(nullptr);
-    }
-
     const auto& tracked = jobs_->tracked_jobs();
     for (const auto& tj : tracked) {
         JobSummary s;

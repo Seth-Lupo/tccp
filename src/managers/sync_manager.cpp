@@ -3,6 +3,7 @@
 #include <core/config.hpp>
 #include <core/constants.hpp>
 #include <core/utils.hpp>
+#include <ssh/compute_hop.hpp>
 #include <platform/platform.hpp>
 #include <fmt/format.h>
 #include <filesystem>
@@ -124,14 +125,15 @@ bool SyncManager::verify_scratch_integrity(const std::string& compute_node,
                                             const std::string& expected_md5,
                                             size_t expected_file_count) {
     // Single SSH: check probe MD5 and count project files (exclude runtime artifacts)
-    auto result = dtn_.run(fmt::format(
-        "ssh {} {} 'cd {} && "
+    ComputeHop compute(dtn_, compute_node);
+    auto result = compute.run(fmt::format(
+        "cd {} && "
         "md5sum {} 2>/dev/null | cut -d\" \" -f1; "
         "echo FILE_COUNT=$(find . -type f "
         "! -path \"./.tccp-tmp/*\" ! -name \"tccp.log\" "
         "! -name \"tccp.sock\" ! -name \"tccp_run.sh\" "
-        "| wc -l)'",
-        SSH_OPTS, compute_node, scratch_path, probe_file));
+        "| wc -l)",
+        scratch_path, probe_file));
 
     std::string output = result.stdout_data;
 
@@ -192,7 +194,8 @@ bool SyncManager::incremental_sync(const std::string& compute_node,
         for (const auto& f : deleted_files) {
             rm_cmd += " " + scratch_path + "/" + f;
         }
-        dtn_.run(fmt::format("ssh {} {} '{}'", SSH_OPTS, compute_node, rm_cmd));
+        ComputeHop compute(dtn_, compute_node);
+        compute.run(rm_cmd);
     }
 
     if (changed_files.empty()) {
@@ -230,17 +233,17 @@ void SyncManager::reuse_previous_scratch(const std::string& compute_node,
                                           StatusCallback cb) {
     bool old_is_active = active_scratches.count(old_scratch) > 0;
 
+    ComputeHop compute(dtn_, compute_node);
     if (!old_is_active) {
         if (cb) cb("Reusing previous scratch...");
-        dtn_.run(fmt::format(
-            "ssh {} {} '"
-            "if [ -d {} ]; then mv {} {}; else mkdir -p {}; fi'",
-            SSH_OPTS, compute_node,
-            old_scratch, old_scratch, scratch_path, scratch_path));
+        compute.run(fmt::format(
+            "if [ -d {} ]; then mv {} {}; else mkdir -p {}; fi; "
+            "rm -rf {}/output {}/.tccp-tmp {}/tccp_run.sh {}/tccp.sock",
+            old_scratch, old_scratch, scratch_path, scratch_path,
+            scratch_path, scratch_path, scratch_path, scratch_path));
     } else {
         if (cb) cb("Copying files from previous scratch...");
-        dtn_.run(fmt::format(
-            "ssh {} {} '"
+        compute.run(fmt::format(
             "if [ -d {} ]; then "
             "mkdir -p {} && "
             "cd {} && "
@@ -249,8 +252,7 @@ void SyncManager::reuse_previous_scratch(const std::string& compute_node,
             "--exclude=.tccp-tmp --exclude=\"*.sock\" --exclude=\"*.log\" "
             "--exclude=tccp_run.sh . 2>/dev/null | "
             "(cd {} && tar xf -); "
-            "else mkdir -p {}; fi'",
-            SSH_OPTS, compute_node,
+            "else mkdir -p {}; fi",
             old_scratch,
             scratch_path, old_scratch,
             scratch_path, scratch_path));
@@ -273,18 +275,61 @@ void SyncManager::cleanup_stale_scratches(const std::string& compute_node,
     }
 
     // Single SSH: list + filter + delete all in one command
-    std::string cmd = fmt::format(
-        "ssh {} {} '"
+    ComputeHop compute(dtn_, compute_node);
+    compute.run(fmt::format(
         "for d in $(ls -d {}/*/ 2>/dev/null); do "
         "d=${{d%%/}}; "  // strip trailing slash
         "if {}; then continue; fi; "
         "rm -rf \"$d\"; "
-        "done'",
-        SSH_OPTS, compute_node,
+        "done",
         scratch_parent.string(),
-        exclude_check);
+        exclude_check));
+}
 
-    dtn_.run(cmd);
+// ── Input dependencies ─────────────────────────────────────
+
+void SyncManager::sync_inputs(const std::string& compute_node,
+                               const std::string& scratch_path,
+                               const std::vector<std::string>& input_job_names,
+                               StatusCallback cb) {
+    for (const auto& name : input_job_names) {
+        fs::path input_dir = config_.project_dir() / "output" / name / "latest";
+        if (!fs::exists(input_dir) || !fs::is_directory(input_dir)) {
+            throw std::runtime_error(fmt::format(
+                "Input '{}': output/{}/latest/ does not exist. "
+                "Run the '{}' job first to produce output.", name, name, name));
+        }
+
+        // Collect files relative to input_dir
+        std::vector<std::string> rel_paths;
+        for (const auto& entry : fs::recursive_directory_iterator(input_dir)) {
+            if (!entry.is_regular_file()) continue;
+            rel_paths.push_back(fs::relative(entry.path(), input_dir).string());
+        }
+
+        if (rel_paths.empty()) {
+            throw std::runtime_error(fmt::format(
+                "Input '{}': output/{}/latest/ is empty", name, name));
+        }
+
+        if (cb) cb(fmt::format("Uploading input '{}' ({} files)...", name, rel_paths.size()));
+
+        // Extract into {scratch}/output/{name}/ with base_dir = input_dir
+        std::string dest = scratch_path + "/output/" + name;
+
+        // Use first file as probe for verification
+        std::string probe = rel_paths[0];
+        std::string probe_md5 = compute_file_md5(input_dir / probe);
+
+        auto result = tunnel_transfer_.send_files(
+            compute_node, dest, input_dir, rel_paths, probe, probe_md5);
+
+        if (!result.verified) {
+            throw std::runtime_error(fmt::format(
+                "Failed to upload input '{}': {}",
+                name, result.error.empty() ? "verification failed" : result.error));
+        }
+    }
 }
 
 // ── Orchestrator ───────────────────────────────────────────

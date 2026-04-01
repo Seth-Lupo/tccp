@@ -16,19 +16,3 @@ SSHResult LoginHopConnection::run(const std::string& command, int timeout_secs) 
                           login_host_ + " " + escape_for_ssh(command) + " </dev/null";
     return SSHConnection::run(wrapped, timeout_secs);
 }
-
-std::string LoginHopConnection::escape_for_ssh(const std::string& cmd) {
-    // Single-quote wrapping with ' → '\'' replacement
-    std::string escaped;
-    escaped.reserve(cmd.size() + 10);
-    escaped += '\'';
-    for (char c : cmd) {
-        if (c == '\'') {
-            escaped += "'\\''";
-        } else {
-            escaped += c;
-        }
-    }
-    escaped += '\'';
-    return escaped;
-}

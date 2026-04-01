@@ -96,35 +96,6 @@ SSHResult SSHConnection::run(const std::string& command, int timeout_secs) {
     return SSHResult{-1, output, "Command timed out after " + std::to_string(effective_timeout) + "s"};
 }
 
-// ── Base64 decode for binary-safe transfer over PTY ──
-
-static int b64_val(char c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
-    return -1;
-}
-
-static std::string base64_decode(const std::string& input) {
-    std::string out;
-    out.reserve(input.size() * 3 / 4);
-    int val = 0, bits = -8;
-    for (char c : input) {
-        if (c == '\r' || c == '\n' || c == ' ') continue;
-        int v = b64_val(c);
-        if (v < 0) break;  // '=' or invalid → stop
-        val = (val << 6) | v;
-        bits += 6;
-        if (bits >= 0) {
-            out += static_cast<char>((val >> bits) & 0xFF);
-            bits -= 8;
-        }
-    }
-    return out;
-}
-
 SSHResult SSHConnection::upload(const fs::path& local, const std::string& remote) {
     if (!channel_) {
         return SSHResult{-1, "", "No channel available"};

@@ -22,6 +22,12 @@ public:
                          ProjectState& state,
                          StatusCallback cb);
 
+    // Upload output directories for input dependencies to compute node scratch.
+    void sync_inputs(const std::string& compute_node,
+                     const std::string& scratch_path,
+                     const std::vector<std::string>& input_job_names,
+                     StatusCallback cb);
+
 private:
     const Config& config_;
     SSHConnection& dtn_;

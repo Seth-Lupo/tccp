@@ -2,6 +2,7 @@
 #include "job_log.hpp"
 #include <core/constants.hpp>
 #include <core/utils.hpp>
+#include <ssh/compute_hop.hpp>
 #include <fmt/format.h>
 #include <sstream>
 #include <set>
@@ -11,8 +12,12 @@
 // ── Cancel ─────────────────────────────────────────────────
 
 Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) {
+    tccp_log(fmt::format("cancel: job={} init_complete={} completed={} node={}",
+                         tj->job_id, tj->init_complete, tj->completed, tj->compute_node));
+
     // If job is still initializing, request cancellation
     if (!tj->init_complete) {
+        tccp_log("cancel: job still initializing, setting cancel flag");
         // Mark for cancellation (init thread will check this)
         {
             std::lock_guard<std::mutex> lock(cancel_mutex_);
@@ -34,12 +39,12 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
     // Check REMOTE state (don't trust local completed flag)
     std::string dtach_socket = tj->scratch_path + "/tccp.sock";
 
-    std::string check_cmd = fmt::format(
-        "ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
-        SSH_OPTS_FAST, tj->compute_node, dtach_socket);
+    ComputeHop compute(dtn_, tj->compute_node);
+    std::string check_inner = fmt::format("test -e {} && echo RUNNING || echo DONE", dtach_socket);
 
-    auto check_result = dtn_.run(check_cmd);
-    tccp_log_ssh("cancel:check-remote", check_cmd, check_result);
+    tccp_log("cancel: checking remote state...");
+    auto check_result = compute.run(check_inner, 5);
+    tccp_log_ssh("cancel:check-remote", check_inner, check_result);
 
     // If remote shows job is done, update local state and return error
     if (check_result.stdout_data.find("DONE") != std::string::npos) {
@@ -61,8 +66,13 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
     tj->end_time = now_iso();
     append_job_log(tj->job_id, "Job canceled");
 
+    tccp_log("cancel: killing processes...");
     cleanup_compute_node(*tj);
+    tccp_log("cancel: persisting state...");
     persist_job_state(*tj);
+    // Skip output return on cancel — user wants immediate response.
+    // Output can be retrieved later via startup recovery if needed.
+    mark_output_returned(tj->job_id);
 
     if (!tj->slurm_id.empty()) {
         allocs_.release_job(tj->slurm_id);
@@ -70,20 +80,17 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
         allocs_.persist();
     }
 
-    // Update watcher targets (job removed)
-    refresh_watcher_targets();
-
     return Result<void>::Ok();
 }
 
 Result<void> JobManager::cancel_job(const std::string& job_name, StatusCallback cb) {
-    std::lock_guard<std::mutex> lock(tracked_mutex_);
-
-    // Find the most recent job by name (last match = newest)
     TrackedJob* tj = nullptr;
-    for (auto& job : tracked_) {
-        if (job.job_name == job_name) {
-            tj = &job;
+    {
+        std::lock_guard<std::mutex> lock(tracked_mutex_);
+        for (auto& job : tracked_) {
+            if (job.job_name == job_name) {
+                tj = &job;
+            }
         }
     }
 
@@ -94,6 +101,9 @@ Result<void> JobManager::cancel_job(const std::string& job_name, StatusCallback 
     if (cb) cb(fmt::format("Canceling job '{}'...", job_name));
 
     auto result = do_cancel(tj, job_name);
+
+    // Update watcher targets outside the lock (refresh_watcher_targets locks tracked_mutex_)
+    refresh_watcher_targets();
 
     if (result.is_ok() && cb) {
         if (tj->slurm_id.empty()) {
@@ -107,14 +117,14 @@ Result<void> JobManager::cancel_job(const std::string& job_name, StatusCallback 
 }
 
 Result<void> JobManager::cancel_job_by_id(const std::string& job_id, StatusCallback cb) {
-    std::lock_guard<std::mutex> lock(tracked_mutex_);
-
-    // Find job by ID
     TrackedJob* tj = nullptr;
-    for (auto& job : tracked_) {
-        if (job.job_id == job_id) {
-            tj = &job;
-            break;
+    {
+        std::lock_guard<std::mutex> lock(tracked_mutex_);
+        for (auto& job : tracked_) {
+            if (job.job_id == job_id) {
+                tj = &job;
+                break;
+            }
         }
     }
 
@@ -125,6 +135,9 @@ Result<void> JobManager::cancel_job_by_id(const std::string& job_id, StatusCallb
     if (cb) cb(fmt::format("Canceling job '{}'...", tj->job_name));
 
     auto result = do_cancel(tj, tj->job_name);
+
+    // Update watcher targets outside the lock
+    refresh_watcher_targets();
 
     if (result.is_ok() && cb) {
         if (tj->slurm_id.empty()) {
@@ -152,48 +165,80 @@ JobManager::SlurmJobState JobManager::query_alloc_state(const std::string& slurm
 }
 
 void JobManager::poll(std::function<void(const TrackedJob&)> on_complete) {
-    // Phase 1: Detect completed jobs while holding the lock.
+    // Phase 1a: Brief lock — snapshot jobs that need checking.
+    struct PollTarget {
+        std::string job_id;
+        std::string slurm_id;
+        std::string compute_node;
+        std::string scratch_path;
+    };
+    std::vector<PollTarget> targets;
+
+    {
+        std::lock_guard<std::mutex> lock(tracked_mutex_);
+        for (const auto& tj : tracked_) {
+            if (tj.completed || !tj.init_complete) continue;
+            targets.push_back({tj.job_id, tj.slurm_id, tj.compute_node, tj.scratch_path});
+        }
+    }
+
+    // Phase 1b: SSH checks with NO lock held.
+    struct PollResult {
+        std::string job_id;
+        bool completed = false;
+        int exit_code = 0;
+        std::string compute_node; // updated node for pending→running transition
+    };
+    std::vector<PollResult> results;
+
+    for (const auto& t : targets) {
+        if (!t.compute_node.empty()) {
+            std::string sock = t.scratch_path + "/tccp.sock";
+            ComputeHop compute(dtn_, t.compute_node);
+            auto check = compute.run(fmt::format(
+                "test -e {} && echo RUNNING || echo DONE", sock), 15);
+
+            if (check.stdout_data.find("DONE") != std::string::npos) {
+                results.push_back({t.job_id, true, 0, {}});
+            } else if (check.stdout_data.find("RUNNING") == std::string::npos) {
+                auto alloc_state = query_alloc_state(t.slurm_id);
+                if (alloc_state.state.empty() || alloc_state.state == "COMPLETED" ||
+                    alloc_state.state == "FAILED" || alloc_state.state == "CANCELLED") {
+                    results.push_back({t.job_id, true, -1, {}});
+                    tccp_log(fmt::format("poll: allocation {} gone ({}), marking job {} complete",
+                                         t.slurm_id, alloc_state.state, t.job_id));
+                }
+            }
+        } else {
+            auto alloc_state = query_alloc_state(t.slurm_id);
+            if (alloc_state.state == "RUNNING" && !alloc_state.node.empty()) {
+                results.push_back({t.job_id, false, 0, alloc_state.node});
+            } else if (alloc_state.state.empty() || alloc_state.state == "COMPLETED" ||
+                       alloc_state.state == "FAILED" || alloc_state.state == "CANCELLED") {
+                results.push_back({t.job_id, true, -1, {}});
+            }
+        }
+    }
+
+    // Phase 1c: Brief lock — apply results to tracked_ list.
     std::vector<TrackedJob> newly_completed;
 
     {
         std::lock_guard<std::mutex> lock(tracked_mutex_);
-        for (auto& tj : tracked_) {
-            if (tj.completed) continue;
-            if (!tj.init_complete) continue;
+        for (const auto& r : results) {
+            for (auto& tj : tracked_) {
+                if (tj.job_id != r.job_id) continue;
+                if (tj.completed) break; // already handled elsewhere
 
-            if (!tj.compute_node.empty()) {
-                std::string sock = tj.scratch_path + "/tccp.sock";
-                auto check = dtn_.run(fmt::format("ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
-                                                  SSH_OPTS_FAST, tj.compute_node, sock));
-
-                if (check.stdout_data.find("DONE") != std::string::npos) {
+                if (r.completed) {
                     tj.completed = true;
-                    tj.exit_code = 0;
+                    tj.exit_code = r.exit_code;
                     tj.end_time = now_iso();
                     newly_completed.push_back(tj);
-                } else if (check.stdout_data.find("RUNNING") == std::string::npos) {
-                    auto alloc_state = query_alloc_state(tj.slurm_id);
-                    if (alloc_state.state.empty() || alloc_state.state == "COMPLETED" ||
-                        alloc_state.state == "FAILED" || alloc_state.state == "CANCELLED") {
-                        tj.completed = true;
-                        tj.exit_code = -1;
-                        tj.end_time = now_iso();
-                        newly_completed.push_back(tj);
-                        tccp_log(fmt::format("poll: allocation {} gone ({}), marking job {} complete",
-                                             tj.slurm_id, alloc_state.state, tj.job_id));
-                    }
+                } else if (!r.compute_node.empty()) {
+                    tj.compute_node = r.compute_node;
                 }
-            } else {
-                auto alloc_state = query_alloc_state(tj.slurm_id);
-                if (alloc_state.state == "RUNNING" && !alloc_state.node.empty()) {
-                    tj.compute_node = alloc_state.node;
-                } else if (alloc_state.state.empty() || alloc_state.state == "COMPLETED" ||
-                           alloc_state.state == "FAILED" || alloc_state.state == "CANCELLED") {
-                    tj.completed = true;
-                    tj.exit_code = -1;
-                    tj.end_time = now_iso();
-                    newly_completed.push_back(tj);
-                }
+                break;
             }
         }
     }
@@ -238,8 +283,7 @@ void JobManager::kill_job_processes(const TrackedJob& tj) {
     //   2. pkill -f matching the job_id (catches orphaned singularity/python)
     //   3. Remove the dtach socket
     std::string sock = tj.scratch_path + "/tccp.sock";
-    std::string cmd = fmt::format(
-        "ssh {} {} '"
+    std::string kill_cmd = fmt::format(
         // Strategy 1: fuser + process tree walk
         "DPID=$(fuser {} 2>/dev/null | tr -d \" \"); "
         "if [ -n \"$DPID\" ]; then "
@@ -256,13 +300,20 @@ void JobManager::kill_job_processes(const TrackedJob& tj) {
         "  done; "
         "  kill -9 $PIDS 2>/dev/null; "
         "fi; "
-        // Strategy 2: pkill anything referencing this job_id
+        // Strategy 2: pkill anything referencing this job_id or scratch path
         "pkill -9 -f \"{}\" 2>/dev/null; "
+        // Strategy 3: kill GPU processes from this job's cwd (catches
+        // singularity-spawned python that has no job_id in cmdline)
+        "for P in $(ls /proc/*/cwd 2>/dev/null); do "
+        "  T=$(readlink $P 2>/dev/null); "
+        "  case \"$T\" in {}*) kill -9 $(echo $P | grep -o \"[0-9]*\") 2>/dev/null;; esac; "
+        "done; "
         // Clean up socket
-        "rm -f {}'",
-        SSH_OPTS_FAST, tj.compute_node, sock, tj.job_id, sock);
-    auto result = dtn_.run(cmd);
-    tccp_log_ssh("cleanup:kill", cmd, result);
+        "rm -f {}",
+        sock, tj.job_id, tj.scratch_path, sock);
+    ComputeHop compute(dtn_, tj.compute_node);
+    auto result = compute.run(kill_cmd, 10);
+    tccp_log_ssh("cleanup:kill", kill_cmd, result);
 }
 
 void JobManager::cleanup_compute_node(TrackedJob& tj) {

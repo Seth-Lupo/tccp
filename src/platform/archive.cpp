@@ -83,7 +83,7 @@ void create_tar_to_callback(const fs::path& base_dir,
     auto close_cb = [](struct archive*, void*) -> int { return ARCHIVE_OK; };
     auto write_cb = [](struct archive*, void* client, const void* buf, size_t len) -> la_ssize_t {
         auto* data = static_cast<CallbackData*>(client);
-        ssize_t result = (*data->fn)(buf, len);
+        int64_t result = (*data->fn)(buf, len);
         if (result < 0) return -1;
         return static_cast<la_ssize_t>(result);
     };

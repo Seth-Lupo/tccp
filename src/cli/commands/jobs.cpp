@@ -1,6 +1,7 @@
 #include "job_helpers.hpp"
 #include "../theme.hpp"
 #include <core/constants.hpp>
+#include <ssh/compute_hop.hpp>
 #include <core/utils.hpp>
 #include <core/time_utils.hpp>
 #include <managers/job_log.hpp>
@@ -99,8 +100,16 @@ static void do_return(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
-    auto cb = [](const std::string& msg) {
-        std::cout << theme::dim(msg);
+    std::cout << theme::dim(fmt::format("Downloading output from {}...", tracked->compute_node));
+
+    bool got_files = false;
+    auto cb = [&got_files](const std::string& msg) {
+        if (msg.find("Output saved") != std::string::npos) {
+            got_files = true;
+            std::cout << theme::green(msg);
+        } else {
+            std::cout << theme::dim(msg);
+        }
     };
 
     auto result = cli.service.return_output(tracked->job_id, cb);
@@ -138,6 +147,13 @@ void do_ssh(BaseCLI& cli, const std::string& arg) {
         return;
     }
 
+    if (tracked->completed) {
+        std::cout << theme::error(fmt::format(
+            "Job '{}' has completed — use 'node {}' for raw shell (if allocation is still active)",
+            job_name, job_name));
+        return;
+    }
+
     if (tracked->compute_node.empty()) {
         if (!tracked->init_complete) {
             std::cout << theme::error("Job is still initializing (no compute node yet)");
@@ -154,21 +170,46 @@ void do_ssh(BaseCLI& cli, const std::string& arg) {
     if (remote_cmd.empty()) {
         // Interactive: DTN exec channel → SSH hop to compute node
         std::string cmd = fmt::format(
-            "ssh -t -o StrictHostKeyChecking=no -o LogLevel=ERROR {} '{}'",
-            tracked->compute_node, shell_cmd);
+            "ssh -t -o StrictHostKeyChecking=no -o LogLevel=ERROR {} {}",
+            tracked->compute_node, escape_for_ssh(shell_cmd));
         interactive_relay(factory, cmd);
     } else {
         // One-off command: use libssh2 through DTN
-        std::string ssh_cmd = fmt::format(
-            "ssh {} {} '{}'",
-            SSH_OPTS, tracked->compute_node, shell_cmd);
-
-        auto result = cli.service.cluster()->dtn().run(ssh_cmd);
+        ComputeHop compute(cli.service.cluster()->dtn(), tracked->compute_node);
+        auto result = compute.run(shell_cmd);
         std::cout << result.stdout_data;
         if (!result.stderr_data.empty()) {
             std::cerr << result.stderr_data;
         }
     }
+}
+
+static void do_node(BaseCLI& cli, const std::string& arg) {
+    if (!cli.require_connection()) return;
+    if (!cli.service.job_manager()) return;
+
+    auto& factory = *cli.service.cluster();
+
+    std::string job_name = resolve_job_name(cli, arg);
+    if (job_name.empty()) return;
+
+    auto* tracked = cli.service.find_job_by_name(job_name);
+    if (!tracked) {
+        std::cout << theme::error(fmt::format("No tracked job named '{}'", job_name));
+        return;
+    }
+
+    if (tracked->compute_node.empty()) {
+        std::cout << theme::error("No compute node assigned to this job");
+        return;
+    }
+
+    std::cout << theme::dim(fmt::format("Connecting to {}...", tracked->compute_node));
+
+    std::string cmd = fmt::format(
+        "ssh -t -o StrictHostKeyChecking=no -o LogLevel=ERROR {} 'cd {} 2>/dev/null; bash -l'",
+        tracked->compute_node, tracked->scratch_path);
+    interactive_relay(factory, cmd);
 }
 
 void do_clusterssh(BaseCLI& cli, const std::string& arg) {
@@ -290,6 +331,14 @@ void do_config(BaseCLI& cli, const std::string& arg) {
             }
             std::cout << theme::kv("Ports", ports_str);
         }
+        if (!job.inputs.empty()) {
+            std::string inputs_str;
+            for (const auto& inp : job.inputs) {
+                if (!inputs_str.empty()) inputs_str += ", ";
+                inputs_str += inp;
+            }
+            std::cout << theme::kv("Inputs", inputs_str);
+        }
         if (job.slurm) {
             const auto& s = *job.slurm;
             if (!s.partition.empty())
@@ -394,7 +443,8 @@ void register_jobs_commands(BaseCLI& cli) {
     cli.add_command("out", do_output, "View full job output (vim)");
     cli.add_command("logs", do_logs, "Print job output to terminal");
     cli.add_command("initlogs", do_initlogs, "Print job initialization logs");
-    cli.add_command("ssh", do_ssh, "SSH to a job's compute node");
+    cli.add_command("ssh", do_ssh, "SSH to a job's compute node (in container)");
+    cli.add_command("node", do_node, "SSH to a job's compute node (raw shell)");
     cli.add_command("clusterssh", do_clusterssh, "SSH to the login node");
     cli.add_command("jobs", do_jobs, "List running jobs");
     cli.add_command("ls", do_jobs, "List running jobs (alias for 'jobs')");

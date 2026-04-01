@@ -26,52 +26,83 @@ SessionMultiplexer::~SessionMultiplexer() {
 SSHResult SessionMultiplexer::start() {
     if (running_) return SSHResult{0, "", ""};
 
-    // Drain any stale data from the channel before starting tmux
+    // Retry the full handshake up to 3 times. tmux can fail intermittently
+    // due to stale sockets, slow shell startup, or server cleanup races.
+    for (int attempt = 0; attempt < 3; attempt++) {
+        auto result = try_start_tmux();
+        if (!result.failed()) return result;
+
+        // Clean up before retry
+        if (attempt < 2) {
+            platform::sleep_ms(500 * (attempt + 1));
+        } else {
+            return result;  // final attempt failed
+        }
+    }
+
+    return SSHResult{-1, "", "tmux handshake failed after 3 attempts"};
+}
+
+bool SessionMultiplexer::wait_for_prompt(int timeout_secs) {
+    char drain[SSH_DRAIN_BUF_SIZE];
+    std::string accumulated;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_secs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        int n;
+        {
+            std::lock_guard<std::mutex> lock(*io_mutex_);
+            n = libssh2_channel_read(channel_, drain, sizeof(drain));
+        }
+        if (n > 0) {
+            accumulated.append(drain, n);
+            if (accumulated.size() >= 2) {
+                auto tail = accumulated.substr(
+                    accumulated.size() > 30 ? accumulated.size() - 30 : 0);
+                if (tail.find("$ ") != std::string::npos ||
+                    tail.find("# ") != std::string::npos) {
+                    return true;
+                }
+            }
+        } else {
+            platform::sleep_ms(20);
+        }
+    }
+    return false;
+}
+
+SSHResult SessionMultiplexer::try_start_tmux() {
+    // Drain any stale data from the channel
     {
         char drain[SSH_DRAIN_BUF_SIZE];
         std::lock_guard<std::mutex> lock(*io_mutex_);
         while (libssh2_channel_read(channel_, drain, sizeof(drain)) > 0) {}
     }
 
-    // Step 1: Kill any stale tmux session from a previous run.
-    // This is a normal shell command — wait for it to complete via marker.
-    send_raw("tmux kill-session -t tccp_mux 2>/dev/null\n");
-    {
-        // Drain the kill command output (echo + result + prompt)
-        char drain[SSH_DRAIN_BUF_SIZE];
-        auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-        while (std::chrono::steady_clock::now() < drain_deadline) {
-            int n;
-            {
-                std::lock_guard<std::mutex> lock(*io_mutex_);
-                n = libssh2_channel_read(channel_, drain, sizeof(drain));
-            }
-            if (n <= 0) {
-                platform::sleep_ms(50);
-                // Try one more read to see if prompt arrived
-                std::lock_guard<std::mutex> lock(*io_mutex_);
-                n = libssh2_channel_read(channel_, drain, sizeof(drain));
-                if (n <= 0) break;
-            }
-        }
+    // Step 1: Kill any stale tmux state and clean up the socket.
+    // Use a dedicated socket (-L tccp) to avoid interfering with user's tmux.
+    // Remove the socket file explicitly in case kill-server left it stale.
+    send_raw("tmux -L tccp kill-server 2>/dev/null; rm -f /tmp/tmux-$(id -u)/tccp 2>/dev/null\n");
+
+    // Wait for shell prompt to confirm cleanup finished
+    if (!wait_for_prompt(5)) {
+        // If we can't even get a prompt, the channel is broken
+        return SSHResult{-1, "", "Shell not responding after tmux cleanup"};
     }
 
-    // Step 2: Start tmux in control mode (-C, single C for plain protocol).
-    // -CC (double C) adds DCS passthrough wrapping for iTerm2 — wrong for
-    // raw libssh2 channels where DCS bytes corrupt the protocol stream.
-    if (!send_raw("tmux -C new-session -s tccp_mux\n")) {
+    // Step 2: Start tmux in control mode on our dedicated socket.
+    // -C = plain control protocol (not -CC which adds DCS wrapping for iTerm2)
+    if (!send_raw("tmux -L tccp -C new-session -s tccp_mux\n")) {
         return SSHResult{-1, "", "Failed to send tmux start command"};
     }
 
     // Wait for the tmux control mode handshake.
-    // tmux -C new-session outputs notifications (NOT %begin/%end):
+    // tmux -C new-session outputs notifications:
     //   %window-add @N
     //   %sessions-changed
     //   %session-changed $N tccp_mux
     //   %layout-change @N ...
     //   %output %P <shell prompt>
     // The first %output line means the initial pane has a shell ready.
-    // We parse the pane ID from %output to know our master channel.
     std::string handshake;
     std::string initial_pane_id;
     char buf[SSH_READ_BUF_SIZE];
@@ -85,8 +116,6 @@ SSHResult SessionMultiplexer::start() {
         }
         if (n > 0) {
             handshake.append(buf, n);
-            // Look for first %output line — means the pane shell is ready.
-            // Format: "%output %<pane_id> <data>"
             if (initial_pane_id.empty()) {
                 auto opos = handshake.find("%output %");
                 if (opos != std::string::npos) {
@@ -98,6 +127,13 @@ SSHResult SessionMultiplexer::start() {
                 }
             }
             if (!initial_pane_id.empty()) break;
+
+            // Detect tmux failure: if we see a shell prompt instead of
+            // tmux protocol lines, tmux didn't start
+            if (handshake.find("$ ") != std::string::npos &&
+                handshake.find('%') == std::string::npos) {
+                break;  // shell prompt without any tmux output = failure
+            }
         } else if (n == LIBSSH2_ERROR_EAGAIN || n == 0) {
             platform::sleep_ms(10);
         } else {
@@ -106,7 +142,6 @@ SSHResult SessionMultiplexer::start() {
     }
 
     if (initial_pane_id.empty()) {
-        // Strip non-printable chars for error message
         std::string cleaned;
         for (char c : handshake) {
             if (c >= 32 || c == '\n' || c == '\r' || c == '\t')
@@ -120,11 +155,7 @@ SSHResult SessionMultiplexer::start() {
     }
 
     running_ = true;
-
-    // Register the initial pane as the master channel (pane ID from handshake)
     register_master_channel(initial_pane_id);
-
-    // Start the reader thread
     reader_thread_ = std::thread(&SessionMultiplexer::reader_loop, this);
 
     return SSHResult{0, "", ""};
@@ -143,7 +174,7 @@ void SessionMultiplexer::stop() {
         }
     }
 
-    // Kill the tmux session
+    // Kill the tmux server (in control mode, this is a tmux command, not shell)
     send_raw("kill-server\n");
 
     if (reader_thread_.joinable())

@@ -41,6 +41,7 @@ JobManager::JobManager(const Config& config, ConnectionFactory& factory,
         tj.init_error = js.init_error;
         tj.output_returned = js.output_returned;
         tj.forwarded_ports = js.forwarded_ports;
+        tj.partition = js.partition;
         tj.submit_time = js.submit_time;
         tj.start_time = js.start_time;
         tj.end_time = js.end_time;
@@ -55,6 +56,15 @@ JobManager::JobManager(const Config& config, ConnectionFactory& factory,
         }
     }
 
+    // Attempt to retrieve output for jobs that completed while we weren't running.
+    // Output is on compute node /tmp — may still be there if the allocation hasn't expired.
+    // allow_recovery=true: if the node is unreachable, try a short recovery allocation.
+    for (auto& tj : tracked_) {
+        if (tj.completed && !tj.output_returned && !tj.compute_node.empty()
+            && !tj.scratch_path.empty()) {
+            try_return_output(tj, true);
+        }
+    }
 }
 
 JobManager::~JobManager() {
@@ -83,7 +93,7 @@ JobManager::~JobManager() {
 void JobManager::clear_tracked() {
     std::lock_guard<std::mutex> lock(tracked_mutex_);
     tracked_.clear();
-    environment_checked_ = false;
+    environment_checked_node_.clear();
 }
 
 // ── Path helpers ───────────────────────────────────────────
@@ -97,7 +107,7 @@ std::string JobManager::job_output_dir(const std::string& job_id) const {
 }
 
 std::string JobManager::env_dir() const {
-    return persistent_base() + "/env";
+    return fmt::format("/tmp/{}/{}/.tccp-env", username_, config_.project().name);
 }
 
 std::string JobManager::container_cache() const {
@@ -106,10 +116,6 @@ std::string JobManager::container_cache() const {
 
 std::string JobManager::scratch_dir(const std::string& job_id) const {
     return fmt::format(REMOTE_SCRATCH_DIR, username_, config_.project().name, job_id);
-}
-
-std::string JobManager::ssh_to_node(const std::string& node, const std::string& cmd) {
-    return fmt::format("ssh {} {} '{}'", SSH_OPTS, node, cmd);
 }
 
 bool JobManager::is_implicit_job(const std::string& job_name) {
@@ -153,6 +159,7 @@ std::string JobManager::build_run_preamble(const JobEnvPaths& paths,
                                             const std::string& scratch) const {
     std::string preamble = fmt::format(
         "#!/bin/bash\n"
+        "exec 2>{log}\n"
         "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true\n"
         "export SINGULARITY_CACHEDIR={rc}/cache\n"
         "export SINGULARITY_TMPDIR={rc}/tmp\n"
@@ -165,12 +172,20 @@ std::string JobManager::build_run_preamble(const JobEnvPaths& paths,
         "export HF_HOME={rc}/huggingface\n"
         "export TORCH_HOME={rc}/torch\n"
         "mkdir -p $XDG_CACHE_HOME $TMPDIR $PIP_CACHE_DIR $HF_HOME $TORCH_HOME\n",
+        fmt::arg("log", paths.log),
         fmt::arg("rc", paths.runtime_cache),
         fmt::arg("scratch", scratch));
 
     // Custom environment variables from tccp.yaml
+    // Escape single quotes in values: ' → '\''
     for (const auto& [key, val] : config_.project().environment) {
-        preamble += fmt::format("export {}='{}'\n", key, val);
+        std::string escaped = val;
+        std::string::size_type pos = 0;
+        while ((pos = escaped.find('\'', pos)) != std::string::npos) {
+            escaped.replace(pos, 1, "'\\''");
+            pos += 4;
+        }
+        preamble += fmt::format("export {}='{}'\n", key, escaped);
     }
 
     preamble += "printf '\\n__TCCP_JOB_START__\\n'\n";
@@ -214,7 +229,7 @@ std::string JobManager::build_job_payload(const std::string& job_name,
 
     return fmt::format(
         "CMD=\"singularity exec {} {} {}\"\n"
-        "script -fq -c \"$CMD\" {}\n"
+        "script -efq -c \"$CMD\" {}\n"
         "EC=$?\n"
         "printf '\\033[J'\n"
         "cp {} output/tccp.log 2>/dev/null\n"
@@ -244,7 +259,13 @@ std::string JobManager::shell_command(const TrackedJob& tj, const std::string& i
 
     // Custom environment variables from tccp.yaml
     for (const auto& [key, val] : config_.project().environment) {
-        env_setup += fmt::format("export {}='{}'; ", key, val);
+        std::string escaped = val;
+        std::string::size_type pos = 0;
+        while ((pos = escaped.find('\'', pos)) != std::string::npos) {
+            escaped.replace(pos, 1, "'\\''");
+            pos += 4;
+        }
+        env_setup += fmt::format("export {}='{}'; ", key, escaped);
     }
 
     // Activate venv for python environments so bare `python` and `pip` work
@@ -479,6 +500,15 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
         log_to_file(fmt::format("Syncing code to {}", alloc->node));
         sync_.sync_to_scratch(alloc->node, scratch, allocs_.state(), log_to_file);
 
+        // Upload input dependencies
+        {
+            auto job_it = config_.project().jobs.find(job_name);
+            if (job_it != config_.project().jobs.end() && !job_it->second.inputs.empty()) {
+                log_to_file(fmt::format("Uploading {} input dependencies", job_it->second.inputs.size()));
+                sync_.sync_inputs(alloc->node, scratch, job_it->second.inputs, log_to_file);
+            }
+        }
+
         if (check_canceled()) {
             log_to_file("Canceled after sync");
             throw std::runtime_error("Canceled during initialization");
@@ -520,6 +550,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
                 if (tj.job_id == job_id) {
                     tj.slurm_id = alloc->slurm_id;
                     tj.compute_node = alloc->node;
+                    tj.partition = alloc->partition;
                     tj.scratch_path = scratch;
                     tj.init_complete = true;
                     tj.start_time = start;
@@ -535,6 +566,7 @@ void JobManager::background_init_thread(std::string job_id, std::string job_name
             if (js.job_id == job_id) {
                 js.alloc_slurm_id = alloc->slurm_id;
                 js.compute_node = alloc->node;
+                js.partition = alloc->partition;
                 js.scratch_path = scratch;
                 js.init_complete = true;
                 js.start_time = start;

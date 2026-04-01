@@ -11,8 +11,8 @@ static const std::unordered_map<std::string, EnvironmentConfig>& registry() {
         }},
         {"python-pytorch", {
             "python-pytorch",
-            "docker://pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime",
-            "pytorch_2.6.0-cuda12.4-runtime.sif",
+            "docker://pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel",
+            "pytorch_2.6.0-cuda12.4-devel.sif",
             true,
         }},
     };

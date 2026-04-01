@@ -4,6 +4,7 @@
 #include "../theme.hpp"
 #include <managers/job_log.hpp>
 #include <core/constants.hpp>
+#include <ssh/compute_hop.hpp>
 #include <platform/terminal.hpp>
 #include <iostream>
 #include <thread>
@@ -397,13 +398,16 @@ static std::string fetch_job_output(BaseCLI& cli, const TrackedJob* tracked) {
         }
     }
 
-    // For completed jobs, try NFS output dir (may still exist if return hasn't run)
+    // For completed jobs, try scratch on compute node (may still exist)
     if (tracked->completed) {
-        std::string nfs_log = jm->job_output_dir(tracked->job_id) + "/tccp.log";
-        auto result = cli.service.cluster()->dtn().run(
-            fmt::format("cat {} 2>/dev/null", nfs_log));
-        if (!result.stdout_data.empty())
-            return result.stdout_data;
+        if (!tracked->compute_node.empty() && !tracked->scratch_path.empty()) {
+            std::string scratch_log = tracked->scratch_path + "/tccp.log";
+            ComputeHop compute(cli.service.cluster()->dtn(), tracked->compute_node);
+            auto result = compute.run(
+                fmt::format("cat {} 2>/dev/null", scratch_log));
+            if (!result.stdout_data.empty())
+                return result.stdout_data;
+        }
 
         std::cout << theme::dim("No output available.") << "\n";
         return "";
@@ -415,9 +419,9 @@ static std::string fetch_job_output(BaseCLI& cli, const TrackedJob* tracked) {
         return "";
     }
     std::string remote_log = tracked->scratch_path + "/tccp.log";
-    auto result = cli.service.cluster()->dtn().run(
-        fmt::format("ssh {} {} 'cat {} 2>/dev/null'",
-                     SSH_OPTS_FAST, tracked->compute_node, remote_log));
+    ComputeHop compute2(cli.service.cluster()->dtn(), tracked->compute_node);
+    auto result = compute2.run(
+        fmt::format("cat {} 2>/dev/null", remote_log));
     if (result.stdout_data.empty()) {
         std::cout << theme::dim("No output available.") << "\n";
         return "";

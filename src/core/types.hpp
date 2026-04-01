@@ -98,6 +98,7 @@ struct JobConfig {
                                                  // decide if an allocation has enough time left
     std::optional<SlurmDefaults> slurm;          // per-job SLURM overrides
     std::vector<int> ports;                      // localhost ports to forward to compute node
+    std::vector<std::string> inputs;             // output dependencies from other jobs
 };
 
 struct ProjectConfig {

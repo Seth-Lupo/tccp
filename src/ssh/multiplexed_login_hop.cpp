@@ -17,18 +17,3 @@ SSHResult MultiplexedLoginHop::run(const std::string& cmd, int timeout_secs) {
                           login_host_ + " " + escape_for_ssh(cmd) + " </dev/null";
     return MultiplexedConnection::run(wrapped, timeout_secs);
 }
-
-std::string MultiplexedLoginHop::escape_for_ssh(const std::string& cmd) {
-    std::string escaped;
-    escaped.reserve(cmd.size() + 10);
-    escaped += '\'';
-    for (char c : cmd) {
-        if (c == '\'') {
-            escaped += "'\\''";
-        } else {
-            escaped += c;
-        }
-    }
-    escaped += '\'';
-    return escaped;
-}

@@ -2,6 +2,7 @@
 #include "job_log.hpp"
 #include <core/constants.hpp>
 #include <core/utils.hpp>
+#include <ssh/compute_hop.hpp>
 #include <fmt/format.h>
 
 // ── Cancel ─────────────────────────────────────────────────
@@ -30,12 +31,11 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
     // Check REMOTE state (don't trust local completed flag)
     std::string dtach_socket = tj->scratch_path + "/tccp.sock";
 
-    std::string check_cmd = fmt::format(
-        "ssh {} {} 'test -e {} && echo RUNNING || echo DONE'",
-        SSH_OPTS_FAST, tj->compute_node, dtach_socket);
+    ComputeHop compute(dtn_, tj->compute_node);
+    std::string check_inner = fmt::format("test -e {} && echo RUNNING || echo DONE", dtach_socket);
 
-    auto check_result = dtn_.run(check_cmd);
-    tccp_log_ssh("cancel:check-remote", check_cmd, check_result);
+    auto check_result = compute.run(check_inner);
+    tccp_log_ssh("cancel:check-remote", check_inner, check_result);
 
     // If remote shows job is done, update local state and return error
     if (check_result.stdout_data.find("DONE") != std::string::npos) {

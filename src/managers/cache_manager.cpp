@@ -145,7 +145,6 @@ void CacheManager::ensure_within_cap(const std::string& current_project,
                            to_delete.size(), projected / (1024.0 * 1024.0 * 1024.0)));
 }
 
-void CacheManager::touch_used(const std::string& sif_path,
-                               const std::string& project_env_path) {
-    dtn_.run(fmt::format("touch {} {}/.last_used", sif_path, project_env_path));
+void CacheManager::touch_used(const std::string& sif_path) {
+    dtn_.run(fmt::format("touch {}", sif_path));
 }

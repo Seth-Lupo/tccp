@@ -33,6 +33,7 @@ struct JobState {
     int exit_code = -1;
     std::string output_file;        // local capture path
     std::string scratch_path;       // /tmp/{user}/{project}/{job_id}
+    std::string partition;          // SLURM partition (for recovery allocations)
 
     // Init tracking
     bool init_complete = false;
@@ -67,7 +68,8 @@ struct ProjectState {
 
 class StateStore {
 public:
-    explicit StateStore(const std::string& project_name);
+    explicit StateStore(const std::string& project_name,
+                        const fs::path& base_dir = "");
 
     ProjectState load();
     void save(const ProjectState& state);

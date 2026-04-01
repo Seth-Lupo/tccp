@@ -69,6 +69,33 @@ std::string base64_encode(const std::string& input) {
     return out;
 }
 
+static int b64_val(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+std::string base64_decode(const std::string& input) {
+    std::string out;
+    out.reserve(input.size() * 3 / 4);
+    int val = 0, bits = -8;
+    for (char c : input) {
+        if (c == '\r' || c == '\n' || c == ' ') continue;
+        int v = b64_val(c);
+        if (v < 0) break;  // '=' or invalid → stop
+        val = (val << 6) | v;
+        bits += 6;
+        if (bits >= 0) {
+            out += static_cast<char>((val >> bits) & 0xFF);
+            bits -= 8;
+        }
+    }
+    return out;
+}
+
 // ── In-process MD5 (RFC 1321) ─────────────────────────────
 // Avoids fork+exec per file (~400ms each → 13s for 31 files).
 

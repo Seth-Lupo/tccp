@@ -3,8 +3,12 @@
 #include <yaml-cpp/yaml.h>
 #include <fstream>
 
-StateStore::StateStore(const std::string& project_name) {
-    state_path_ = platform::home_dir() / ".tccp" / "state" / (project_name + ".yaml");
+StateStore::StateStore(const std::string& project_name, const fs::path& base_dir) {
+    if (base_dir.empty()) {
+        state_path_ = platform::home_dir() / ".tccp" / "state" / (project_name + ".yaml");
+    } else {
+        state_path_ = base_dir / (project_name + ".yaml");
+    }
 }
 
 ProjectState StateStore::load() {
@@ -47,6 +51,7 @@ ProjectState StateStore::load() {
                 j.exit_code = n["exit_code"].as<int>(-1);
                 j.output_file = n["output_file"].as<std::string>("");
                 j.scratch_path = n["scratch_path"].as<std::string>("");
+                j.partition = n["partition"].as<std::string>("");
                 j.init_complete = n["init_complete"].as<bool>(false);
                 j.init_error = n["init_error"].as<std::string>("");
                 j.output_returned = n["output_returned"].as<bool>(false);
@@ -125,6 +130,7 @@ void StateStore::save(const ProjectState& state) {
         out << YAML::Key << "exit_code" << YAML::Value << j.exit_code;
         out << YAML::Key << "output_file" << YAML::Value << j.output_file;
         out << YAML::Key << "scratch_path" << YAML::Value << j.scratch_path;
+        out << YAML::Key << "partition" << YAML::Value << j.partition;
         out << YAML::Key << "init_complete" << YAML::Value << j.init_complete;
         out << YAML::Key << "init_error" << YAML::Value << j.init_error;
         out << YAML::Key << "output_returned" << YAML::Value << j.output_returned;

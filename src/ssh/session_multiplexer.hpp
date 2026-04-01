@@ -139,4 +139,10 @@ private:
 
     // Register the master channel with its actual tmux pane ID
     void register_master_channel(const std::string& pane_id);
+
+    // Single attempt to start tmux (called by start() with retries)
+    SSHResult try_start_tmux();
+
+    // Wait for shell prompt after a command. Returns true if prompt found.
+    bool wait_for_prompt(int timeout_secs);
 };

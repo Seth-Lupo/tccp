@@ -308,6 +308,13 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
                     }
                 }
 
+                // Input dependencies
+                if (jnode["inputs"] && jnode["inputs"].IsSequence()) {
+                    for (const auto& inp : jnode["inputs"]) {
+                        jc.inputs.push_back(inp.as<std::string>());
+                    }
+                }
+
                 // Full slurm: block (backwards compat)
                 if (jnode["slurm"] && jnode["slurm"].IsMap()) {
                     jc.slurm = parse_slurm_config(jnode["slurm"]);
@@ -332,6 +339,16 @@ static ProjectConfig parse_project_config(const YAML::Node& node) {
                 }
             }
             project.jobs[job_name] = jc;
+        }
+    }
+
+    // Validate input dependencies refer to defined jobs
+    for (const auto& [jname, jc] : project.jobs) {
+        for (const auto& inp : jc.inputs) {
+            if (project.jobs.find(inp) == project.jobs.end()) {
+                throw std::runtime_error(
+                    "Job '" + jname + "' declares input '" + inp + "' which is not a defined job");
+            }
         }
     }
 

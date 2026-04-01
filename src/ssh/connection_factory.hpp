@@ -7,6 +7,7 @@
 #include "session.hpp"
 #include "connection.hpp"
 #include "login_hop_connection.hpp"
+#include "compute_hop.hpp"
 
 class MultiplexedShell;
 class SessionMultiplexer;
@@ -44,6 +45,9 @@ public:
     // Non-interactive command execution (multiplexed — no global blocking)
     SSHConnection& dtn();
     SSHConnection& login();
+
+    // Compute node commands via SSH hop (lightweight wrapper, no channel)
+    ComputeHop compute(const std::string& node);
 
     // Interactive relay on a dedicated multiplexed channel (has Kerberos)
     MultiplexedShell shell();

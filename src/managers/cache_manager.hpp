@@ -25,9 +25,8 @@ public:
                            const std::string& current_sif,
                            StatusCallback cb);
 
-    // Touch mtime on the SIF and project env sentinel to mark as recently used.
-    void touch_used(const std::string& sif_path,
-                    const std::string& project_env_path);
+    // Touch mtime on the SIF to mark as recently used.
+    void touch_used(const std::string& sif_path);
 
 private:
     SSHConnection& dtn_;

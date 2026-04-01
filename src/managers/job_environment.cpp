@@ -2,21 +2,19 @@
 #include "job_log.hpp"
 #include <environments/environment.hpp>
 #include <core/constants.hpp>
+#include <ssh/compute_hop.hpp>
 #include <fmt/format.h>
 #include <chrono>
 
 // ── Directory setup ────────────────────────────────────────
 
 void JobManager::ensure_dirs(const std::string& job_id, StatusCallback cb) {
-    std::string base = persistent_base();
-    std::string out = job_output_dir(job_id);
-    std::string env = env_dir();
     std::string cc = container_cache();
 
-    // Remote directories on cluster
+    // Remote directories on cluster (only container cache on NFS)
     std::string cmd = fmt::format(
-        "mkdir -p {} {}/default/venv {}/images {}/cache {}/tmp {}",
-        base, env, cc, cc, cc, out);
+        "mkdir -p {}/images {}/cache {}/tmp",
+        cc, cc, cc);
     dtn_.run(cmd);
 
     // Local output directory: output/{job_name}/
@@ -37,15 +35,15 @@ void JobManager::ensure_container(const std::string& compute_node,
     dtn_.run(fmt::format("mkdir -p {}/images", cc));
     std::string pull_cache = fmt::format("/tmp/{}/singularity-cache", username_);
     std::string pull_tmp = fmt::format("/tmp/{}/singularity-tmp", username_);
-    std::string pull_cmd = ssh_to_node(compute_node, fmt::format(
+    ComputeHop compute(dtn_, compute_node);
+    auto pull_result = compute.run(fmt::format(
         "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
         "mkdir -p {} {}; "
         "SINGULARITY_CACHEDIR={} SINGULARITY_TMPDIR={} singularity pull {} {}; "
         "rm -rf {} {}",
         pull_cache, pull_tmp,
         pull_cache, pull_tmp, image, docker_uri,
-        pull_cache, pull_tmp));
-    auto pull_result = dtn_.run(pull_cmd, CONTAINER_PULL_TIMEOUT_SECS);
+        pull_cache, pull_tmp), CONTAINER_PULL_TIMEOUT_SECS);
     if (pull_result.exit_code != 0) {
         throw std::runtime_error(fmt::format("Container pull failed ({}): {}",
                                              pull_result.stderr_data, pull_result.get_output()));
@@ -64,34 +62,34 @@ void JobManager::ensure_container(const std::string& compute_node,
     if (cb) cb(fmt::format("Container image ready ({})", size_str.empty() ? "?" : size_str));
 }
 
-void JobManager::ensure_venv(const EnvironmentConfig& env,
+void JobManager::ensure_venv(const std::string& compute_node,
+                              const EnvironmentConfig& env,
                               const std::string& image,
                               const std::string& venv,
                               StatusCallback cb) {
     if (cb) cb(fmt::format("Creating Python venv ({}site-packages)...",
                            env.gpu ? "with system " : ""));
-    std::string base = persistent_base();
     std::string venv_flags = env.gpu ? "--system-site-packages " : "";
-    // Do NOT use --nv for venv creation: it runs on the DTN which has no
-    // GPU driver, so singularity exec --nv would fail silently.
     std::string pip_tmp = fmt::format("/tmp/{}/tccp-pip-tmp", username_);
-    dtn_.run(fmt::format("mkdir -p {}", pip_tmp));
-    std::string venv_cmd = fmt::format(
-        "TMPDIR={} singularity exec --bind {}:{} {} python -m venv {}{}",
-        pip_tmp, base, base, image, venv_flags, venv);
-    // Explicit timeout: venv creation is silent and takes 20-30s.
-    // Without this, the 5s stall detection kills the read prematurely.
-    auto venv_result = dtn_.run(venv_cmd, 120);
+    // Create venv on compute node (venv is on compute /tmp now)
+    ComputeHop compute(dtn_, compute_node);
+    auto venv_result = compute.run(fmt::format(
+        "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
+        "mkdir -p {} {}; "
+        "TMPDIR={} singularity exec {} python -m venv {}{}; "
+        "rm -rf {} 2>/dev/null; true",
+        pip_tmp, venv,
+        pip_tmp, image, venv_flags, venv,
+        pip_tmp), 120);
     if (venv_result.exit_code != 0) {
         throw std::runtime_error(fmt::format(
             "Failed to create venv: {}", venv_result.get_output()));
     }
-    dtn_.run(fmt::format("rm -rf {} 2>/dev/null; true", pip_tmp));
     if (cb) cb("Python venv created");
 }
 
 void JobManager::ensure_environment(const std::string& compute_node, StatusCallback cb) {
-    if (environment_checked_) {
+    if (environment_checked_node_ == compute_node) {
         return;
     }
 
@@ -114,15 +112,21 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
 
     std::string uv_bin = tccp_home + "/bin/uv";
 
-    // Single check for all four components
-    std::string check_all = fmt::format(
+    // Check NFS components (image, dtach, uv) from DTN
+    std::string check_nfs = fmt::format(
         "test -f {} && echo IMAGE_OK || echo IMAGE_MISSING; "
-        "( test -f {}/bin/python || test -L {}/bin/python ) && echo VENV_OK || echo VENV_MISSING; "
         "test -x {} && echo DTACH_OK || echo DTACH_MISSING; "
         "test -x {} && echo UV_OK || echo UV_MISSING",
-        image, venv, venv, dtach_bin, uv_bin);
+        image, dtach_bin, uv_bin);
+    auto result = dtn_.run(check_nfs);
 
-    auto result = dtn_.run(check_all);
+    // Check venv on compute node (it's on /tmp now)
+    ComputeHop compute(dtn_, compute_node);
+    auto venv_check = compute.run(fmt::format(
+        "( test -f {}/bin/python || test -L {}/bin/python ) && echo VENV_OK || echo VENV_MISSING",
+        venv, venv));
+    // Merge results
+    result.stdout_data += venv_check.stdout_data;
     bool need_image = result.stdout_data.find("IMAGE_MISSING") != std::string::npos;
     bool need_venv = result.stdout_data.find("VENV_MISSING") != std::string::npos;
     bool need_dtach = result.stdout_data.find("DTACH_MISSING") != std::string::npos;
@@ -142,7 +146,7 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
         else cb(fmt::format("[{}] uv: MISSING — will install", elapsed()));
     }
 
-    if (need_image || need_venv) {
+    if (need_image) {
         if (cb) cb(fmt::format("[{}] Loading Singularity/Apptainer module...", elapsed()));
         dtn_.run("module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true", 30);
         if (cb) cb(fmt::format("[{}] Module loaded", elapsed()));
@@ -153,7 +157,7 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
     }
 
     if (need_venv) {
-        ensure_venv(env, image, venv, cb);
+        ensure_venv(compute_node, env, image, venv, cb);
     }
 
     if (need_dtach) {
@@ -168,8 +172,8 @@ void JobManager::ensure_environment(const std::string& compute_node, StatusCallb
         if (cb) cb(fmt::format("[{}] uv ready", elapsed()));
     }
 
-    environment_checked_ = true;
-    cache_.touch_used(image, env_dir());
+    environment_checked_node_ = compute_node;
+    cache_.touch_used(image);
 
     if (cb) cb(fmt::format("[{}] Environment ready", elapsed()));
 }
@@ -292,10 +296,11 @@ void JobManager::ensure_requirements(const std::string& compute_node,
     std::string pip_tmp = fmt::format("/tmp/{}/tccp-pip-tmp", username_);
 
     // Check if requirements.txt exists on compute node (scratch is on /tmp, not NFS)
-    auto check = dtn_.run(ssh_to_node(compute_node, fmt::format(
+    ComputeHop compute(dtn_, compute_node);
+    auto check = compute.run(fmt::format(
         "test -f {}/requirements.txt "
         "&& md5sum {}/requirements.txt | cut -d' ' -f1 "
-        "|| echo NO_REQ", scratch, scratch)));
+        "|| echo NO_REQ", scratch, scratch));
 
     std::string req_hash = check.stdout_data;
     while (!req_hash.empty() && (req_hash.back() == '\n' || req_hash.back() == '\r'))
@@ -305,9 +310,9 @@ void JobManager::ensure_requirements(const std::string& compute_node,
         return;
     }
 
-    // Stamp is on NFS — read directly from DTN (no SSH hop).
+    // Stamp is on compute node /tmp — read via SSH hop.
     // Format: "v2:<md5>" to version-gate against stale stamps.
-    auto stamp_result = dtn_.run(fmt::format(
+    auto stamp_result = compute.run(fmt::format(
         "cat {} 2>/dev/null || echo NO_STAMP", stamp_path));
     std::string stamp = stamp_result.stdout_data;
     while (!stamp.empty() && (stamp.back() == '\n' || stamp.back() == '\r'))
@@ -321,84 +326,86 @@ void JobManager::ensure_requirements(const std::string& compute_node,
 
     if (cb) cb("Installing requirements...");
 
-    // Copy requirements.txt from compute node scratch to NFS so we can
-    // run the install directly on the DTN (no SSH hop, no tmux stalling).
-    std::string nfs_req = pip_tmp + "/requirements.txt";
-    dtn_.run(fmt::format("mkdir -p {}", pip_tmp));
-    dtn_.run(fmt::format("scp {} {}:{}/requirements.txt {}",
-                          SSH_OPTS, compute_node, scratch, nfs_req));
-
     // GPU environments: filter out torch/nvidia packages (container provides them)
-    // Also generate an overrides file so uv won't pull them as transitive deps.
-    std::string req_file = nfs_req;
+    std::string req_file = scratch + "/requirements.txt";
     if (env.gpu) {
-        std::string filtered = pip_tmp + "/tccp_req_filtered.txt";
-        dtn_.run(fmt::format(
+        std::string filtered = scratch + "/.tccp-tmp/tccp_req_filtered.txt";
+        // NOTE: no single quotes around grep pattern — ComputeHop wraps
+        // the entire command in single quotes already. Use double quotes.
+        compute.run(fmt::format(
+            "mkdir -p {scratch}/.tccp-tmp; "
             "grep -ivE "
-            "'^(torch|torchvision|torchaudio|pytorch|nvidia-|triton)([[:space:]]|[=><!~\\[]|$)' "
-            "{} > {} || true",
-            nfs_req, filtered));
+            "\"^(torch|torchvision|torchaudio|pytorch|nvidia-|triton)([[:space:]]|[=><!~\\\\[]|$)\" "
+            "{req} > {filt} || true",
+            fmt::arg("scratch", scratch),
+            fmt::arg("req", req_file),
+            fmt::arg("filt", filtered)));
         req_file = filtered;
 
         // Create stub .dist-info dirs in the venv for container-provided packages.
         // This makes uv/pip see torch, nvidia, triton, etc. as already installed
         // so they're skipped entirely — no download, no disk usage.
-        // The venv was created with --system-site-packages, but uv doesn't
-        // check system site-packages when determining what's installed.
-        std::string site_pkg_dir = venv + "/lib/python*/site-packages";
-        dtn_.run(fmt::format(
+        // Write the Python script to a temp file on DTN, scp to compute node,
+        // and execute there — avoids single-quote nesting issues with ComputeHop.
+        std::string stub_script = fmt::format(
+            "import importlib.metadata, pathlib\n"
+            "pkgs = [(d.name, d.version) for d in importlib.metadata.distributions()\n"
+            "        if any(d.name.lower().startswith(p) for p in\n"
+            "        ['torch', 'nvidia-', 'triton', 'cuda-', 'sympy', 'numpy'])]\n"
+            "sp = next(pathlib.Path('{venv}/lib').glob('python*/site-packages'))\n"
+            "for name, ver in pkgs:\n"
+            "    di = sp / f'{{name.replace(chr(45), chr(95))}}-{{ver}}.dist-info'\n"
+            "    if di.exists(): continue\n"
+            "    di.mkdir(parents=True, exist_ok=True)\n"
+            "    (di / 'METADATA').write_text(f'Metadata-Version: 2.1\\nName: {{name}}\\nVersion: {{ver}}\\n')\n"
+            "    (di / 'INSTALLER').write_text('tccp-stub')\n"
+            "    (di / 'RECORD').write_text('')\n",
+            fmt::arg("venv", venv));
+
+        std::string dtn_script = fmt::format("/tmp/{}/tccp_stubs.py", username_);
+        dtn_.run("cat > " + dtn_script + " << 'TCCP_STUBS_EOF'\n"
+                 + stub_script + "\nTCCP_STUBS_EOF");
+        std::string node_script = scratch + "/.tccp-tmp/tccp_stubs.py";
+        dtn_.run(fmt::format("scp {} {} {}:{}", SSH_OPTS, dtn_script, compute_node, node_script));
+        dtn_.run("rm -f " + dtn_script);
+
+        compute.run(fmt::format(
             "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
-            "singularity exec {image} python3 -c \""
-            "import importlib.metadata,pathlib,os\\n"
-            "pkgs=[(d.name,d.version) for d in importlib.metadata.distributions() "
-            "if any(d.name.lower().startswith(p) for p in "
-            "['torch','nvidia-','triton','cuda-','sympy','numpy'])]\\n"
-            "sp=next(pathlib.Path('{venv}/lib').glob('python*/site-packages'))\\n"
-            "for name,ver in pkgs:\\n"
-            "  di=sp/f'{{name.replace(chr(45),chr(95))}}-{{ver}}.dist-info'\\n"
-            "  if di.exists(): continue\\n"
-            "  di.mkdir(parents=True,exist_ok=True)\\n"
-            "  (di/'METADATA').write_text(f'Metadata-Version: 2.1\\\\nName: {{name}}\\\\nVersion: {{ver}}\\\\n')\\n"
-            "  (di/'INSTALLER').write_text('tccp-stub')\\n"
-            "  (di/'RECORD').write_text('')\\n"
-            "\" 2>/dev/null || true",
-            fmt::arg("image", image),
-            fmt::arg("venv", venv)));
+            "singularity exec {} python3 {} 2>/dev/null; rm -f {}",
+            image, node_script, node_script), 60);
     }
 
-    // Determine installer: uv (fast) or pip (fallback)
+    // Determine installer: uv (fast, on NFS) or pip (fallback, in container)
     std::string tccp_home = fmt::format(REMOTE_TCCP_HOME, username_);
     std::string uv_bin = tccp_home + "/bin/uv";
     auto uv_check = dtn_.run("test -x " + uv_bin + " && echo UV_OK || echo UV_MISSING");
     bool have_uv = uv_check.stdout_data.find("UV_OK") != std::string::npos;
 
-    // Build install command — runs directly on DTN via exec channel.
-    // No SSH hop needed: venv + image are on NFS, visible from DTN.
+    // Build install command — runs on compute node via SSH hop.
+    // Venv and requirements are both on compute /tmp. Image is on NFS (visible from compute).
     std::string full_cmd;
     if (have_uv) {
-        // uv is a standalone binary, but the venv's python is a symlink to
-        // the container's Python (e.g. /opt/conda/bin/python) which doesn't
-        // exist on the DTN. So we run uv inside singularity to resolve it.
-        // No --nv needed — just need the container's Python visible.
         full_cmd = fmt::format(
             "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
-            "TMPDIR={tmp} singularity exec --bind {venv}:{venv} {image} "
-            "{uv} pip install --link-mode=copy --python {venv}/bin/python "
+            "mkdir -p {tmp}; "
+            "TMPDIR={tmp} singularity exec {nv}--bind {venv}:{venv} {image} "
+            "{uv} pip install --no-cache --link-mode=copy --python {venv}/bin/python "
             "-r {req} 2>&1",
             fmt::arg("tmp", pip_tmp),
+            fmt::arg("nv", nv_flag),
             fmt::arg("uv", uv_bin),
             fmt::arg("venv", venv),
             fmt::arg("image", image),
             fmt::arg("req", req_file));
     } else {
-        // pip lives inside the container — need singularity
         full_cmd = fmt::format(
             "module load singularity 2>/dev/null || module load apptainer 2>/dev/null || true; "
             "mkdir -p {tmp}; "
             "TMPDIR={tmp} PIP_CACHE_DIR={tmp} "
-            "singularity exec --bind {venv}:{venv} {image} "
+            "singularity exec {nv}--bind {venv}:{venv} {image} "
             "{venv}/bin/pip install -q -r {req} 2>&1",
             fmt::arg("tmp", pip_tmp),
+            fmt::arg("nv", nv_flag),
             fmt::arg("venv", venv),
             fmt::arg("image", image),
             fmt::arg("req", req_file));
@@ -407,9 +414,7 @@ void JobManager::ensure_requirements(const std::string& compute_node,
     if (cb) cb(fmt::format("Installing requirements ({})...", have_uv ? "uv" : "pip"));
     if (cb) cb(fmt::format("[req] cmd: {}", full_cmd));
 
-    // Use exec channel (bypasses tmux entirely) — reliable for long-running commands.
-    // 2>&1 merges stderr into stdout so we capture all pip/uv output.
-    auto result = dtn_.run_with_input(full_cmd, nullptr, 0, 600);
+    auto result = compute.run(full_cmd, 600);
 
     // Always log exit code + output for robust debugging
     if (cb) {
@@ -428,8 +433,8 @@ void JobManager::ensure_requirements(const std::string& compute_node,
             "Package install failed (exit {}):\n{}", result.exit_code, output));
     }
 
-    // Write versioned stamp on success (NFS — no SSH hop needed)
-    dtn_.run(fmt::format("echo 'v2:{}' > {}", req_hash, stamp_path));
+    // Write versioned stamp on success (on compute node /tmp)
+    compute.run(fmt::format("echo 'v2:{}' > {}", req_hash, stamp_path));
     if (cb) cb("Requirements installed");
 }
 
@@ -442,7 +447,6 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
                                          const std::string& extra_args,
                                          StatusCallback cb) {
     const auto& proj = config_.project();
-    std::string out_dir = job_output_dir(job_id);
     std::string sock = scratch + "/tccp.sock";
 
     if (cb) cb("Launching job on compute node...");
@@ -467,29 +471,27 @@ Result<void> JobManager::launch_on_node(const std::string& job_id,
     tccp_log_ssh("launch:scp-script", "scp script to node", r);
     dtn_.run("rm -f " + dtn_script);
 
-    // Create output symlink
-    r = dtn_.run(ssh_to_node(compute_node,
-        fmt::format("ln -sfn {} {}/output", out_dir, scratch)));
-    tccp_log_ssh("launch:output-symlink", "ln -sfn", r);
+    ComputeHop compute(dtn_, compute_node);
+
+    // Create output directory on scratch (no NFS symlink)
+    r = compute.run(fmt::format("mkdir -p {}/output", scratch));
+    tccp_log_ssh("launch:output-mkdir", "mkdir -p output", r);
 
     // Create shared cache directory
     if (!proj.cache.empty()) {
         std::string shared_cache = fmt::format("/tmp/{}/{}/.tccp-cache",
                                                username_, proj.name);
-        r = dtn_.run(ssh_to_node(compute_node,
-            fmt::format("mkdir -p {}", shared_cache)));
+        r = compute.run(fmt::format("mkdir -p {}", shared_cache));
         tccp_log_ssh("launch:cache-dir", "mkdir cache", r);
     }
 
     // Remove stale socket and log from previous run (if scratch was reused)
-    dtn_.run(ssh_to_node(compute_node,
-        fmt::format("rm -f {} {}", sock, paths.log)));
+    compute.run(fmt::format("rm -f {} {}", sock, paths.log));
 
     // Launch dtach
-    std::string launch_cmd = ssh_to_node(compute_node,
-        fmt::format("$HOME/tccp/bin/dtach -n {} {}/tccp_run.sh", sock, scratch));
-    r = dtn_.run(launch_cmd);
-    tccp_log_ssh("launch:dtach", launch_cmd, r);
+    std::string launch_cmd_str = fmt::format("$HOME/tccp/bin/dtach -n {} {}/tccp_run.sh", sock, scratch);
+    r = compute.run(launch_cmd_str);
+    tccp_log_ssh("launch:dtach", launch_cmd_str, r);
 
     if (r.exit_code != 0) {
         return Result<void>::Err(fmt::format("Failed to launch dtach: {}", r.get_output()));

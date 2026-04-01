@@ -1,6 +1,7 @@
 #pragma once
 
 #include "multiplexed_connection.hpp"
+#include "compute_hop.hpp"  // escape_for_ssh
 #include <string>
 
 // Login node commands via SSH hop, through a multiplexed channel.
@@ -16,6 +17,4 @@ public:
 
 private:
     std::string login_host_;
-
-    static std::string escape_for_ssh(const std::string& cmd);
 };
