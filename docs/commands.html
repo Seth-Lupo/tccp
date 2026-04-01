@@ -93,7 +93,8 @@ tccp> initlogs train
 
 <table>
 <tr><th>command</th><th>what it does</th></tr>
-<tr><td class="cmd">ssh [job]</td><td>SSH to a job's compute node. With no argument, uses the default job.</td></tr>
+<tr><td class="cmd">ssh [job]</td><td>SSH to a job's compute node (inside container). With no argument, uses the default job.</td></tr>
+<tr><td class="cmd">node [job]</td><td>SSH to a job's compute node (raw shell, outside container).</td></tr>
 <tr><td class="cmd">clusterssh</td><td>SSH to the login node for running SLURM commands or poking around the cluster.</td></tr>
 <tr><td class="cmd">open [job]</td><td>Drop into a bash shell inside the Singularity container, with your code, venv, and env vars all set up.</td></tr>
 <tr><td class="cmd">exec &lt;cmd&gt;</td><td>Run a one-off command on the login node and print the result.</td></tr>

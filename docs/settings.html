@@ -58,7 +58,7 @@ jobs:
 
   eval:
     script: eval.py
-    time: "1:00:00"
+    time: "00:30:00"
 </pre>
 
 <h2>project settings</h2>
@@ -74,11 +74,13 @@ jobs:
 <td><code>type</code></td>
 <td><code>python</code></td>
 <td>Environment type: <code>python</code> or <code>python-pytorch</code>.
+<code>python-pytorch</code> auto-assigns a <code>t4</code> GPU on the
+<code>preempt</code> partition if no GPU is specified.
 See <a href="#environments">environments</a> below.</td>
 </tr>
 <tr>
 <td><code>script</code></td>
-<td><code>main.py</code></td>
+<td>(none)</td>
 <td>Default script to run. If no <code>jobs:</code> section is defined,
 this creates a default "main" job automatically.</td>
 </tr>
@@ -176,7 +178,7 @@ requested.</td>
 </tr>
 <tr>
 <td><code>time</code></td>
-<td><code>1:00:00</code></td>
+<td><code>00:30:00</code></td>
 <td>Walltime limit in <code>HH:MM:SS</code> or <code>H:MM</code>
 format.</td>
 </tr>
@@ -184,7 +186,8 @@ format.</td>
 <td><code>partition</code></td>
 <td>(auto)</td>
 <td>SLURM partition. Auto-selects <code>gpu</code> if a GPU is
-requested.</td>
+requested, <code>batch</code> otherwise. <code>python-pytorch</code>
+with default GPU uses <code>preempt</code>.</td>
 </tr>
 <tr>
 <td><code>exclude_nodes</code></td>
@@ -283,7 +286,7 @@ jobs:
 </tr>
 <tr>
 <td><code>python-pytorch</code></td>
-<td>pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime</td>
+<td>pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel</td>
 <td>PyTorch 2.6, CUDA 12.4, cuDNN 9, torchvision, torchaudio</td>
 </tr>
 </table>
@@ -291,9 +294,10 @@ jobs:
 <p>
 The <code>python-pytorch</code> environment creates a virtualenv with
 <code>--system-site-packages</code> so you get the container's PyTorch
-for free. It also filters out <code>torch</code>, <code>torchvision</code>,
-and <code>torchaudio</code> from your <code>requirements.txt</code> to
-avoid conflicts.
+for free. It also filters out <code>torch</code>, <code>pytorch</code>,
+<code>torchvision</code>, <code>torchaudio</code>,
+<code>nvidia-*</code>, and <code>triton</code> from your
+<code>requirements.txt</code> to avoid conflicts.
 </p>
 
 <h2>setting precedence</h2>

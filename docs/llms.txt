@@ -68,8 +68,8 @@ jobs:
 | Field         | Default        | Description |
 |---------------|----------------|-------------|
 | name          | dir name       | Project name |
-| type          | python         | `python` (CPU) or `python-pytorch` (GPU + PyTorch 2.6 + CUDA 12.4) |
-| script        | main.py        | Default script — creates implicit "main" job if no `jobs:` block |
+| type          | python         | `python` (CPU) or `python-pytorch` (GPU + PyTorch 2.6 + CUDA 12.4). `python-pytorch` auto-assigns a `t4` GPU on the `preempt` partition if no GPU is specified. |
+| script        | (none)         | Default script — creates implicit "main" job if no `jobs:` block |
 | args          | (none)         | Default CLI args |
 | env           | .env           | Env file with secrets, always synced (bypasses .gitignore) |
 | output        | output         | Dir downloaded to laptop when job finishes |
@@ -86,8 +86,8 @@ jobs:
 | gpu_count     | 0              | Alternative to colon syntax |
 | memory        | 4G             | RAM. Auto-bumps to 32G (or 64G for 80GB GPUs) when GPU requested. |
 | cpus          | 1              | CPUs. Auto-bumps to 4 when GPU requested. |
-| time          | 1:00:00        | Walltime limit (HH:MM:SS) |
-| partition     | (auto)         | SLURM partition. Auto-selects `gpu` when GPU requested. |
+| time          | 00:30:00       | Walltime limit (HH:MM:SS) |
+| partition     | (auto)         | SLURM partition. Auto-selects `gpu` when GPU requested, `batch` otherwise. `python-pytorch` with default GPU uses `preempt`. |
 | exclude_nodes | (none)         | Comma-separated nodes to avoid |
 
 ### Per-job fields
@@ -121,11 +121,11 @@ jobs:
 | type             | Container                                   | Includes |
 |------------------|---------------------------------------------|----------|
 | python           | python:3.11-slim                            | Python 3.11 stdlib |
-| python-pytorch   | pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime | PyTorch 2.6, CUDA 12.4, cuDNN 9, torchvision, torchaudio |
+| python-pytorch   | pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel | PyTorch 2.6, CUDA 12.4, cuDNN 9, torchvision, torchaudio |
 
 - `python-pytorch` creates a venv with `--system-site-packages` so the
   container's PyTorch is available. It also auto-filters `torch`,
-  `torchvision`, `torchaudio`, `nvidia-*`, and `triton` from
+  `pytorch`, `torchvision`, `torchaudio`, `nvidia-*`, and `triton` from
   `requirements.txt` to avoid conflicts.
 - `requirements.txt` in the project root is auto-installed into the venv on
   first run and cached by hash — unchanged deps are a no-op.
@@ -206,7 +206,8 @@ Once connected (`tccp`), these are available:
 | Command               | Description |
 |-----------------------|-------------|
 | open [job]            | Bash shell on compute node inside container with venv + env vars. |
-| ssh [job] [cmd]       | SSH to job's compute node. Optional one-off command. |
+| ssh [job] [cmd]       | SSH to job's compute node (inside container). Optional one-off command. |
+| node [job]            | SSH to job's compute node (raw shell, outside container). |
 | exec <cmd>            | Run command on login node. |
 | clusterssh            | SSH to login node. |
 
