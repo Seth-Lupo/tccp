@@ -383,10 +383,14 @@ Result<void> Session::ensure_container(const std::string& node, StatusCallback c
 
     // Layer cache survives across pulls — re-pull only rebuilds SIF, skips download
     // Use APPTAINER_ env vars (preferred) with SINGULARITY_ fallbacks
-    // Add common mksquashfs locations to PATH (needed for SIF conversion)
+    // mksquashfs may live in /usr/sbin, or bundled with apptainer under libexec
     auto result = ssh_.run_compute(node, fmt::format(
         "{}; mkdir -p {} {}; "
-        "export PATH=$PATH:/usr/sbin:/sbin; "
+        "for d in /usr/sbin /sbin $(dirname $CEXE 2>/dev/null) "
+        "$(dirname $CEXE 2>/dev/null)/../libexec/apptainer/bin "
+        "$(dirname $CEXE 2>/dev/null)/../libexec/singularity/bin "
+        "/usr/local/sbin /usr/local/bin; do "
+        "[ -x \"$d/mksquashfs\" ] && export PATH=$d:$PATH && break; done; "
         "APPTAINER_CACHEDIR={} APPTAINER_TMPDIR={} "
         "SINGULARITY_CACHEDIR={} SINGULARITY_TMPDIR={} "
         "$CEXE pull --force {} {} && "
