@@ -368,6 +368,10 @@ Result<void> Session::ensure_container(const std::string& node, StatusCallback c
 
     if (cb) cb(fmt::format("Downloading {}...", cfg_.project.container));
 
+    // Ensure mksquashfs is available (needed for SIF conversion)
+    auto mks_result = ensure_mksquashfs(node);
+    if (mks_result.is_err()) return mks_result;
+
     // Pull always on compute node (large /tmp for temp files)
     std::string cache_dir = fmt::format("/tmp/{}/singularity-cache", cfg_.global.user);
     std::string tmp_dir = fmt::format("/tmp/{}/singularity-tmp", cfg_.global.user);
@@ -382,15 +386,10 @@ Result<void> Session::ensure_container(const std::string& node, StatusCallback c
     }
 
     // Layer cache survives across pulls — re-pull only rebuilds SIF, skips download
-    // Use APPTAINER_ env vars (preferred) with SINGULARITY_ fallbacks
-    // mksquashfs may live in /usr/sbin, or bundled with apptainer under libexec
+    // ~/.tccp/bin has mksquashfs (copied from DTN by ensure_mksquashfs)
     auto result = ssh_.run_compute(node, fmt::format(
         "{}; mkdir -p {} {}; "
-        "for d in /usr/sbin /sbin $(dirname $CEXE 2>/dev/null) "
-        "$(dirname $CEXE 2>/dev/null)/../libexec/apptainer/bin "
-        "$(dirname $CEXE 2>/dev/null)/../libexec/singularity/bin "
-        "/usr/local/sbin /usr/local/bin; do "
-        "[ -x \"$d/mksquashfs\" ] && export PATH=$d:$PATH && break; done; "
+        "export PATH=~/.tccp/bin:/usr/sbin:/sbin:$PATH; "
         "APPTAINER_CACHEDIR={} APPTAINER_TMPDIR={} "
         "SINGULARITY_CACHEDIR={} SINGULARITY_TMPDIR={} "
         "$CEXE pull --force {} {} && "
@@ -421,6 +420,43 @@ Result<void> Session::ensure_container(const std::string& node, StatusCallback c
 
     if (cb) cb(fmt::format("Container ready ({})", trim(sz.out).empty() ? "?" : trim(sz.out)));
     return Result<void>::Ok();
+}
+
+// ── mksquashfs (needed for SIF conversion) ───────────────
+
+Result<void> Session::ensure_mksquashfs(const std::string& node) {
+    // Check if mksquashfs is already available on compute node
+    auto check = ssh_.run_compute(node,
+        "command -v mksquashfs >/dev/null 2>&1 || "
+        "test -x ~/.tccp/bin/mksquashfs && echo MKS_OK || echo MKS_MISSING");
+    if (check.out.find("MKS_OK") != std::string::npos ||
+        check.out.find("MKS_MISSING") == std::string::npos) {
+        return Result<void>::Ok();
+    }
+
+    // Not on compute node — try to find it on DTN and copy to shared NFS bin
+    ssh_.run("mkdir -p ~/.tccp/bin");
+
+    // Check common DTN locations
+    auto dtn_check = ssh_.run(
+        "for p in /usr/sbin/mksquashfs /sbin/mksquashfs "
+        "/usr/local/sbin/mksquashfs /usr/local/bin/mksquashfs "
+        "$(which mksquashfs 2>/dev/null); do "
+        "[ -x \"$p\" ] && echo \"MKS_FOUND:$p\" && break; done");
+
+    if (dtn_check.out.find("MKS_FOUND:") != std::string::npos) {
+        auto pos = dtn_check.out.find("MKS_FOUND:");
+        std::string path = trim(dtn_check.out.substr(pos + 10));
+        ssh_.run(fmt::format("cp {} ~/.tccp/bin/mksquashfs && chmod +x ~/.tccp/bin/mksquashfs", path));
+        auto verify = ssh_.run("test -x ~/.tccp/bin/mksquashfs && echo OK");
+        if (verify.out.find("OK") != std::string::npos) {
+            return Result<void>::Ok();
+        }
+    }
+
+    return Result<void>::Err(
+        "mksquashfs not found on cluster (needed for container SIF conversion). "
+        "Contact your cluster admin to install squashfs-tools.");
 }
 
 // ── dtach ─────────────────────────────────────────────────

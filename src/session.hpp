@@ -29,6 +29,7 @@ private:
     std::string pick_gpu(const std::string& partition, StatusCallback cb);
     Result<std::string> wait_for_node(const std::string& id, StatusCallback cb);
     Result<void> ensure_container(const std::string& node, StatusCallback cb);
+    Result<void> ensure_mksquashfs(const std::string& node);
     Result<void> ensure_dtach(StatusCallback cb);
     Result<void> run_init(const std::string& node, const std::string& scratch, StatusCallback cb);
     Result<void> start_dtach(const std::string& node, const std::string& scratch, StatusCallback cb);
