@@ -4,8 +4,14 @@
 #include <vector>
 #include <filesystem>
 #include <functional>
-#include <unistd.h>
 #include <cstdlib>
+#include <chrono>
+#include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -104,13 +110,17 @@ struct SessionState {
 // ── Utilities ─────────────────────────────────────────────
 
 inline fs::path home_dir() {
+#ifdef _WIN32
+    const char* home = std::getenv("USERPROFILE");
+#else
     const char* home = std::getenv("HOME");
+#endif
     if (!home) return fs::temp_directory_path();
     return fs::path(home);
 }
 
 inline void sleep_ms(int ms) {
-    usleep(static_cast<useconds_t>(ms) * 1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
 inline std::string trim(const std::string& s) {

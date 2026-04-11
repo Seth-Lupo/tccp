@@ -4,7 +4,11 @@
 #include <fstream>
 #include <iostream>
 #include <algorithm>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <termios.h>
+#endif
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -194,6 +198,15 @@ Result<void> run_setup() {
 
     std::cout << "Password: ";
     {
+#ifdef _WIN32
+        // Disable echo on Windows
+        HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+        DWORD mode;
+        GetConsoleMode(hStdin, &mode);
+        SetConsoleMode(hStdin, mode & ~ENABLE_ECHO_INPUT);
+        std::getline(std::cin, password);
+        SetConsoleMode(hStdin, mode);
+#else
         struct termios old_t, new_t;
         tcgetattr(STDIN_FILENO, &old_t);
         new_t = old_t;
@@ -201,6 +214,7 @@ Result<void> run_setup() {
         tcsetattr(STDIN_FILENO, TCSANOW, &new_t);
         std::getline(std::cin, password);
         tcsetattr(STDIN_FILENO, TCSANOW, &old_t);
+#endif
         std::cout << "\n";
     }
     if (password.empty()) {

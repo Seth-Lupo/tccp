@@ -2,9 +2,11 @@
 #include <fmt/format.h>
 #include <cstring>
 #include <fstream>
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <signal.h>
 #include <unistd.h>
+#endif
 
 // Inner hop SSH options for compute nodes
 static const std::string SSH_OPTS =
@@ -27,6 +29,25 @@ std::string escape_for_ssh(const std::string& cmd) {
     return escaped;
 }
 
+#ifdef _WIN32
+// ── Windows stubs (not supported) ────────────────────────
+
+SSH::SSH(std::string host, std::string login, std::string user, std::string password)
+    : host_(std::move(host)), login_(std::move(login)), user_(std::move(user)), password_(std::move(password)) {}
+
+std::vector<std::string> SSH::base_args(bool) const { return {}; }
+Result<void> SSH::connect() { return Result<void>::Err("SSH not supported on Windows"); }
+void SSH::disconnect() {}
+SSHResult SSH::run(const std::string&, int) { return {-1, "", "not supported on Windows"}; }
+SSHResult SSH::run_login(const std::string&, int) { return {-1, "", "not supported on Windows"}; }
+SSHResult SSH::run_compute(const std::string&, const std::string&, int) { return {-1, "", "not supported on Windows"}; }
+Result<void> SSH::tar_push(const std::string&, const fs::path&, const std::vector<std::string>&, const std::string&) { return Result<void>::Err("not supported on Windows"); }
+Result<void> SSH::tar_pull(const std::string&, const fs::path&) { return Result<void>::Err("not supported on Windows"); }
+int SSH::interactive(const std::string&, const std::string&, const std::vector<int>&) { return -1; }
+SSHResult SSH::exec_capture(const std::vector<std::string>&, int) { return {-1, "", "not supported on Windows"}; }
+int SSH::exec_passthrough(const std::vector<std::string>&) { return -1; }
+
+#else
 // ── SSH class ─────────────────────────────────────────────
 
 SSH::SSH(std::string host, std::string login, std::string user, std::string password)
@@ -345,3 +366,5 @@ int SSH::exec_passthrough(const std::vector<std::string>& args) {
     waitpid(pid, &status, 0);
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
+
+#endif
