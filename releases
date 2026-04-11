@@ -12,3 +12,4 @@
 1.0.0|Revamped TCCP based on my actual workflow
 1.0.1|CI fix
 1.0.2|Add login node config override
+1.0.3|Rewrite docs and llms.txt for v1.0 architecture

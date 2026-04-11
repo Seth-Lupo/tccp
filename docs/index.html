@@ -45,11 +45,11 @@ tccp takes care of all of that for you! Just pretend you're local with JUMBO com
 <h2>the experience</h2>
 <p>
 You work in your own editor, on your own machine. When you're ready to
-run, you type <code>run train</code>. tccp syncs your code, makes sure
-everything is set up on the cluster, and starts the job. Output streams
-to your terminal for realtime interactive use. You can detach, go get coffee, come back
-and reattach. If your WiFi dies, the job keeps running. Your results
-download automatically when it finishes.
+run, you type <code>tccp start</code>. tccp allocates a node, pulls your
+container, syncs your code, and gives you a persistent shell on the
+compute node with GPU access. You can detach, go get coffee, come back
+and reattach. If your WiFi dies, the shell keeps running. Press Ctrl+S
+to sync code changes and reattach instantly.
 </p>
 <p>
 It feels like running locally, except the work is happening on cluster
@@ -77,11 +77,11 @@ you stay in your own setup and just sends the work to the cluster.
 <h2>what you get</h2>
 <ul>
 <li>Edit locally, run remotely. Your editor, their GPUs.</li>
-<li>One command from code change to running job</li>
-<li>Jobs survive disconnects</li>
-<li>Dependencies install automatically</li>
+<li>One command to go from code change to running on a GPU</li>
+<li>Persistent shell survives disconnects</li>
+<li>Ctrl+S to sync code changes and reattach</li>
 <li>Port forwarding for TensorBoard, Jupyter, etc.</li>
-<li>Output downloads when the job finishes</li>
+<li>Output synced back automatically</li>
 <li>Storage managed for you (no quota headaches)</li>
 </ul>
 
@@ -94,11 +94,12 @@ $ tccp setup
 
 <span class="c"># set up your project</span>
 $ cd my-project
-$ tccp register
+<span class="c"># create tccp.yaml with your container</span>
 
-<span class="c"># connect and run</span>
-$ tccp
-tccp> run train
+<span class="c"># start a session and get a shell</span>
+$ tccp start
+$ tccp shell
+tccp> python train.py
 </pre>
 
 <p class="dim">v<span class="ver"></span> &mdash; built for the Tufts HPC cluster &mdash; <a href="https://github.com/Seth-Lupo/tccp">source on GitHub</a> &mdash; <a href="llms.txt">llms.txt</a></p>
