@@ -308,6 +308,7 @@ static int show_gpu_availability(const std::string& filter = "") {
 
 int main(int argc, char** argv) {
     CLI::App app{"tccp — persistent compute shell"};
+    app.set_version_flag("--version,-V", TCCP_VERSION);
     app.require_subcommand(0, 1);
 
     // ── start ─────────────────────────────────────────────
