@@ -76,6 +76,7 @@ static GlobalConfig load_global_config() {
     try {
         YAML::Node root = YAML::LoadFile(path.string());
         g.host = root["host"].as<std::string>("xfer.cluster.tufts.edu");
+        if (root["login"]) g.login = root["login"].as<std::string>(g.login);
         g.user = root["user"].as<std::string>("");
         g.password = root["password"].as<std::string>("");
         g.partition = root["partition"].as<std::string>("gpu");
