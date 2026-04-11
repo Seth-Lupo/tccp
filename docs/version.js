@@ -1,2 +1,2 @@
-var TCCP_VERSION = '0.4.4';
+var TCCP_VERSION = '1.0.0';
 document.querySelectorAll('.ver').forEach(function(el) { el.textContent = TCCP_VERSION; });

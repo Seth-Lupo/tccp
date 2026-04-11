@@ -18,4 +18,6 @@ vcpkg_installed/
 prompts
 test-results/
 experiments/
+tests/
+scripts/
 

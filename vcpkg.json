@@ -1,19 +1,9 @@
 {
-  "name": "tccp",
-  "version-string": "0.3.0",
-  "description": "TCCP - Tufts Cluster Command Prompt",
-  "homepage": "https://github.com/sethlupo/tccp",
-  "license": "MIT",
-  "dependencies": [
-    "libssh2",
-    "yaml-cpp",
-    "cli11",
-    "fmt",
-    "gtest",
-    "replxx",
-    {
-      "name": "libarchive",
-      "default-features": false
-    }
-  ]
+    "name": "tccp",
+    "version": "1.0.0",
+    "dependencies": [
+        "yaml-cpp",
+        "cli11",
+        "fmt"
+    ]
 }
