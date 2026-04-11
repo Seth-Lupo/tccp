@@ -382,12 +382,19 @@ Result<void> Session::ensure_container(const std::string& node, StatusCallback c
     }
 
     // Layer cache survives across pulls — re-pull only rebuilds SIF, skips download
+    // Use APPTAINER_ env vars (preferred) with SINGULARITY_ fallbacks
+    // Add common mksquashfs locations to PATH (needed for SIF conversion)
     auto result = ssh_.run_compute(node, fmt::format(
         "{}; mkdir -p {} {}; "
-        "SINGULARITY_CACHEDIR={} SINGULARITY_TMPDIR={} $CEXE pull --force {} {} && "
+        "export PATH=$PATH:/usr/sbin:/sbin; "
+        "APPTAINER_CACHEDIR={} APPTAINER_TMPDIR={} "
+        "SINGULARITY_CACHEDIR={} SINGULARITY_TMPDIR={} "
+        "$CEXE pull --force {} {} && "
         "rm -rf {}",
         container_runtime_init(), cache_dir, tmp_dir,
-        cache_dir, tmp_dir, sif, uri,
+        cache_dir, tmp_dir,
+        cache_dir, tmp_dir,
+        sif, uri,
         tmp_dir), 1800);
 
     if (!result.ok()) {

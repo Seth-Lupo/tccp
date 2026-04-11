@@ -13,3 +13,4 @@
 1.0.1|CI fix
 1.0.2|Add login node config override
 1.0.3|Rewrite docs and llms.txt for v1.0 architecture
+1.0.4|Fix container pull: add mksquashfs to PATH and use APPTAINER env vars
