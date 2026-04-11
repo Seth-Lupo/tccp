@@ -15,6 +15,7 @@
 <a href="usage.html">usage</a>
 <a href="commands.html">commands</a>
 <a href="settings.html">settings</a>
+<a href="gpus.html">gpus</a>
 <a href="architecture.html">how it works</a>
 <a href="contact.html">contact</a>
 </nav>
@@ -55,16 +56,15 @@ $ tccp register
 <p>Once you're connected (<code>tccp</code> or <code>tccp connect</code>),
 these are available at the prompt:</p>
 
-<h3>jobs</h3>
+<h3>running jobs</h3>
 
 <table>
 <tr><th>command</th><th>what it does</th></tr>
-<tr><td class="cmd">run &lt;job&gt; [args]</td><td>Start a job. Allocates a node, syncs your code, and launches it. You can pass extra args that get appended to whatever's in the config.</td></tr>
-<tr><td class="cmd">view [job]</td><td>Attach to a running job's output. If the job already finished, opens it in a scrollable viewer.</td></tr>
+<tr><td class="cmd">run &lt;job&gt; [args]</td><td>Start a job. Allocates a node, syncs your code, and launches it. Extra args are appended to whatever's in the config.</td></tr>
+<tr><td class="cmd">view [job]</td><td>Attach to a running job's output. If the job already finished, opens it in a scrollable viewer. <code>Ctrl+C</code> cancels, <code>Ctrl+\</code> detaches, <code>Ctrl+V</code> opens in editor.</td></tr>
 <tr><td class="cmd">restart [job]</td><td>Cancel the current run and start a fresh one.</td></tr>
-<tr><td class="cmd">jobs</td><td>Show all your tracked jobs &mdash; status, which node they're on, how long they've been running.</td></tr>
+<tr><td class="cmd">jobs</td><td>Show all tracked jobs &mdash; status, node, duration.</td></tr>
 <tr><td class="cmd">cancel &lt;job&gt;</td><td>Stop a job. Works whether it's still initializing or already running.</td></tr>
-<tr><td class="cmd">return [job]</td><td>Pull the output files from a finished job back to your laptop.</td></tr>
 </table>
 
 <pre>
@@ -74,14 +74,14 @@ tccp> jobs
 tccp> cancel train
 </pre>
 
-<h3>looking at output</h3>
+<h3>viewing output</h3>
 
 <table>
 <tr><th>command</th><th>what it does</th></tr>
 <tr><td class="cmd">logs [job]</td><td>Dump the job's output to your terminal.</td></tr>
 <tr><td class="cmd">tail [job] [n]</td><td>Show the last N lines of output (30 by default).</td></tr>
 <tr><td class="cmd">output [job]</td><td>Open the full output in vim.</td></tr>
-<tr><td class="cmd">initlogs [job]</td><td>Show the initialization logs &mdash; useful for debugging allocation or sync issues.</td></tr>
+<tr><td class="cmd">initlogs [job]</td><td>Show the initialization logs &mdash; useful for debugging allocation, sync, or environment issues.</td></tr>
 </table>
 
 <pre>
@@ -89,15 +89,15 @@ tccp> tail train 100
 tccp> initlogs train
 </pre>
 
-<h3>getting on the node</h3>
+<h3>interactive access</h3>
 
 <table>
 <tr><th>command</th><th>what it does</th></tr>
-<tr><td class="cmd">ssh [job]</td><td>SSH to a job's compute node (inside container). With no argument, uses the default job.</td></tr>
+<tr><td class="cmd">open [job]</td><td>Drop into a bash shell inside the container, with your code, venv, and env vars all set up.</td></tr>
+<tr><td class="cmd">ssh [job] [cmd]</td><td>SSH to a job's compute node (inside container). Optional one-off command.</td></tr>
 <tr><td class="cmd">node [job]</td><td>SSH to a job's compute node (raw shell, outside container).</td></tr>
-<tr><td class="cmd">clusterssh</td><td>SSH to the login node for running SLURM commands or poking around the cluster.</td></tr>
-<tr><td class="cmd">open [job]</td><td>Drop into a bash shell inside the Singularity container, with your code, venv, and env vars all set up.</td></tr>
 <tr><td class="cmd">exec &lt;cmd&gt;</td><td>Run a one-off command on the login node and print the result.</td></tr>
+<tr><td class="cmd">clusterssh</td><td>SSH to the login node for running SLURM commands or poking around the cluster.</td></tr>
 </table>
 
 <pre>
@@ -106,7 +106,7 @@ train@c0001> python -c "import torch; print(torch.cuda.is_available())"
 True
 </pre>
 
-<h3>info</h3>
+<h3>info &amp; resources</h3>
 
 <table>
 <tr><th>command</th><th>what it does</th></tr>
@@ -115,16 +115,27 @@ True
 <tr><td class="cmd">config</td><td>Print your current project config.</td></tr>
 <tr><td class="cmd">allocs</td><td>List your SLURM allocations and what's using them.</td></tr>
 <tr><td class="cmd">gpus</td><td>See what GPUs are available across partitions.</td></tr>
+<tr><td class="cmd">gpus &lt;type&gt;</td><td>Per-node detail for a specific GPU type.</td></tr>
+<tr><td class="cmd">gpus info</td><td>GPU guide (works offline). See also <a href="gpus.html">gpus page</a>.</td></tr>
+</table>
+
+<h3>output &amp; sync</h3>
+
+<table>
+<tr><th>command</th><th>what it does</th></tr>
+<tr><td class="cmd">return [job]</td><td>Pull the output files from a finished job back to your laptop.</td></tr>
+<tr><td class="cmd">clean [job]</td><td>Delete old output directories, keeping only the latest run per job.</td></tr>
 </table>
 
 <h3>housekeeping</h3>
 
 <table>
 <tr><th>command</th><th>what it does</th></tr>
-<tr><td class="cmd">dealloc [id|all]</td><td>Let go of SLURM allocations you're not using. They burn SUs while idle.</td></tr>
-<tr><td class="cmd">clean</td><td>Delete old output directories, keeping only the latest run per job.</td></tr>
-<tr><td class="cmd">refresh</td><td>Reload your tccp.yaml without disconnecting.</td></tr>
+<tr><td class="cmd">dealloc [id|all]</td><td>Release SLURM allocations. No argument releases all idle ones. They burn SUs while held.</td></tr>
+<tr><td class="cmd">refresh</td><td>Reload your <code>tccp.yaml</code> without disconnecting.</td></tr>
 </table>
 
+<p class="dim">v<span class="ver"></span></p>
+<script src="version.js"></script>
 </body>
 </html>

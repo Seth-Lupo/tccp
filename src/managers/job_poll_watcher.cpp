@@ -134,6 +134,16 @@ std::string JobPollWatcher::ssh_cmd(const std::string& node,
 void JobPollWatcher::cleanup_control_sockets() {
     std::lock_guard<std::mutex> lock(nodes_mutex_);
     for (const auto& node : known_nodes_) {
+        // Validate node name to prevent command injection
+        bool safe = !node.empty();
+        for (char c : node) {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '.') {
+                safe = false;
+                break;
+            }
+        }
+        if (!safe) continue;
+
         std::string cmd = fmt::format(
             "ssh -o ControlPath=/tmp/tccp_poll_%h -O exit {} 2>/dev/null", node);
         std::system(cmd.c_str());

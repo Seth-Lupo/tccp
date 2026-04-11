@@ -15,7 +15,11 @@ void create_tar(const fs::path& tar_path,
     struct archive* a = archive_write_new();
     if (!a) throw std::runtime_error("Failed to create archive writer");
 
-    archive_write_set_format_ustar(a);
+    if (archive_write_set_format_ustar(a) != ARCHIVE_OK) {
+        std::string err = archive_error_string(a);
+        archive_write_free(a);
+        throw std::runtime_error("Failed to set archive format: " + err);
+    }
 
     if (archive_write_open_filename(a, tar_path.string().c_str()) != ARCHIVE_OK) {
         std::string err = archive_error_string(a);
@@ -55,7 +59,12 @@ void create_tar(const fs::path& tar_path,
             in.read(buf, sizeof(buf));
             auto bytes_read = in.gcount();
             if (bytes_read > 0) {
-                archive_write_data(a, buf, static_cast<size_t>(bytes_read));
+                if (archive_write_data(a, buf, static_cast<size_t>(bytes_read)) < 0) {
+                    archive_entry_free(entry);
+                    archive_write_close(a);
+                    archive_write_free(a);
+                    throw std::runtime_error("Failed to write data to archive");
+                }
             }
         }
     }
@@ -71,7 +80,11 @@ void create_tar_to_callback(const fs::path& base_dir,
     struct archive* a = archive_write_new();
     if (!a) throw std::runtime_error("Failed to create archive writer");
 
-    archive_write_set_format_ustar(a);
+    if (archive_write_set_format_ustar(a) != ARCHIVE_OK) {
+        std::string err = archive_error_string(a);
+        archive_write_free(a);
+        throw std::runtime_error("Failed to set archive format: " + err);
+    }
 
     // Custom write callbacks for streaming
     struct CallbackData {

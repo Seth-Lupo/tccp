@@ -85,6 +85,7 @@ Result<void> JobManager::do_cancel(TrackedJob* tj, const std::string& job_name) 
 
 Result<void> JobManager::cancel_job(const std::string& job_name, StatusCallback cb) {
     TrackedJob* tj = nullptr;
+    std::string slurm_id_copy;
     {
         std::lock_guard<std::mutex> lock(tracked_mutex_);
         for (auto& job : tracked_) {
@@ -92,6 +93,7 @@ Result<void> JobManager::cancel_job(const std::string& job_name, StatusCallback 
                 tj = &job;
             }
         }
+        if (tj) slurm_id_copy = tj->slurm_id;
     }
 
     if (!tj) {
@@ -106,10 +108,21 @@ Result<void> JobManager::cancel_job(const std::string& job_name, StatusCallback 
     refresh_watcher_targets();
 
     if (result.is_ok() && cb) {
-        if (tj->slurm_id.empty()) {
+        // Re-read slurm_id safely — tj may have been modified by do_cancel
+        std::string sid;
+        {
+            std::lock_guard<std::mutex> lock(tracked_mutex_);
+            for (const auto& job : tracked_) {
+                if (job.job_name == job_name) {
+                    sid = job.slurm_id;
+                    break;
+                }
+            }
+        }
+        if (sid.empty()) {
             cb(fmt::format("Job '{}' canceled during initialization", job_name));
         } else {
-            cb(fmt::format("Job '{}' canceled (allocation {} kept alive)", job_name, tj->slurm_id));
+            cb(fmt::format("Job '{}' canceled (allocation {} kept alive)", job_name, sid));
         }
     }
 
@@ -118,11 +131,13 @@ Result<void> JobManager::cancel_job(const std::string& job_name, StatusCallback 
 
 Result<void> JobManager::cancel_job_by_id(const std::string& job_id, StatusCallback cb) {
     TrackedJob* tj = nullptr;
+    std::string job_name_copy;
     {
         std::lock_guard<std::mutex> lock(tracked_mutex_);
         for (auto& job : tracked_) {
             if (job.job_id == job_id) {
                 tj = &job;
+                job_name_copy = job.job_name;
                 break;
             }
         }
@@ -132,18 +147,29 @@ Result<void> JobManager::cancel_job_by_id(const std::string& job_id, StatusCallb
         return Result<void>::Err("Job ID '" + job_id + "' not found");
     }
 
-    if (cb) cb(fmt::format("Canceling job '{}'...", tj->job_name));
+    if (cb) cb(fmt::format("Canceling job '{}'...", job_name_copy));
 
-    auto result = do_cancel(tj, tj->job_name);
+    auto result = do_cancel(tj, job_name_copy);
 
     // Update watcher targets outside the lock
     refresh_watcher_targets();
 
     if (result.is_ok() && cb) {
-        if (tj->slurm_id.empty()) {
-            cb(fmt::format("Job '{}' canceled during initialization", tj->job_name));
+        // Re-read safely under lock
+        std::string sid;
+        {
+            std::lock_guard<std::mutex> lock(tracked_mutex_);
+            for (const auto& job : tracked_) {
+                if (job.job_id == job_id) {
+                    sid = job.slurm_id;
+                    break;
+                }
+            }
+        }
+        if (sid.empty()) {
+            cb(fmt::format("Job '{}' canceled during initialization", job_name_copy));
         } else {
-            cb(fmt::format("Job '{}' canceled", tj->job_name));
+            cb(fmt::format("Job '{}' canceled", job_name_copy));
         }
     }
 

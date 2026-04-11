@@ -17,4 +17,5 @@ vcpkg_installed/
 .cache/
 prompts
 test-results/
+experiments/
 

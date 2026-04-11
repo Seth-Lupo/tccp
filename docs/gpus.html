@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tccp - gpu guide</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="logo.png" type="image/png">
+</head>
+<body>
+<h1>gpu guide</h1>
+<nav>
+<a href="index.html">home</a>
+<a href="install.html">install</a>
+<a href="usage.html">usage</a>
+<a href="commands.html">commands</a>
+<a href="settings.html">settings</a>
+<a href="gpus.html">gpus</a>
+<a href="architecture.html">how it works</a>
+<a href="contact.html">contact</a>
+</nav>
+
+<p>
+Available GPU types on the cluster, from least to most powerful. Use the
+<code>gpu:</code> field in <code>tccp.yaml</code> or check live availability
+with <code>gpus</code> in the REPL.
+</p>
+
+<h2>available GPUs</h2>
+
+<table>
+<tr><th>GPU</th><th>VRAM</th><th>best for</th><th>notes</th></tr>
+<tr>
+<td><code>t4</code></td>
+<td>16 GB</td>
+<td>Inference, light training</td>
+<td>Oldest Turing card. Slow FP32 but decent FP16. Good for small models and debugging.</td>
+</tr>
+<tr>
+<td><code>p100</code></td>
+<td>16 GB</td>
+<td>Legacy workloads</td>
+<td>Pascal generation. No tensor cores. Mainly useful when nothing else is free.</td>
+</tr>
+<tr>
+<td><code>rtx_6000</code></td>
+<td>24 GB</td>
+<td>Medium training</td>
+<td>Turing with tensor cores. Decent for mid-size models.</td>
+</tr>
+<tr>
+<td><code>v100</code></td>
+<td>32 GB</td>
+<td>General training</td>
+<td>Volta. First-gen tensor cores. Solid all-rounder, good FP16 throughput.</td>
+</tr>
+<tr>
+<td><code>a100-40gb</code></td>
+<td>40 GB</td>
+<td>Large model training</td>
+<td>Ampere. 3rd-gen tensor cores, TF32, BF16. Fast interconnect. Great price/perf.</td>
+</tr>
+<tr>
+<td><code>rtx_a5000</code></td>
+<td>24 GB</td>
+<td>Medium training, multi-GPU</td>
+<td>Ampere workstation GPU. 8 per node &mdash; good for data-parallel training.</td>
+</tr>
+<tr>
+<td><code>l40</code></td>
+<td>48 GB</td>
+<td>Large models, fine-tuning</td>
+<td>Ada Lovelace. Good VRAM for big batch sizes or large models.</td>
+</tr>
+<tr>
+<td><code>rtx_a6000</code></td>
+<td>48 GB</td>
+<td>Large models</td>
+<td>Ampere workstation. 48 GB VRAM, 8 per node.</td>
+</tr>
+<tr>
+<td><code>rtx_6000ada</code></td>
+<td>48 GB</td>
+<td>Large models, fast training</td>
+<td>Ada Lovelace workstation. Newer arch than rtx_a6000.</td>
+</tr>
+<tr>
+<td><code>a100-80gb</code></td>
+<td>80 GB</td>
+<td>LLMs, very large models</td>
+<td>The workhorse. 80 GB handles most LLM fine-tuning. High bandwidth.</td>
+</tr>
+<tr>
+<td><code>l40s</code></td>
+<td>48 GB</td>
+<td>Fast training, inference</td>
+<td>Ada Lovelace server GPU. Better FP8 than L40. Newer generation.</td>
+</tr>
+<tr>
+<td><code>h100</code></td>
+<td>80 GB</td>
+<td>LLMs, fastest training</td>
+<td>Hopper. 4th-gen tensor cores, FP8, Transformer Engine. Top-tier throughput.</td>
+</tr>
+</table>
+
+<h2>selection rules of thumb</h2>
+
+<ul>
+<li><b>Debugging / small models (&lt;1B params):</b> <code>t4</code> &mdash; cheapest, 16 GB is enough</li>
+<li><b>Standard training (1&ndash;7B params):</b> <code>v100</code> or <code>a100-40gb</code></li>
+<li><b>Large models / fine-tuning (7&ndash;13B):</b> <code>a100-80gb</code> or <code>l40s</code></li>
+<li><b>LLM fine-tuning (13B+):</b> <code>a100-80gb</code> or <code>h100</code>, possibly multi-GPU</li>
+<li><b>Multi-GPU data parallel:</b> <code>rtx_a5000</code> (8 per node) or <code>a100-80gb:2</code></li>
+<li><b>Just need lots of VRAM:</b> <code>l40</code> / <code>rtx_a6000</code> / <code>rtx_6000ada</code> (all 48 GB)</li>
+<li><b>No GPU needed:</b> set <code>gpu: none</code> or omit it with <code>type: python</code></li>
+</ul>
+
+<h2>VRAM estimation</h2>
+
+<p>Rough VRAM needs for common tasks:</p>
+
+<table>
+<tr><th>task</th><th>approx VRAM</th><th>suggested GPU</th></tr>
+<tr>
+<td>ResNet/EfficientNet training</td>
+<td>4&ndash;8 GB</td>
+<td><code>t4</code></td>
+</tr>
+<tr>
+<td>BERT fine-tuning</td>
+<td>8&ndash;12 GB</td>
+<td><code>t4</code>, <code>v100</code></td>
+</tr>
+<tr>
+<td>GPT-2 (124M) training</td>
+<td>8&ndash;12 GB</td>
+<td><code>t4</code>, <code>v100</code></td>
+</tr>
+<tr>
+<td>Stable Diffusion fine-tuning</td>
+<td>16&ndash;24 GB</td>
+<td><code>v100</code>, <code>rtx_6000</code></td>
+</tr>
+<tr>
+<td>LLaMA 7B LoRA fine-tuning</td>
+<td>16&ndash;24 GB</td>
+<td><code>v100</code>, <code>a100-40gb</code></td>
+</tr>
+<tr>
+<td>LLaMA 7B full fine-tuning</td>
+<td>32&ndash;40 GB</td>
+<td><code>a100-40gb</code></td>
+</tr>
+<tr>
+<td>LLaMA 13B LoRA fine-tuning</td>
+<td>32&ndash;40 GB</td>
+<td><code>a100-40gb</code>, <code>a100-80gb</code></td>
+</tr>
+<tr>
+<td>LLaMA 13B full fine-tuning</td>
+<td>60&ndash;80 GB</td>
+<td><code>a100-80gb</code></td>
+</tr>
+<tr>
+<td>LLaMA 70B LoRA (QLoRA 4-bit)</td>
+<td>40&ndash;48 GB</td>
+<td><code>a100-80gb</code>, <code>l40s</code></td>
+</tr>
+<tr>
+<td>Inference (quantized)</td>
+<td>model size / quant bits</td>
+<td>varies</td>
+</tr>
+</table>
+
+<h2>using in tccp.yaml</h2>
+
+<p>Set a GPU at the project level or per-job:</p>
+<pre>
+<span class="c"># project-wide default</span>
+gpu: a100
+
+<span class="c"># per-job override</span>
+jobs:
+  train:
+    script: train.py
+    gpu: a100-80gb
+    gpu_count: 2
+</pre>
+
+<p>Shorthand with colon syntax:</p>
+<pre>
+gpu: a100-80gb:2    <span class="c"># equivalent to gpu: a100-80gb + gpu_count: 2</span>
+</pre>
+
+<p>
+When you set a GPU, tccp auto-bumps memory to <code>32G</code>
+(<code>64G</code> for 80GB GPUs) and cpus to <code>4</code>. Override
+if you need more.
+</p>
+
+<p class="dim">v<span class="ver"></span></p>
+<script src="version.js"></script>
+</body>
+</html>

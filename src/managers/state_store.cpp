@@ -14,11 +14,10 @@ StateStore::StateStore(const std::string& project_name, const fs::path& base_dir
 ProjectState StateStore::load() {
     ProjectState state;
 
-    if (!fs::exists(state_path_)) {
-        return state;
-    }
-
     try {
+        if (!fs::exists(state_path_)) {
+            return state;
+        }
         YAML::Node root = YAML::LoadFile(state_path_.string());
 
         if (root["allocations"] && root["allocations"].IsSequence()) {

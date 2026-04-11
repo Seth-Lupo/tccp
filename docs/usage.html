@@ -15,6 +15,7 @@
 <a href="usage.html">usage</a>
 <a href="commands.html">commands</a>
 <a href="settings.html">settings</a>
+<a href="gpus.html">gpus</a>
 <a href="architecture.html">how it works</a>
 <a href="contact.html">contact</a>
 </nav>
@@ -32,11 +33,21 @@ You need to be on the Tufts network (campus WiFi or <a href="https://it.tufts.ed
 On campus WiFi, you'll need to approve a Duo push every time you connect. The VPN avoids this.
 </p>
 <pre>
-$ tccp setup              <span class="c"># save credentials (one time)</span>
+<span class="c"># save credentials (one time)</span>
+$ tccp setup
+
+<span class="c"># set up your project</span>
 $ cd my-ml-project
-$ tccp register           <span class="c"># set up your project (one time)</span>
-$ tccp                    <span class="c"># connect</span>
+$ tccp register
+
+<span class="c"># connect to the cluster</span>
+$ tccp
 </pre>
+<p>
+<code>tccp setup</code> saves your Tufts username and password.
+<code>tccp register</code> walks you through creating a <code>tccp.yaml</code>
+config file. Then <code>tccp</code> connects you to the cluster REPL.
+</p>
 
 <h2>tccp.yaml</h2>
 <p>
@@ -81,7 +92,7 @@ When a job is running, <code>view</code> attaches you to the live output
 stream. <code>Ctrl+C</code> cancels the job, <code>Ctrl+\</code> detaches
 (job keeps running &mdash; reattach anytime with <code>view</code> again).
 <code>Ctrl+V</code> opens the full output buffer in your text editor
-(vim on macOS/Linux, nano on Windows) for searching and scrolling. You can
+for searching and scrolling. You can
 also use the <code>output</code> command to do the same thing from the REPL.
 </p>
 
@@ -156,6 +167,41 @@ jobs:
     ports: [6006]
 </pre>
 
+<h2>file sync</h2>
+<p>
+tccp syncs your project files to the compute node before each run.
+</p>
+<ul>
+<li>Respects <code>.gitignore</code> (or <code>.tccpignore</code>).
+Auto-excludes <code>.git/</code>, <code>__pycache__/</code>,
+<code>.venv/</code>, <code>node_modules/</code>.</li>
+<li>Only changed files are sent (incremental sync by content hash).</li>
+<li>The <code>env</code> file is always synced, even if gitignored.</li>
+<li><code>requirements.txt</code> is auto-installed and cached by hash.</li>
+<li>Remote directory structure mirrors local exactly:
+<pre>
+local ./data/train.csv  &rarr;  remote &lt;scratch&gt;/data/train.csv
+local ./train.py        &rarr;  remote &lt;scratch&gt;/train.py
+</pre>
+</li>
+</ul>
+
+<h2>project structure</h2>
+<p>A typical tccp project looks like:</p>
+<pre>
+my-project/
+  tccp.yaml              <span class="c"># project config</span>
+  requirements.txt       <span class="c"># auto-installed into container venv</span>
+  .env                   <span class="c"># API keys, secrets (auto-synced, gitignored)</span>
+  .gitignore
+  train.py               <span class="c"># your scripts</span>
+  eval.py
+  data/                  <span class="c"># rodata &mdash; synced once per allocation</span>
+    train.csv
+    val.csv
+  output/                <span class="c"># downloaded from cluster when job finishes</span>
+</pre>
+
 <h2>expected timing</h2>
 <p>
 When you <code>run &lt;job&gt;</code>, initialization happens in the background.
@@ -178,13 +224,26 @@ Use <code>initlogs &lt;job&gt;</code> to see real-time progress of each stage.
 </p>
 
 <h2>good to know</h2>
-<p>
-Your <code>.gitignore</code> (or <code>.tccpignore</code>) controls which
-files get synced &mdash; keep large data out. <code>requirements.txt</code>
-is installed automatically and cached by hash, so unchanged deps are a no-op.
-If you edit <code>tccp.yaml</code>, type <code>refresh</code> to pick up
-changes without reconnecting.
-</p>
+<ul>
+<li><b>requirements.txt</b> &mdash; put it in the project root. For
+<code>python-pytorch</code>, don't list <code>torch</code>,
+<code>torchvision</code>, or <code>torchaudio</code> &mdash; they're
+pre-installed in the container.</li>
+<li><b>Output</b> &mdash; write files to your <code>output</code>
+directory. tccp downloads it automatically when the job finishes.</li>
+<li><b>Cache</b> &mdash; use the <code>cache</code> directory for
+model weights, datasets, or anything you don't want to re-download.
+Point <code>HF_HOME</code>, <code>TRANSFORMERS_CACHE</code>, etc.
+into it.</li>
+<li><b>Time limits</b> &mdash; set realistic <code>time:</code>
+values. Allocations hold the node for the full duration, burning
+SUs even if the job finishes early. Use <code>dealloc</code> to
+release idle ones.</li>
+<li><b>Refresh</b> &mdash; if you edit <code>tccp.yaml</code>, type
+<code>refresh</code> to pick up changes without reconnecting.</li>
+</ul>
 
+<p class="dim">v<span class="ver"></span></p>
+<script src="version.js"></script>
 </body>
 </html>

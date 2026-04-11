@@ -186,6 +186,19 @@ std::string md5_final(MD5Context& ctx) {
 
 } // anonymous namespace
 
+std::string shell_quote(const std::string& s) {
+    // Wrap in single quotes, escaping any embedded single quotes
+    std::string result = "'";
+    for (char c : s) {
+        if (c == '\'')
+            result += "'\\''";
+        else
+            result += c;
+    }
+    result += "'";
+    return result;
+}
+
 std::string compute_file_md5(const std::filesystem::path& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return "";

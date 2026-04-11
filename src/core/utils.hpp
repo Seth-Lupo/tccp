@@ -25,6 +25,9 @@ std::string base64_decode(const std::string& input);
 // Compute MD5 checksum of a file.
 std::string compute_file_md5(const std::filesystem::path& path);
 
+// Shell-quote a string for safe use in shell commands (wraps in single quotes).
+std::string shell_quote(const std::string& s);
+
 // Trim leading and trailing whitespace in-place.
 inline void trim(std::string& s) {
     auto start = s.find_first_not_of(" \t\r\n");

@@ -15,6 +15,7 @@
 <a href="usage.html">usage</a>
 <a href="commands.html">commands</a>
 <a href="settings.html">settings</a>
+<a href="gpus.html">gpus</a>
 <a href="architecture.html">how it works</a>
 <a href="contact.html">contact</a>
 </nav>
@@ -74,8 +75,6 @@ jobs:
 <td><code>type</code></td>
 <td><code>python</code></td>
 <td>Environment type: <code>python</code> or <code>python-pytorch</code>.
-<code>python-pytorch</code> auto-assigns a <code>t4</code> GPU on the
-<code>preempt</code> partition if no GPU is specified.
 See <a href="#environments">environments</a> below.</td>
 </tr>
 <tr>
@@ -120,6 +119,12 @@ re-synced on every run. Can be a single string or a list.</td>
 <td>(none)</td>
 <td>Map of custom environment variables exported before job execution.</td>
 </tr>
+<tr>
+<td><code>ports</code></td>
+<td>(none)</td>
+<td>Ports forwarded to localhost. Can be a single number or a list.
+Top-level ports apply to all jobs that don't set their own.</td>
+</tr>
 </table>
 
 <h3>rodata example</h3>
@@ -151,13 +156,10 @@ top level for project-wide defaults, or per-job to override.</p>
 <tr>
 <td><code>gpu</code></td>
 <td>(none)</td>
-<td>GPU type. Common options include <code>a100</code>,
-<code>a100-40gb</code>, <code>a100-80gb</code>, <code>l40s</code>,
-<code>v100</code>, <code>t4</code>, and <code>none</code> &mdash;
-but available types depend on what the cluster has. tccp discovers
-GPUs from SLURM automatically. Bare names like <code>a100</code>
-resolve to the cheapest variant. Include a count with a colon:
-<code>a100:2</code>.</td>
+<td>GPU type, e.g. <code>a100</code>, <code>v100</code>, <code>t4</code>,
+<code>none</code>. Bare names like <code>a100</code> resolve to the cheapest
+variant. Include a count with a colon: <code>a100:2</code>.
+See <a href="gpus.html">GPU guide</a>.</td>
 </tr>
 <tr>
 <td><code>gpu_count</code></td>
@@ -194,12 +196,6 @@ with default GPU uses <code>preempt</code>.</td>
 <td>(none)</td>
 <td>Comma-separated list of nodes to avoid.</td>
 </tr>
-<tr>
-<td><code>ports</code></td>
-<td>(none)</td>
-<td>Ports to forward to localhost. Can be a single number or a list.
-Top-level ports apply to all jobs that don't set their own.</td>
-</tr>
 </table>
 
 <h3>advanced: full slurm block</h3>
@@ -227,12 +223,12 @@ any resource setting from the project level.</p>
 <tr>
 <td><code>script</code></td>
 <td>(required*)</td>
-<td>Python script to run.</td>
+<td>Python script to run &rarr; <code>python &lt;script&gt; &lt;args&gt;</code>.</td>
 </tr>
 <tr>
 <td><code>package</code></td>
 <td>(required*)</td>
-<td>Python package to run with <code>-m</code> flag (instead of script).</td>
+<td>Python package to run &rarr; <code>python -m &lt;package&gt; &lt;args&gt;</code>. Can't mix with <code>script</code>.</td>
 </tr>
 <tr>
 <td><code>args</code></td>
@@ -260,7 +256,7 @@ can also be set per-job.
 </table>
 
 <h3>job shorthand</h3>
-<p>If a job only needs a script name, you can use the short form:</p>
+<p>If a job only needs a script name, use the short form:</p>
 <pre>
 jobs:
   train: train.py
@@ -299,6 +295,10 @@ for free. It also filters out <code>torch</code>, <code>pytorch</code>,
 <code>nvidia-*</code>, and <code>triton</code> from your
 <code>requirements.txt</code> to avoid conflicts.
 </p>
+<p>
+<code>python-pytorch</code> auto-assigns a <code>t4</code> GPU on the
+<code>preempt</code> partition if no GPU is specified.
+</p>
 
 <h2>setting precedence</h2>
 <p>Settings are merged in this order (later wins):</p>
@@ -309,8 +309,7 @@ for free. It also filters out <code>torch</code>, <code>pytorch</code>,
 </ol>
 
 <h2>file sync</h2>
-<p>tccp syncs your project files to the compute node before each run.
-A few things to know:</p>
+<p>tccp syncs your project files to the compute node before each run.</p>
 <ul>
 <li>Respects <code>.gitignore</code> (or <code>.tccpignore</code> if
 present).</li>
@@ -324,5 +323,7 @@ installed automatically, and cached by hash so unchanged deps are
 a no-op.</li>
 </ul>
 
+<p class="dim">v<span class="ver"></span></p>
+<script src="version.js"></script>
 </body>
 </html>

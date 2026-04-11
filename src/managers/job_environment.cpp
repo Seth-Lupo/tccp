@@ -21,6 +21,10 @@ void JobManager::ensure_dirs(const std::string& job_id, StatusCallback cb) {
     std::filesystem::path local_output = config_.project_dir() / "output" / job_name_from_id(job_id);
     std::error_code ec;
     std::filesystem::create_directories(local_output, ec);
+    if (ec) {
+        tccp_log(fmt::format("ensure_dirs: failed to create local output dir {}: {}",
+                             local_output.string(), ec.message()));
+    }
 }
 
 void JobManager::ensure_container(const std::string& compute_node,

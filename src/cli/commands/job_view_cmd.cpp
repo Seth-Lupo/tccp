@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
+#include <core/utils.hpp>
 
 // Forward declarations
 static std::string fetch_job_output(BaseCLI& cli, const TrackedJob* tracked);
@@ -494,7 +495,7 @@ void do_output(BaseCLI& cli, const std::string& arg) {
     out.close();
 
     std::string editor = cli.service.config().editor();
-    std::string editor_cmd = editor + " " + local_tmp;
+    std::string editor_cmd = editor + " " + shell_quote(local_tmp);
     std::system(editor_cmd.c_str());
     std::remove(local_tmp.c_str());
 }
