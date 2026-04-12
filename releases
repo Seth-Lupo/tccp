@@ -16,3 +16,4 @@
 1.0.4|Fix container pull: add mksquashfs to PATH and use APPTAINER env vars
 1.0.5|Broader mksquashfs PATH search for container pull
 1.0.6|Auto-install mksquashfs from DTN for container pull
+1.0.7|Add per-project login node override support
