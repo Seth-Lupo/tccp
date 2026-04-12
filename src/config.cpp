@@ -100,6 +100,7 @@ static ProjectConfig load_project_config(const fs::path& project_dir) {
     try {
         YAML::Node root = YAML::LoadFile(path.string());
         if (root["host"]) p.host = root["host"].as<std::string>("");
+        if (root["login"]) p.login = root["login"].as<std::string>("");
         p.container = root["container"].as<std::string>("");
         p.init = root["init"].as<std::string>("");
 
@@ -152,6 +153,8 @@ Result<Config> load_config(const fs::path& project_dir) {
     // Project tccp.yaml overrides global
     if (!cfg.project.host.empty())
         cfg.global.host = cfg.project.host;
+    if (!cfg.project.login.empty())
+        cfg.global.login = cfg.project.login;
     if (!cfg.project.partition.empty())
         cfg.global.partition = cfg.project.partition;
 

@@ -60,6 +60,7 @@ struct ManifestEntry {
 
 struct ProjectConfig {
     std::string host;
+    std::string login;
     std::string partition;
     std::string container;
     std::string init;

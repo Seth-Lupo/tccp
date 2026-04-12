@@ -58,6 +58,7 @@ rodata:
 | container   | (required) | Docker image. Pulled as Singularity SIF. e.g. `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime` |
 | init        | (none)     | Shell command run inside container after sync, before dtach starts. e.g. `pip install -r requirements.txt` |
 | host        | (global)   | Override the DTN/transfer host for this project |
+| login       | (global)   | Override the login/scheduler node for this project |
 | partition   | (global)   | SLURM partition. e.g. `gpu`, `preempt` |
 | gpu         | (global)   | GPU type. e.g. `a100`, `v100`, `t4`. Auto-selected if omitted. |
 | gpu-count   | 1          | Number of GPUs |
@@ -96,7 +97,7 @@ Created by `tccp setup`. Stores credentials and default resources.
 ### Setting precedence
 
 Project `tccp.yaml` overrides global `~/.tccp/config.yaml` for all resource
-fields. Host and partition can also be overridden per-project.
+fields. Host, login, and partition can also be overridden per-project.
 
 ---
 
