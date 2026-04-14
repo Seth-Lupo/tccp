@@ -1,8 +1,9 @@
 # tccp — persistent compute shell for HPC clusters
 
 tccp is a CLI tool that gives you a persistent shell session on an HPC cluster's
-compute node, inside a Singularity container. It handles SSH (one Duo push),
-SLURM allocation, container setup, file sync, and port forwarding automatically.
+compute node, inside a Singularity/Apptainer container. It handles SSH (one Duo
+push), SLURM allocation, container setup, file sync, and port forwarding
+automatically.
 
 Your job: help the user write their tccp.yaml and project scripts so they can
 develop on the cluster.
@@ -49,14 +50,16 @@ output: output/
 ports: [6006, 8888]
 rodata:
   - data
+host: xfer.cluster.tufts.edu
+login: login.pax.tufts.edu
 ```
 
 ### Project config fields
 
 | Field       | Default    | Description |
 |-------------|------------|-------------|
-| container   | (required) | Docker image. Pulled as Singularity SIF. e.g. `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime` |
-| init        | (none)     | Shell command run inside container after sync, before dtach starts. e.g. `pip install -r requirements.txt` |
+| container   | (required) | Docker image (pulled as SIF), OR a direct path to a `.sif` file. e.g. `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime` or `/path/to/my.sif` |
+| init        | (none)     | Shell command run inside container after sync, before dtach starts. e.g. `pip install -r requirements.txt`. Has a 10-minute timeout. |
 | host        | (global)   | Override the DTN/transfer host for this project |
 | login       | (global)   | Override the login/scheduler node for this project |
 | partition   | (global)   | SLURM partition. e.g. `gpu`, `preempt` |
@@ -67,7 +70,7 @@ rodata:
 | time        | 4h         | Walltime limit. Accepts `4h`, `30m`, `1d`, or `HH:MM:SS` |
 | output      | output/    | Directory pulled back to local on `tccp stop` and `tccp sync` |
 | ports       | (none)     | Ports forwarded to localhost during `tccp shell`. e.g. `[6006, 8888]` |
-| rodata      | (none)     | Read-only data directories bind-mounted from NFS home into scratch |
+| rodata      | (none)     | Data directories bind-mounted from NFS home into scratch |
 
 ### Fallback init
 
@@ -107,8 +110,8 @@ fields. Host, login, and partition can also be overridden per-project.
 |-----------------------|-------------|
 | `tccp setup`          | Save credentials to `~/.tccp/config.yaml` |
 | `tccp start`          | Full startup: allocate → wait → container → dtach → sync → init → shell |
-| `tccp shell`          | Attach to the persistent dtach session. Ctrl+S detaches, syncs, reattaches. Ctrl+D exits. |
-| `tccp exec <cmd>`     | Run a one-off command inside the container on the compute node |
+| `tccp shell`          | Attach to the persistent dtach session. Ctrl+S detaches, syncs, reattaches. Ctrl+D exits. Port forwarding active only during shell. |
+| `tccp exec <cmd>`     | Run a one-off command inside the container on the compute node (no timeout, no port forwarding) |
 | `tccp sync`           | Push changed files to compute node + pull output back |
 | `tccp status`         | Show session info: job ID, node, scratch path, container, ports |
 | `tccp stop`           | Pull output, cancel SLURM job, clear session state |
@@ -117,6 +120,7 @@ fields. Host, login, and partition can also be overridden per-project.
 | `tccp gpus info`      | Static GPU guide with VRAM and recommendations |
 | `tccp allocs`         | List your SLURM allocations |
 | `tccp dealloc <id>`   | Cancel a SLURM allocation. Use `all` to cancel everything. |
+| `tccp --version`      | Print version number |
 
 ---
 
@@ -126,13 +130,13 @@ fields. Host, login, and partition can also be overridden per-project.
 
 1. `tccp start` runs these steps in order:
    - **Allocate**: `sbatch` on login node with requested resources
-   - **Wait for node**: Poll `squeue` until RUNNING
-   - **Ensure container**: Check for cached SIF, pull if missing (on compute node)
-   - **Verify runtime**: Test `singularity exec` works (catches namespace issues)
-   - **Ensure dtach**: Check/build dtach binary on DTN
+   - **Wait for node**: Poll `squeue` until RUNNING (~3s intervals, up to 30 min)
+   - **Ensure container**: Check for cached SIF, pull if missing (on compute node, not DTN — compute /tmp has more space)
+   - **Verify runtime**: Test `singularity exec` works (catches namespace issues). On failure, prints diagnostics (binary path, version, user namespace status, SUID starter, loaded modules).
+   - **Ensure dtach**: Check/build dtach binary on DTN (tries git clone, then curl fallback, then direct compile)
    - **Sync files**: Tar push project files to scratch dir on compute node
-   - **Setup environment**: Create output dirs, write `.tccp-env.sh`
-   - **Run init**: Execute init command inside container (if configured)
+   - **Setup environment**: Create output dirs, write `.tccp-env.sh` with env vars
+   - **Run init**: Execute init command inside container (if configured, 10-min timeout)
    - **Start dtach**: Launch persistent shell via dtach + singularity
 
 2. `tccp shell` attaches to the dtach socket via SSH hop (DTN → compute node).
@@ -140,21 +144,58 @@ fields. Host, login, and partition can also be overridden per-project.
 
 3. `tccp stop` pulls output from NFS, then `scancel`s the job.
 
+### Container runtime
+
+tccp uses Apptainer (SUID mode) to run containers. On each compute node it:
+1. Loads `apptainer/1.2.4-suid` (fallback `1.2.2-suid`) via environment modules
+2. Optionally loads `squashfs-tools`
+3. Detects the binary as `apptainer` or `singularity`
+
+SUID mode is required because user namespaces may be disabled on the cluster.
+
+### Container pull
+
+- Runs on the **compute node** (not DTN) because compute /tmp is large (~12GB needed for OCI blobs + SIF conversion)
+- Caches OCI layers in `/tmp/{user}/singularity-cache/`
+- SIF output goes to NFS home or /tmp depending on `cache-containers` setting
+- Auto-installs `mksquashfs` if missing (searches compute node and DTN, caches to `~/.tccp/bin/`)
+- Shows progress: "Getting image", "Copying blob", "Converting OCI", "Creating SIF"
+- 30-minute timeout
+
 ### SSH architecture
 
-- Single SSH ControlMaster connection to DTN (one Duo push per session)
+- Single SSH connection to DTN (one Duo push per session)
 - Commands on **login node**: `ssh DTN 'ssh login "cmd"'` (for sbatch/squeue)
 - Commands on **compute node**: `ssh DTN 'ssh compute "cmd"'` (DTN has cluster-internal auth)
 - Interactive shell: `ssh -t DTN 'ssh -t compute "singularity exec ... dtach -a ..."'`
 
 ### File sync
 
-- Respects `.tccpignore` (or `.gitignore`). Auto-excludes: `.git/`, `__pycache__/`,
-  `.venv/`, `node_modules/`, `build/`, `.cache/`, `output/`, etc.
+- Respects `.tccpignore` (or `.gitignore` if no `.tccpignore` exists). `.tccpignore` takes priority.
+- Default excludes (always applied):
+  `.git/`, `.gitignore`, `.tccpignore`, `__pycache__/`, `*.pyc`, `*.pyo`,
+  `.venv/`, `venv/`, `.idea/`, `.vscode/`, `.claude/`, `.DS_Store`, `*.swp`,
+  `*.swo`, `*~`, `.cache/`, `build/`, `dist/`, `*.egg-info/`, `.pytest_cache/`,
+  `.mypy_cache/`, `node_modules/`, `.env`, `output/`, `.tccp.sock`, `.tccp-env.sh`
 - Incremental: only changed files sent (by mtime + size comparison)
 - Uses tar pipe over SSH for binary-clean transfer
 - Deleted files (removed locally since last sync) are cleaned up remotely
 - Remote-only files (created on compute node, not in local manifest) are NOT deleted
+
+### Environment inside the container
+
+These environment variables are set inside the container shell:
+
+| Variable           | Value |
+|--------------------|-------|
+| `PYTHONUSERBASE`   | `{scratch}/.local` |
+| `PATH`             | `$PYTHONUSERBASE/bin:$PATH` |
+| `TCCP_PROJECT`     | Project name (directory name) |
+| `TCCP_SCRATCH`     | Full scratch path |
+| `TERM`             | `xterm-256color` |
+| `PS1`              | `tccp> ` |
+
+Working directory is the scratch dir (your synced project files).
 
 ### Remote file layout
 
@@ -162,10 +203,11 @@ fields. Host, login, and partition can also be overridden per-project.
 ~/.tccp/                                  # NFS (persistent)
 ├── config.yaml                           # global config
 ├── bin/dtach                             # shared binary
+├── bin/mksquashfs                        # auto-installed if needed
 ├── containers/                           # only when cache-containers: true
 │   └── {image}.sif
 └── projects/{name}/
-    ├── session.yaml                      # session state
+    ├── session.yaml                      # session state (job ID, node, manifest)
     └── output/                           # NFS output (bind-mounted)
 
 /tmp/{user}/                              # compute /tmp (ephemeral)
@@ -183,10 +225,11 @@ fields. Host, login, and partition can also be overridden per-project.
 ### Container
 
 - Any Docker image works. Pulled via `singularity pull docker://...`
-- Runs with `--nv` for GPU passthrough
+- You can also specify a direct path to a `.sif` file in `container:`
+- Runs with `--nv` for GPU passthrough (when GPUs are allocated)
 - `output/` is bind-mounted from NFS so files are immediately persistent
-- `rodata` dirs are bind-mounted read-only from NFS home
-- Environment inside container: `PYTHONUSERBASE`, `PATH`, `PS1`, `TERM`
+- `rodata` dirs are bind-mounted from NFS home into scratch
+- Environment inside container: `PYTHONUSERBASE`, `PATH`, `PS1`, `TERM`, `TCCP_PROJECT`, `TCCP_SCRATCH`
 
 ---
 
@@ -200,21 +243,26 @@ Available GPU types, least to most powerful:
 | p100          | 16 GB  | Legacy workloads |
 | rtx_6000      | 24 GB  | Medium training |
 | v100          | 32 GB  | General training |
-| a100-40gb     | 40 GB  | Large model training |
+| a100          | 80 GB  | Large model training, LLMs |
 | rtx_a5000     | 24 GB  | Medium training, multi-GPU (8 per node) |
 | l40           | 48 GB  | Large models, fine-tuning |
 | rtx_a6000     | 48 GB  | Large models |
 | rtx_6000ada   | 48 GB  | Large models, fast training |
-| a100-80gb     | 80 GB  | LLMs, very large models |
 | l40s          | 48 GB  | Fast training, inference |
 | h100          | 80 GB  | Largest models, fastest training |
+
+### GPU auto-selection
+
+If no `gpu` is set in config, tccp queries SLURM for available GPUs on the
+partition, picks the one with the most VRAM that has idle nodes (or if none
+idle, the highest VRAM overall — the job will queue).
 
 ### Rules of thumb
 
 - **Small models (<1B):** `t4`
-- **Standard training (1-7B):** `v100` or `a100-40gb`
-- **Large models (7-13B):** `a100-80gb` or `l40s`
-- **LLM fine-tuning (13B+):** `a100-80gb` or `h100`
+- **Standard training (1-7B):** `v100` or `a100`
+- **Large models (7-13B):** `a100` or `l40s`
+- **LLM fine-tuning (13B+):** `a100` or `h100`
 - **Lots of VRAM:** `l40` / `rtx_a6000` / `rtx_6000ada` (all 48 GB)
 
 ---
@@ -279,22 +327,36 @@ output: results/
 The `rodata` directory `datasets/` is bind-mounted from your NFS home directory
 into the scratch dir, so large datasets don't need to be synced every time.
 
+## Example: pre-built SIF container
+
+```yaml
+# tccp.yaml
+container: /cluster/home/myuser/containers/custom.sif
+gpu: a100
+```
+
+If your container is already a `.sif` file on the cluster, tccp skips the pull
+step entirely and uses it directly.
+
 ---
 
 ## Key things to remember
 
-1. **container is required** — any Docker image works, pulled as Singularity SIF
-2. **init runs once per `tccp start`** — use it for `pip install`, setup scripts, etc.
+1. **container is required** — any Docker image works (pulled as SIF), or use a direct `.sif` path
+2. **init runs once per `tccp start`** — use it for `pip install`, setup scripts, etc. (10-min timeout)
 3. **output/ is on NFS** — files written to output/ inside the container persist
    immediately and are pulled back on `tccp sync` or `tccp stop`
 4. **Ctrl+S in shell** detaches, syncs code changes, and reattaches — the fast
    edit-sync-test loop
-5. **rodata** for large read-only data — avoids re-syncing every time
-6. **ports** forward automatically during `tccp shell` — TensorBoard (6006),
-   Jupyter (8888), etc.
+5. **rodata** for large data dirs — bind-mounted from NFS home, avoids re-syncing
+6. **ports** forward automatically during `tccp shell` only — TensorBoard (6006),
+   Jupyter (8888), etc. Not active during `tccp exec`.
 7. **GPU auto-selection** — if no gpu is set, tccp picks the best available GPU
    by VRAM on the partition
 8. **time format** — accepts `4h`, `30m`, `1d`, or `HH:MM:SS`
 9. **Remote files survive sync** — files created on the compute node that aren't
    in your local project won't be deleted
 10. **.tccpignore** takes priority over .gitignore if both exist
+11. **Per-project overrides** — `host`, `login`, and `partition` can be set in
+    tccp.yaml to override global config
+12. **`TCCP_PROJECT` and `TCCP_SCRATCH`** env vars are available inside the container
