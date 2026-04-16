@@ -23,6 +23,9 @@ public:
     int interactive(const std::string& node, const std::string& cmd,
                     const std::vector<int>& ports = {});
 
+    // Interactive login shell on the login node (hops via DTN).
+    int login_shell();
+
 private:
     std::string host_, login_, user_, password_;
     fs::path ctl_path_;

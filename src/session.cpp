@@ -1,5 +1,6 @@
 #include "session.hpp"
 #include "theme.hpp"
+#include "debug.hpp"
 #include <fmt/format.h>
 #include <iostream>
 #include <chrono>
@@ -13,8 +14,11 @@
 static std::string container_runtime_init() {
     return
         "type module &>/dev/null || . /etc/profile 2>/dev/null || true; "
-        "SUID_MOD=$(module -t avail apptainer 2>&1 | grep suid | grep -v no-suid | sort -V | tail -1); "
-        "module load ${SUID_MOD:-apptainer} 2>/dev/null || module load singularity 2>/dev/null || true; "
+        "module purge 2>/dev/null; "
+        "module load apptainer/1.2.4-suid || "
+        "module load apptainer/1.2.2-suid || "
+        "{ echo 'ERROR: No SUID apptainer available' >&2; exit 1; }; "
+        "module load squashfs-tools 2>/dev/null || module load squashfs 2>/dev/null || true; "
         "CEXE=$(command -v apptainer 2>/dev/null || command -v singularity 2>/dev/null || echo singularity)";
 }
 
@@ -34,6 +38,11 @@ std::string Session::scratch_path() const {
 }
 
 std::string Session::sif_path() const {
+    // If container is already a .sif path, use it directly
+    if (cfg_.project.container.size() > 4 &&
+        cfg_.project.container.substr(cfg_.project.container.size() - 4) == ".sif") {
+        return cfg_.project.container;
+    }
     if (cfg_.global.cache_containers) {
         return fmt::format("~/.tccp/containers/{}", sif_name(cfg_.project.container));
     }
@@ -102,22 +111,35 @@ Result<void> Session::start(StatusCallback cb) {
     // 4. Verify container runtime works
     {
         if (cb) cb("Verifying container runtime...");
+        // Create output dirs early so bind mount works
+        ssh_.run(fmt::format("mkdir -p {}", nfs_output()));
+        ssh_.run_compute(node, fmt::format("mkdir -p {}/output", scratch_path()));
         auto test_cmd = singularity_cmd(scratch_path(), "echo CONTAINER_EXEC_OK");
         auto test = ssh_.run_compute(node, test_cmd, 30);
+        debug_log("container_verify", fmt::format(
+            "node={} rc={} out=[{}] err=[{}]",
+            node, test.exit_code, trim(test.out), trim(test.err)));
         if (test.out.find("CONTAINER_EXEC_OK") == std::string::npos) {
-            // Gather diagnostics via direct SSH (no singularity)
-            auto diag = ssh_.run_compute(node,
-                "type module &>/dev/null || . /etc/profile 2>/dev/null || true; "
-                "module load apptainer 2>/dev/null || module load singularity 2>/dev/null || true; "
-                "echo \"binary: $(command -v apptainer 2>/dev/null || command -v singularity 2>/dev/null || echo NONE)\"; "
-                "echo \"version: $(apptainer --version 2>/dev/null || singularity --version 2>/dev/null || echo NONE)\"; "
+            // Gather diagnostics using same init as the actual exec
+            auto diag = ssh_.run_compute(node, fmt::format(
+                "{}; "
+                "echo \"binary: $CEXE ($($CEXE --version 2>/dev/null))\"; "
                 "echo \"userns: $(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo unavailable)\"; "
-                "echo \"suid: $(ls $(dirname $(command -v apptainer 2>/dev/null || command -v singularity 2>/dev/null) 2>/dev/null)/../libexec/*/bin/starter-suid 2>/dev/null || echo NONE)\"; "
-                "echo \"modules: $(module avail -t apptainer singularity 2>&1 | tr '\\n' ' ')\"");
+                "echo \"starter-suid: $(ls $(dirname $CEXE)/../libexec/*/bin/starter-suid 2>/dev/null || echo NONE)\"; "
+                "echo \"loaded: $(module list 2>&1)\"; "
+                "echo \"test_output: {}\"; "
+                "echo \"test_stderr: $({} 2>&1 >/dev/null)\"",
+                container_runtime_init(),
+                trim(test.out),
+                singularity_cmd(scratch_path(), "echo CONTAINER_EXEC_OK")));
+            debug_log("container_verify", fmt::format(
+                "diag rc={} out=[{}] err=[{}]",
+                diag.exit_code, trim(diag.out), trim(diag.err)));
             ssh_.run_login("scancel " + job_id);
             store_.clear();
             return Result<void>::Err(fmt::format(
-                "Container runtime cannot create namespaces\n{}", diag.out));
+                "Container runtime cannot create namespaces\n{}\n(stderr: {})",
+                diag.out, trim(diag.err)));
         }
     }
 
@@ -297,7 +319,7 @@ Result<std::string> Session::allocate(StatusCallback cb) {
     if (cb) cb(fmt::format("Requesting {} on {}...", gpu, partition));
 
     std::string cmd = fmt::format(
-        "sbatch --parsable --wrap='sleep infinity' -p {} -c {} --mem={} -t {} -J tccp-{}",
+        "sbatch --parsable --wrap='sleep infinity' -p {} -c {} --mem={} -t {} -J tccp-{} --exclude=s1cmp007",
         partition, cfg_.project.cpus, cfg_.project.memory, time_str, cfg_.project_name);
 
     cmd += fmt::format(" --gres=gpu:{}:{}", gpu, gpu_count);
@@ -321,11 +343,31 @@ Result<std::string> Session::allocate(StatusCallback cb) {
 Result<std::string> Session::wait_for_node(const std::string& id, StatusCallback cb) {
     if (cb) cb("Waiting for allocation...");
 
+    int empty_streak = 0;
     for (int i = 0; i < 600; i++) {  // 30 min max
         auto result = ssh_.run_login(fmt::format("squeue -j {} -o '%T %N' -h", id));
+        debug_log("wait_for_node", fmt::format(
+            "poll #{} id={} rc={} out=[{}] err=[{}]",
+            i, id, result.exit_code, trim(result.out), trim(result.err)));
         if (!result.ok() || result.out.empty()) {
-            return Result<std::string>::Err("Job disappeared from queue");
+            // Transient empty replies happen right after sbatch or during slurmctld
+            // churn — tolerate several in a row before declaring the job gone.
+            if (++empty_streak < 4) {
+                debug_log("wait_for_node", fmt::format(
+                    "empty/err response (streak={}) — retrying", empty_streak));
+                sleep_ms(3000);
+                continue;
+            }
+            auto sacct = ssh_.run_login(fmt::format(
+                "sacct -j {} -o State,ExitCode,Reason -n -P 2>/dev/null | head -1", id));
+            debug_log("wait_for_node", fmt::format(
+                "sacct fallback rc={} out=[{}] err=[{}]",
+                sacct.exit_code, trim(sacct.out), trim(sacct.err)));
+            return Result<std::string>::Err(fmt::format(
+                "Job disappeared from queue (sacct: {})",
+                trim(sacct.out).empty() ? "no record" : trim(sacct.out)));
         }
+        empty_streak = 0;
 
         std::string out = trim(result.out);
         if (out.find("RUNNING") == 0) {
@@ -366,7 +408,7 @@ Result<void> Session::ensure_container(const std::string& node, StatusCallback c
         return Result<void>::Ok();
     }
 
-    if (cb) cb(fmt::format("Downloading {}...", cfg_.project.container));
+    if (cb) cb(fmt::format("Pulling {}...", cfg_.project.container));
 
     // Ensure mksquashfs is available (needed for SIF conversion)
     auto mks_result = ensure_mksquashfs(node);
@@ -375,6 +417,7 @@ Result<void> Session::ensure_container(const std::string& node, StatusCallback c
     // Pull always on compute node (large /tmp for temp files)
     std::string cache_dir = fmt::format("/tmp/{}/singularity-cache", cfg_.global.user);
     std::string tmp_dir = fmt::format("/tmp/{}/singularity-tmp", cfg_.global.user);
+    std::string pull_log = fmt::format("/tmp/{}/pull.log", cfg_.global.user);
     std::string uri = docker_uri(cfg_.project.container);
 
     // Ensure target directory exists
@@ -385,24 +428,73 @@ Result<void> Session::ensure_container(const std::string& node, StatusCallback c
         ssh_.run_compute(node, "mkdir -p " + container_dir);
     }
 
-    // Layer cache survives across pulls — re-pull only rebuilds SIF, skips download
-    // ~/.tccp/bin has mksquashfs (copied from DTN by ensure_mksquashfs)
-    auto result = ssh_.run_compute(node, fmt::format(
-        "{}; mkdir -p {} {}; "
+    // Launch pull in background so we can poll progress
+    std::string pull_cmd = fmt::format(
+        "{{ {}; mkdir -p {} {}; "
         "export PATH=~/.tccp/bin:/usr/sbin:/sbin:$PATH; "
         "APPTAINER_CACHEDIR={} APPTAINER_TMPDIR={} "
         "SINGULARITY_CACHEDIR={} SINGULARITY_TMPDIR={} "
-        "$CEXE pull --force {} {} && "
-        "rm -rf {}",
+        "$CEXE pull --force {} {}; "
+        "echo TCCP_PULL_RC:$?; }} > {} 2>&1",
         container_runtime_init(), cache_dir, tmp_dir,
         cache_dir, tmp_dir,
         cache_dir, tmp_dir,
-        sif, uri,
-        tmp_dir), 1800);
+        sif, uri, pull_log);
 
-    if (!result.ok()) {
-        std::string detail = result.err.empty() ? result.out : result.err;
-        return Result<void>::Err(fmt::format("Container pull failed: {}", detail));
+    ssh_.run_compute(node, fmt::format(
+        "rm -f {}; nohup bash -c {} </dev/null > /dev/null 2>&1 &",
+        pull_log, escape_for_ssh(pull_cmd)), 10);
+
+    // Poll log for progress every 5 seconds
+    std::string last_phase;
+    for (int i = 0; i < 360; i++) {  // 30 min max
+        sleep_ms(5000);
+
+        auto poll = ssh_.run_compute(node, fmt::format(
+            "SIZE=$(du -sh {} {} 2>/dev/null | awk '{{s=$1}} END{{print s}}'); "
+            "PHASE=$(grep -oE '(Getting image|Copying blob|Copying config|Converting OCI|Creating SIF|FATAL:.*)' {} 2>/dev/null | tail -1); "
+            "echo \"S:$SIZE\"; echo \"P:$PHASE\"; "
+            "grep 'TCCP_PULL_RC:' {} 2>/dev/null || echo RUNNING",
+            cache_dir, tmp_dir, pull_log, pull_log), 15);
+
+        // Parse poll output
+        std::string size, phase;
+        std::istringstream pss(poll.out);
+        std::string pline;
+        while (std::getline(pss, pline)) {
+            if (pline.substr(0, 2) == "S:") size = trim(pline.substr(2));
+            else if (pline.substr(0, 2) == "P:") phase = trim(pline.substr(2));
+        }
+
+        // Build progress message
+        if (cb) {
+            std::string msg;
+            if (phase.find("FATAL") != std::string::npos) {
+                // Will be caught by exit code check below
+            } else if (phase.find("Creating SIF") != std::string::npos) {
+                msg = fmt::format("Building SIF image ({})", size.empty() ? "..." : size);
+            } else if (phase.find("Converting OCI") != std::string::npos) {
+                msg = fmt::format("Converting to SIF ({})", size.empty() ? "..." : size);
+            } else if (!size.empty() && size != "0") {
+                msg = fmt::format("Downloading ({})", size);
+            }
+            if (!msg.empty() && msg != last_phase) {
+                cb(msg);
+                last_phase = msg;
+            }
+        }
+
+        // Check completion
+        if (poll.out.find("TCCP_PULL_RC:0") != std::string::npos) {
+            // Clean up tmp
+            ssh_.run_compute(node, fmt::format("rm -rf {} {}", tmp_dir, pull_log), 10);
+            break;
+        }
+        if (poll.out.find("TCCP_PULL_RC:") != std::string::npos) {
+            auto full_log = ssh_.run_compute(node, fmt::format("cat {}", pull_log), 10);
+            ssh_.run_compute(node, fmt::format("rm -f {}", pull_log), 5);
+            return Result<void>::Err(fmt::format("Container pull failed: {}", full_log.out));
+        }
     }
 
     // Verify from correct location
@@ -425,33 +517,34 @@ Result<void> Session::ensure_container(const std::string& node, StatusCallback c
 // ── mksquashfs (needed for SIF conversion) ───────────────
 
 Result<void> Session::ensure_mksquashfs(const std::string& node) {
-    // Check if mksquashfs is already available on compute node
-    auto check = ssh_.run_compute(node,
-        "command -v mksquashfs >/dev/null 2>&1 || "
-        "test -x ~/.tccp/bin/mksquashfs && echo MKS_OK || echo MKS_MISSING");
-    if (check.out.find("MKS_OK") != std::string::npos ||
-        check.out.find("MKS_MISSING") == std::string::npos) {
+    // Check if mksquashfs is already cached on NFS (persists across nodes)
+    auto cached = ssh_.run("test -x ~/.tccp/bin/mksquashfs && echo OK");
+    if (cached.out.find("OK") != std::string::npos) {
         return Result<void>::Ok();
     }
 
-    // Not on compute node — try to find it on DTN and copy to shared NFS bin
     ssh_.run("mkdir -p ~/.tccp/bin");
 
-    // Check common DTN locations
-    auto dtn_check = ssh_.run(
-        "for p in /usr/sbin/mksquashfs /sbin/mksquashfs "
-        "/usr/local/sbin/mksquashfs /usr/local/bin/mksquashfs "
-        "$(which mksquashfs 2>/dev/null); do "
-        "[ -x \"$p\" ] && echo \"MKS_FOUND:$p\" && break; done");
+    // Search compute node: native paths + modules + apptainer libexec
+    auto compute = ssh_.run_compute(node,
+        "type module &>/dev/null || . /etc/profile 2>/dev/null || true; "
+        "module load squashfs-tools 2>/dev/null || module load squashfs 2>/dev/null || true; "
+        "P=$(PATH=$PATH:/usr/sbin:/sbin command -v mksquashfs 2>/dev/null); "
+        "[ -z \"$P\" ] && P=$(find $(dirname $(command -v apptainer 2>/dev/null || echo /usr/bin/X))/.. "
+        "-name mksquashfs -type f 2>/dev/null | head -1); "
+        "[ -n \"$P\" ] && cp \"$P\" ~/.tccp/bin/mksquashfs && chmod +x ~/.tccp/bin/mksquashfs && echo CACHED");
+    if (compute.out.find("CACHED") != std::string::npos) {
+        return Result<void>::Ok();
+    }
 
-    if (dtn_check.out.find("MKS_FOUND:") != std::string::npos) {
-        auto pos = dtn_check.out.find("MKS_FOUND:");
-        std::string path = trim(dtn_check.out.substr(pos + 10));
-        ssh_.run(fmt::format("cp {} ~/.tccp/bin/mksquashfs && chmod +x ~/.tccp/bin/mksquashfs", path));
-        auto verify = ssh_.run("test -x ~/.tccp/bin/mksquashfs && echo OK");
-        if (verify.out.find("OK") != std::string::npos) {
-            return Result<void>::Ok();
-        }
+    // Search DTN: native paths + modules
+    auto dtn_find = ssh_.run(
+        "type module &>/dev/null || . /etc/profile 2>/dev/null || true; "
+        "module load squashfs-tools 2>/dev/null || module load squashfs 2>/dev/null || true; "
+        "P=$(PATH=$PATH:/usr/sbin:/sbin command -v mksquashfs 2>/dev/null); "
+        "[ -n \"$P\" ] && cp \"$P\" ~/.tccp/bin/mksquashfs && chmod +x ~/.tccp/bin/mksquashfs && echo CACHED");
+    if (dtn_find.out.find("CACHED") != std::string::npos) {
+        return Result<void>::Ok();
     }
 
     return Result<void>::Err(

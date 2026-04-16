@@ -17,3 +17,4 @@
 1.0.5|Broader mksquashfs PATH search for container pull
 1.0.6|Auto-install mksquashfs from DTN for container pull
 1.0.7|Add per-project login node override support
+1.0.8|Debug logging, sacct fallback, and tccp login command

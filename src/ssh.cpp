@@ -1,7 +1,9 @@
 #include "ssh.hpp"
+#include "debug.hpp"
 #include <fmt/format.h>
 #include <cstring>
 #include <fstream>
+#include <chrono>
 #ifndef _WIN32
 #include <sys/wait.h>
 #include <signal.h>
@@ -44,6 +46,7 @@ SSHResult SSH::run_compute(const std::string&, const std::string&, int) { return
 Result<void> SSH::tar_push(const std::string&, const fs::path&, const std::vector<std::string>&, const std::string&) { return Result<void>::Err("not supported on Windows"); }
 Result<void> SSH::tar_pull(const std::string&, const fs::path&) { return Result<void>::Err("not supported on Windows"); }
 int SSH::interactive(const std::string&, const std::string&, const std::vector<int>&) { return -1; }
+int SSH::login_shell() { return -1; }
 SSHResult SSH::exec_capture(const std::vector<std::string>&, int) { return {-1, "", "not supported on Windows"}; }
 int SSH::exec_passthrough(const std::vector<std::string>&) { return -1; }
 
@@ -255,10 +258,31 @@ int SSH::interactive(const std::string& node, const std::string& cmd,
     return exec_passthrough(args);
 }
 
+// ── Interactive login shell (DTN → login node) ───────────
+
+int SSH::login_shell() {
+    auto args = base_args(true);
+    // Inner: interactive ssh from DTN to login node with TTY + login shell.
+    std::string inner = fmt::format(
+        "exec ssh -t {} {} 'exec $SHELL -l'", SSH_OPTS, login_);
+    args.push_back(inner);
+    return exec_passthrough(args);
+}
+
 // ── Process execution ─────────────────────────────────────
 
 SSHResult SSH::exec_capture(const std::vector<std::string>& args, int timeout) {
     SSHResult result{};
+
+    auto t_start = std::chrono::steady_clock::now();
+    if (debug_enabled()) {
+        std::string joined;
+        for (size_t i = 0; i < args.size(); i++) {
+            if (i) joined += ' ';
+            joined += args[i];
+        }
+        debug_log("ssh", fmt::format("→ (timeout={}s) {}", timeout, debug_truncate(joined, 8000)));
+    }
 
     int stdout_pipe[2], stderr_pipe[2];
     if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
@@ -346,6 +370,17 @@ SSHResult SSH::exec_capture(const std::vector<std::string>& args, int timeout) {
     }
 
     result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+
+    if (debug_enabled()) {
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t_start).count();
+        debug_log("ssh", fmt::format("← rc={} ({}ms) stdout={} bytes stderr={} bytes",
+            result.exit_code, ms, result.out.size(), result.err.size()));
+        if (!result.out.empty())
+            debug_log("ssh", "  stdout: " + debug_truncate(result.out));
+        if (!result.err.empty())
+            debug_log("ssh", "  stderr: " + debug_truncate(result.err));
+    }
     return result;
 }
 

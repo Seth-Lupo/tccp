@@ -335,6 +335,15 @@ int main(int argc, char** argv) {
         std::exit(rc);
     });
 
+    // ── login ─────────────────────────────────────────────
+    auto* login_cmd = app.add_subcommand("login", "Open an interactive shell on the login node");
+    login_cmd->callback([&]() {
+        int rc = run_with_session([](Session& s) {
+            return s.login_shell();
+        });
+        std::exit(rc);
+    });
+
     // ── exec ──────────────────────────────────────────────
     std::vector<std::string> exec_args;
     auto* exec_cmd = app.add_subcommand("exec", "Run a command in the container");

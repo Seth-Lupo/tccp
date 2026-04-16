@@ -12,6 +12,7 @@ public:
 
     Result<void> start(StatusCallback cb);
     int shell();
+    int login_shell() { return ssh_.login_shell(); }
     Result<int> exec(const std::string& cmd);
     Result<void> sync_files(StatusCallback cb);
     void status();
