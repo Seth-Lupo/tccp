@@ -9,7 +9,8 @@
 
 class GitignoreParser {
 public:
-    explicit GitignoreParser(const fs::path& project_dir);
+    explicit GitignoreParser(const fs::path& project_dir,
+                             std::vector<std::string> force_includes = {});
 
     bool is_ignored(const std::string& path) const;
     bool is_ignored(const fs::path& path) const;
@@ -28,6 +29,9 @@ private:
         std::regex compiled;
     };
     std::vector<Pattern> patterns_;
+    std::vector<std::string> force_includes_;
+
+    bool is_force_included(const std::string& rel_path) const;
 
     void load_gitignore();
     void add_default_patterns();

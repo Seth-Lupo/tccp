@@ -618,15 +618,6 @@ std::string Session::singularity_cmd(const std::string& scratch, const std::stri
     std::string nv = "--nv ";
     std::string binds = fmt::format("-B {}:{}", nfs_output(), scratch + "/output");
 
-    // Bind rodata directories
-    for (const auto& rd : cfg_.project.rodata) {
-        std::string rd_clean = rd;
-        while (!rd_clean.empty() && rd_clean.back() == '/') rd_clean.pop_back();
-        binds += fmt::format(" -B {}/{rd}:{}/{rd}",
-                             fmt::format("/cluster/home/{}", cfg_.global.user), scratch,
-                             fmt::arg("rd", rd_clean));
-    }
-
     return fmt::format(
         "{}; cd {}; $CEXE exec --env \"PS1=tccp> \" --env TERM=xterm-256color {}{} {} {}",
         container_runtime_init(), scratch, nv, binds, sif_path(), inner);

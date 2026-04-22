@@ -7,10 +7,25 @@
 
 // ── GitignoreParser ───────────────────────────────────────
 
-GitignoreParser::GitignoreParser(const fs::path& project_dir)
-    : project_dir_(project_dir) {
+GitignoreParser::GitignoreParser(const fs::path& project_dir,
+                                 std::vector<std::string> force_includes)
+    : project_dir_(project_dir), force_includes_(std::move(force_includes)) {
+    for (auto& fi : force_includes_) {
+        while (!fi.empty() && fi.back() == '/') fi.pop_back();
+        std::replace(fi.begin(), fi.end(), '\\', '/');
+    }
     add_default_patterns();
     load_gitignore();
+}
+
+bool GitignoreParser::is_force_included(const std::string& rel_path) const {
+    for (const auto& fi : force_includes_) {
+        if (fi.empty()) continue;
+        if (rel_path == fi) return true;
+        if (rel_path.size() > fi.size() && rel_path.compare(0, fi.size(), fi) == 0
+            && rel_path[fi.size()] == '/') return true;
+    }
+    return false;
 }
 
 void GitignoreParser::add_pattern(const std::string& raw, bool is_negation) {
@@ -92,6 +107,10 @@ bool GitignoreParser::is_ignored(const std::string& path) const {
 }
 
 bool GitignoreParser::is_ignored(const fs::path& path) const {
+    {
+        auto rel = get_relative_path(path).generic_string();
+        if (is_force_included(rel)) return false;
+    }
     std::string rel_path = get_relative_path(path).string();
     std::replace(rel_path.begin(), rel_path.end(), '\\', '/');
 
@@ -105,6 +124,11 @@ bool GitignoreParser::is_ignored(const fs::path& path) const {
 }
 
 bool GitignoreParser::is_dir_ignored(const std::string& rel_dir) const {
+    if (is_force_included(rel_dir)) return false;
+    for (const auto& fi : force_includes_) {
+        if (fi.size() > rel_dir.size() && fi.compare(0, rel_dir.size(), rel_dir) == 0
+            && fi[rel_dir.size()] == '/') return false;
+    }
     bool ignored = false;
     for (const auto& pat : patterns_) {
         if (pat.is_negation) {
@@ -216,7 +240,7 @@ std::string GitignoreParser::glob_to_regex(const std::string& glob) {
 Sync::Sync(SSH& ssh, const Config& cfg) : ssh_(ssh), cfg_(cfg) {}
 
 std::vector<ManifestEntry> Sync::build_manifest() {
-    GitignoreParser parser(cfg_.project_dir);
+    GitignoreParser parser(cfg_.project_dir, cfg_.project.rodata);
     auto files = parser.collect_files();
 
     std::vector<ManifestEntry> manifest;
